@@ -1,0 +1,234 @@
+{
+  "header": {
+    "title": "EasyLoop",
+    "noRobot": "-- 로봇 없음 --",
+    "disconnected": "미연결",
+    "connected": "연결됨",
+    "robotManager": "로봇 설정",
+    "testMode": "테스트 모드",
+    "alarm": "알람",
+    "log": "로그",
+    "export": "내보내기",
+    "import": "가져오기",
+    "logout": "로그아웃",
+    "settings": "설정"
+  },
+  "login": {
+    "title": "EasyLoop",
+    "placeholder": "비밀번호",
+    "submit": "로그인",
+    "error": "비밀번호가 올바르지 않습니다",
+    "required": "비밀번호를 입력해주세요"
+  },
+  "eventLog": {
+    "title": "이벤트 로그",
+    "all": "전체",
+    "info": "정보",
+    "success": "성공",
+    "warning": "경고",
+    "error": "에러",
+    "clear": "지우기"
+  },
+  "tabs": {
+    "dashboard": "대시보드",
+    "ros": "ROS 제어",
+    "action": "작업",
+    "camera": "카메라",
+    "ssh": "SSH 터미널",
+    "files": "파일 전송",
+    "docking": "도킹 테스트",
+    "monitoring": "모니터링",
+    "scheduler": "미션 스케줄러"
+  },
+  "map": {
+    "title": "맵",
+    "collapse": "맵 패널 축소/확대",
+    "zoomIn": "확대",
+    "zoomOut": "축소",
+    "resetZoom": "줌 초기화",
+    "setPose": "위치 설정",
+    "navGoal": "목표점",
+    "follow": "추적",
+    "addPoi": "+ POI",
+    "slamStart": "시작",
+    "slamStop": "정지",
+    "saveMap": "저장"
+  },
+  "dashboard": {
+    "status": "상태",
+    "refresh": "새로고침",
+    "widgetConfig": "설정",
+    "workState": "작업 상태:",
+    "colorConfig": "색상 설정",
+    "recentActions": "최근 작업",
+    "clearHistory": "기록 지우기",
+    "testHistory": "테스트 기록",
+    "notifications": "알림",
+    "clearNotifications": "알림 지우기",
+    "bmsDetails": "BMS 상세"
+  },
+  "action": {
+    "sendAction": "액션 전송",
+    "targetRobot": "대상 로봇:",
+    "actionType": "액션 타입:",
+    "taskId": "작업 ID:",
+    "loop": "반복:",
+    "addToQueue": "큐에 추가",
+    "sendAll": "목표 전송",
+    "cancel": "취소",
+    "clearQueue": "큐 비우기",
+    "favorites": "즐겨찾기",
+    "saveFavorite": "+ 저장",
+    "noFavorites": "저장된 즐겨찾기 없음",
+    "presets": "파라미터 프리셋"
+  },
+  "ros": {
+    "refreshAll": "전체 새로고침",
+    "nodes": "Nodes",
+    "topics": "Topics",
+    "services": "Services",
+    "params": "Params",
+    "serviceCall": "서비스 호출",
+    "paramGetSet": "파라미터 조회/설정",
+    "topicSubscribe": "토픽 구독"
+  },
+  "ssh": {
+    "connect": "연결",
+    "disconnect": "연결 해제",
+    "passwordRequired": "SSH 비밀번호 필요"
+  },
+  "files": {
+    "browse": "찾아보기",
+    "upload": "업로드",
+    "uploadTitle": "파일 업로드",
+    "fileName": "이름",
+    "fileSize": "크기",
+    "fileModified": "수정됨",
+    "fileAction": "작업"
+  },
+  "monitoring": {
+    "title": "로봇 모니터링",
+    "noRobots": "연결된 로봇이 없습니다. \"로봇 스캔\"을 누르거나 ⚙ 설정에서 수동 추가하세요."
+  },
+  "robotManager": {
+    "title": "로봇 설정",
+    "addRobot": "수동 추가",
+    "ipAddress": "IP 주소",
+    "robotId": "로봇 ID",
+    "status": "상태",
+    "actions": "작업"
+  },
+  "bms": {
+    "title": "BMS 상세",
+    "voltage": "전압",
+    "current": "전류",
+    "soc": "SOC"
+  },
+  "cmd": {
+    "title": "빠른 명령",
+    "cameraSerial": "카메라 시리얼",
+    "checkSerial": "시리얼 확인"
+  },
+  "jog": {
+    "title": "Jog 제어",
+    "linear": "선형 (m/s):",
+    "angular": "각속도 (rad/s):",
+    "topic": "토픽:"
+  },
+  "alarm": {
+    "title": "알람 설정",
+    "bmsLow": "BMS SOC 저전압",
+    "wsError": "작업 상태 오류 감지",
+    "topicDrop": "토픽 드롭 감지",
+    "sound": "알람 소리"
+  },
+  "initSetup": {
+    "title": "초기 설정 모드",
+    "connect": "연결",
+    "disconnect": "연결 해제",
+    "load": "로드",
+    "save": "저장"
+  },
+  "scheduler": {
+    "title": "미션 스케줄러",
+    "addMission": "+ 미션 추가",
+    "clearAll": "전체 삭제",
+    "noMissions": "등록된 미션이 없습니다.",
+    "execLog": "실행 로그",
+    "noLogs": "로그 없음"
+  },
+  "settings": {
+    "title": "설정",
+    "fontScale": "글꼴 크기",
+    "colorBlind": "색맹 모드",
+    "language": "언어",
+    "touchMode": "터치 모드",
+    "touchAuto": "자동",
+    "touchOn": "항상 켜기",
+    "touchOff": "항상 끄기",
+    "darkMap": "다크 맵",
+    "breadcrumb": "궤적 표시",
+    "splitView": "분할 보기",
+    "reset": "기본값 복원",
+    "close": "닫기"
+  },
+  "contextMenu": {
+    "navigateHere": "여기로 이동",
+    "setPose": "여기에 Pose 설정",
+    "addPoi": "POI 추가",
+    "copyCoords": "좌표 복사"
+  },
+  "shortcuts": {
+    "title": "키보드 단축키",
+    "tabSwitch": "탭 전환",
+    "jogMove": "Jog 이동",
+    "jogRotate": "Jog 회전",
+    "emergencyStop": "긴급 정지",
+    "sendAction": "액션 전송",
+    "closeModal": "모달 닫기",
+    "showHelp": "이 도움말",
+    "close": "닫기",
+    "search": "검색",
+    "toggleMap": "맵 토글",
+    "fullscreen": "전체 화면",
+    "navGoal": "Nav Goal",
+    "setPose": "Pose 설정"
+  },
+  "wizard": {
+    "title": "Setup Wizard",
+    "step1Title": "로봇 연결",
+    "step1Desc": "로봇 IP와 ID를 입력하세요",
+    "step2Title": "연결 확인",
+    "step2Desc": "ROS Bridge 연결을 확인합니다",
+    "step3Title": "토픽 확인",
+    "step3Desc": "필수 토픽 수신을 확인합니다",
+    "step4Title": "맵 로드",
+    "step4Desc": "맵 데이터를 확인합니다",
+    "step5Title": "완료",
+    "step5Desc": "설정이 완료되었습니다",
+    "next": "다음",
+    "prev": "이전",
+    "finish": "완료",
+    "skip": "건너뛰기"
+  },
+  "health": {
+    "ssh": "SSH",
+    "ros": "ROS",
+    "net": "NET"
+  },
+  "toast": {
+    "copied": "클립보드에 복사됨",
+    "savedPoi": "POI 저장됨",
+    "settingsSaved": "설정 저장됨",
+    "settingsReset": "설정 초기화됨"
+  },
+  "common": {
+    "save": "저장",
+    "close": "닫기",
+    "cancel": "취소",
+    "apply": "적용",
+    "delete": "삭제",
+    "ok": "확인",
+    "clear": "지우기"
+  }
+}

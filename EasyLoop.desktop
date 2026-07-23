@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=EasyLoop
+Comment=AMR Mapping and Loop Closure Tool
+Exec=python3 /home/syscon/repo/easyloop/launcher.py
+Icon=utilities-terminal
+Terminal=false
+Categories=Development;Utility;
+StartupNotify=true

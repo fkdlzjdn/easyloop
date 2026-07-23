@@ -1,0 +1,180 @@
+{
+  "header": {
+    "title": "EasyLoop",
+    "noRobot": "-- 无机器人 --",
+    "disconnected": "未连接",
+    "connected": "已连接",
+    "robotManager": "机器人管理",
+    "testMode": "测试模式",
+    "alarm": "警报",
+    "log": "日志",
+    "export": "导出",
+    "import": "导入",
+    "logout": "登出",
+    "settings": "设置"
+  },
+  "login": {
+    "title": "EasyLoop",
+    "placeholder": "密码",
+    "submit": "登录",
+    "error": "密码不正确",
+    "required": "请输入密码"
+  },
+  "tabs": {
+    "dashboard": "仪表盘",
+    "ros": "ROS控制",
+    "action": "动作",
+    "camera": "相机",
+    "ssh": "SSH终端",
+    "files": "文件传输",
+    "docking": "对接测试",
+    "monitoring": "监控",
+    "scheduler": "任务调度器"
+  },
+  "map": {
+    "title": "地图",
+    "collapse": "折叠/展开地图面板",
+    "zoomIn": "放大",
+    "zoomOut": "缩小",
+    "resetZoom": "重置缩放",
+    "setPose": "设置姿态",
+    "navGoal": "导航目标",
+    "follow": "跟随",
+    "addPoi": "+ POI",
+    "slamStart": "开始",
+    "slamStop": "停止",
+    "saveMap": "保存"
+  },
+  "dashboard": {
+    "status": "状态",
+    "refresh": "刷新",
+    "widgetConfig": "设置",
+    "workState": "工作状态",
+    "colorConfig": "颜色设置",
+    "recentActions": "最近的动作/命令",
+    "clearHistory": "清除历史",
+    "testHistory": "测试历史",
+    "notifications": "通知",
+    "clearNotifications": "清除通知"
+  },
+  "action": {
+    "sendAction": "发送动作",
+    "targetRobot": "目标机器人:",
+    "actionType": "动作类型:",
+    "taskId": "任务ID:",
+    "loop": "循环:",
+    "addToQueue": "添加到队列",
+    "sendAll": "发送目标",
+    "cancel": "取消",
+    "clearQueue": "清空队列",
+    "favorites": "收藏夹",
+    "saveFavorite": "+ 保存",
+    "noFavorites": "没有保存的收藏夹",
+    "presets": "参数预设"
+  },
+  "ros": {
+    "refreshAll": "全部刷新",
+    "nodes": "节点",
+    "topics": "话题",
+    "services": "服务",
+    "params": "参数",
+    "serviceCall": "服务调用",
+    "paramGetSet": "参数获取/设置",
+    "topicSubscribe": "订阅话题"
+  },
+  "ssh": {
+    "connect": "连接",
+    "disconnect": "断开连接"
+  },
+  "files": {
+    "browse": "浏览",
+    "upload": "上传",
+    "fileName": "名称",
+    "fileSize": "大小",
+    "fileModified": "修改时间",
+    "fileAction": "操作"
+  },
+  "monitoring": {
+    "title": "全部机器人监控",
+    "noRobots": "没有注册的机器人。请在"机器人管理"中添加机器人。"
+  },
+  "scheduler": {
+    "title": "任务调度器",
+    "addMission": "+ 添加任务",
+    "clearAll": "全部删除",
+    "noMissions": "没有注册的任务。"
+  },
+  "settings": {
+    "title": "设置",
+    "fontScale": "字体大小",
+    "colorBlind": "色盲模式",
+    "language": "语言",
+    "touchMode": "触控模式",
+    "touchAuto": "自动",
+    "touchOn": "始终开启",
+    "touchOff": "始终关闭",
+    "darkMap": "深色地图",
+    "breadcrumb": "显示轨迹",
+    "splitView": "分屏视图",
+    "reset": "恢复默认",
+    "close": "关闭"
+  },
+  "contextMenu": {
+    "navigateHere": "导航到此处",
+    "setPose": "在此设置姿态",
+    "addPoi": "添加POI",
+    "copyCoords": "复制坐标"
+  },
+  "shortcuts": {
+    "title": "键盘快捷键",
+    "tabSwitch": "切换标签",
+    "jogMove": "点动移动",
+    "jogRotate": "点动旋转",
+    "emergencyStop": "紧急停止",
+    "sendAction": "发送动作",
+    "closeModal": "关闭模态框",
+    "showHelp": "显示帮助",
+    "close": "关闭",
+    "search": "搜索",
+    "toggleMap": "切换地图",
+    "fullscreen": "全屏",
+    "navGoal": "导航目标",
+    "setPose": "设置姿态"
+  },
+  "wizard": {
+    "title": "设置向导",
+    "step1Title": "机器人连接",
+    "step1Desc": "请输入机器人IP和ID",
+    "step2Title": "连接检查",
+    "step2Desc": "正在验证ROS Bridge连接",
+    "step3Title": "话题检查",
+    "step3Desc": "正在验证必需话题接收",
+    "step4Title": "地图加载",
+    "step4Desc": "正在验证地图数据",
+    "step5Title": "完成",
+    "step5Desc": "设置已完成",
+    "next": "下一步",
+    "prev": "上一步",
+    "finish": "完成",
+    "skip": "跳过"
+  },
+  "health": {
+    "ssh": "SSH",
+    "ros": "ROS",
+    "net": "NET"
+  },
+  "toast": {
+    "copied": "已复制到剪贴板",
+    "savedPoi": "POI已保存",
+    "settingsSaved": "设置已保存",
+    "settingsReset": "设置已重置"
+  },
+  "common": {
+    "save": "保存",
+    "close": "关闭",
+    "cancel": "取消",
+    "apply": "应用",
+    "delete": "删除",
+    "ok": "确定"
+  }
+}
