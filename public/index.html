@@ -1,0 +1,2267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EasyLoop</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css?v=20260723-action-type-codes">
+  <link rel="stylesheet" href="css/can-diagnostics.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+</head>
+<body>
+  <!-- Password Overlay -->
+  <div id="password-overlay">
+    <div id="password-box">
+      <h2 data-i18n="login.title">EasyLoop</h2>
+      <div class="role-select">
+        <label class="role-option">
+          <input type="radio" name="login-role" value="user" checked>
+          <span class="role-label">User</span>
+        </label>
+        <label class="role-option">
+          <input type="radio" name="login-role" value="engineer">
+          <span class="role-label">Engineer</span>
+        </label>
+      </div>
+      <input type="password" id="password-input" data-i18n-placeholder="login.placeholder" placeholder="Password" maxlength="10" autofocus>
+      <br>
+      <button id="password-submit" data-i18n="login.submit">Sign In</button>
+      <p id="password-error" data-i18n="login.error">Invalid password</p>
+    </div>
+  </div>
+
+  <!-- Main Content -->
+  <div id="main-content">
+    <!-- Header -->
+    <header id="header">
+      <div class="header-left">
+        <button id="btn-mobile-sidebar" class="btn btn-mobile-sidebar" title="Toggle Sidebar">☰</button>
+        <h1>EasyLoop</h1>
+        <div class="hdr-group hdr-group-robot">
+          <div class="active-robot-selector">
+            <select id="active-robot-select">
+              <option value="">-- No Robot --</option>
+            </select>
+            <button id="btn-robot-scan" class="btn btn-small btn-primary" title="로봇 검색 후 연결 대기 목록에 추가">로봇 스캔</button>
+            <button id="btn-robot-manager" class="btn btn-small btn-robot-settings" title="로봇 및 네트워크 설정" aria-label="로봇 설정">⚙</button>
+            <span id="active-robot-status" class="status" data-i18n="header.disconnected">Disconnected</span>
+            <span id="robot-model-name" class="robot-model-name" title="Robot Model"></span>
+            <span id="ros-latency" class="ros-latency" title="ROS Bridge Latency">--</span>
+            <button id="btn-auto-reconnect" class="btn btn-mini btn-auto-reconnect" title="Auto Reconnect: ON">🔄</button>
+          </div>
+          <div class="header-work-state" id="header-work-state">
+            <div class="header-ws-bar" id="header-ws-bar"></div>
+            <span class="header-ws-text" id="header-ws-text">--</span>
+          </div>
+          <div class="bms-gauge-container">
+            <div class="bms-gauge">
+              <div class="bms-gauge-fill" id="bms-gauge-fill"></div>
+              <span class="bms-gauge-text" id="bms-gauge-text">--%</span>
+              <span class="bms-charging-icon" id="bms-charging-icon" title="Charging">&#9889;</span>
+            </div>
+            <span id="bms-time-estimate" class="bms-time-estimate" title="배터리 시간 예측">예측 대기</span>
+            <button id="btn-bms-detail" class="btn btn-mini" data-i18n-title="dashboard.bmsDetails" title="BMS Details">Detail</button>
+          </div>
+        </div>
+        <div class="hdr-sep"></div>
+        <div class="hdr-group hdr-group-controls">
+          <div class="op-mode-toggle" id="op-mode-toggle">
+            <button id="btn-op-mode" class="btn btn-small btn-op-mode manual" title="Toggle Operation Mode">MANUAL</button>
+          </div>
+          <div id="multi-robot-btns" class="multi-robot-btns hidden">
+            <!-- Fleet/Cmp/Prop: disabled, pending reimplementation -->
+          </div>
+          <button id="btn-jog-toggle" class="btn btn-small" title="Jog Control">Jog</button>
+          <button id="btn-cmd-toggle" class="btn btn-small" title="Quick Commands">CMD</button>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="test-mode-chip" id="test-mode-chip">
+          <span class="test-mode-label">Test</span>
+          <span id="test-mode-status" class="test-mode-status">OFF</span>
+          <button id="btn-test-mode" class="btn btn-ghost" title="Toggle Test Mode">Toggle</button>
+        </div>
+        <button id="btn-theme-toggle" class="btn btn-theme" title="Toggle Theme">
+          <span class="theme-icon">🌙</span>
+          <span class="theme-text">Dark</span>
+        </button>
+        <div class="hdr-sep"></div>
+        <div class="hdr-more-wrap">
+          <button id="btn-hdr-more" class="btn btn-small btn-hdr-more" title="More">···</button>
+          <div class="hdr-more-menu" id="hdr-more-menu">
+            <div class="hdr-menu-section">
+              <span class="hdr-menu-label">Font Size</span>
+              <div class="hdr-menu-font-btns">
+                <button class="btn btn-small btn-font-size" data-size="small" title="Small">S</button>
+                <button class="btn btn-small btn-font-size active" data-size="normal" title="Normal">M</button>
+                <button class="btn btn-small btn-font-size" data-size="large" title="Large">L</button>
+                <button class="btn btn-small btn-font-size" data-size="xlarge" title="Extra Large">XL</button>
+              </div>
+            </div>
+            <div class="hdr-menu-divider"></div>
+            <button id="btn-init-setup" class="hdr-menu-item btn-init-setup" title="Initial Setup Mode">Setup</button>
+            <button id="btn-alarm-settings" class="hdr-menu-item" title="Alarm Settings" data-i18n="header.alarm">Alarm</button>
+            <button id="btn-event-log" class="hdr-menu-item" title="Event Log" data-i18n="header.log">Log</button>
+            <button id="btn-error-codes" class="hdr-menu-item" title="Error Code Database">Error DB</button>
+            <button id="btn-health-check" class="hdr-menu-item" title="Health Check">Health Check</button>
+            <button id="btn-diagnostic" class="hdr-menu-item" title="Diagnostic Tree">Diagnose</button>
+            <button id="btn-incident-report" class="hdr-menu-item" title="Incident Report">Report</button>
+            <button id="btn-audit-trail" class="hdr-menu-item" title="Audit Trail">Audit</button>
+            <button id="btn-session-export" class="hdr-menu-item" title="Export Session" data-i18n="header.export">Export</button>
+            <button id="btn-session-import" class="hdr-menu-item" title="Import Session" data-i18n="header.import">Import</button>
+            <input type="file" id="session-import-file" accept=".json" style="display:none;">
+          </div>
+        </div>
+        <button id="btn-logout" class="btn btn-small">Logout</button>
+      </div>
+    </header>
+
+    <!-- Event Log Slide Panel -->
+    <div id="event-log-panel" class="event-log-panel hidden">
+      <div class="event-log-header">
+        <span class="event-log-title" data-i18n="eventLog.title">Event Log</span>
+        <div class="event-log-actions">
+          <select id="event-log-filter" class="btn btn-small">
+            <option value="all" data-i18n="eventLog.all">All</option>
+            <option value="info" data-i18n="eventLog.info">Info</option>
+            <option value="success" data-i18n="eventLog.success">Success</option>
+            <option value="warning" data-i18n="eventLog.warning">Warning</option>
+            <option value="error" data-i18n="eventLog.error">Error</option>
+          </select>
+          <button id="btn-event-log-clear" class="btn btn-small btn-danger" data-i18n="eventLog.clear">Clear</button>
+          <button id="btn-event-log-close" class="btn btn-small">X</button>
+        </div>
+      </div>
+      <div id="event-log-list" class="event-log-list"></div>
+    </div>
+
+    <!-- Main Layout: Map (left) + Tabs (right) -->
+    <div id="main-layout">
+      <!-- Persistent Map Panel (Left) -->
+      <div id="panel-map">
+        <div class="map-tab-section">
+          <div class="map-panel-header">
+            <span class="map-panel-title" data-i18n="map.title">Map</span>
+            <button id="btn-map-panel-collapse" class="btn btn-ghost btn-small" data-i18n-title="map.collapse" title="Collapse/Expand Map Panel">◀</button>
+          </div>
+          <div class="map-controls">
+            <label><input type="checkbox" id="chk-map"> Map</label>
+            <label><input type="checkbox" id="chk-robot-pose"> Robot</label>
+            <select id="robot-icon-style" class="robot-icon-select" title="Robot Icon Style">
+              <option value="footprint">Simple</option>
+              <option value="amr">AMR</option>
+              <option value="turtle">Turtle</option>
+            </select>
+            <label><input type="checkbox" id="chk-lidar"> LiDAR</label>
+            <input type="color" id="lidar-color" value="#ff3333" title="LiDAR Color" class="lidar-color-picker">
+            <label class="lidar-size-label">Size:
+              <input type="range" id="lidar-point-size" min="1" max="8" step="0.5" value="2.5" class="lidar-size-slider">
+            </label>
+            <span id="map-info"></span>
+          </div>
+          <div class="map-controls map-controls-row2">
+            <!-- View: Zoom & Rotation -->
+            <div class="map-btn-group">
+              <span class="map-group-label">View</span>
+              <div class="map-zoom-controls">
+                <button id="btn-map-zoom-in" class="btn btn-small" title="Zoom In">+</button>
+                <span id="map-zoom-value">100%</span>
+                <button id="btn-map-zoom-out" class="btn btn-small" title="Zoom Out">-</button>
+                <button id="btn-map-zoom-reset" class="btn btn-small" title="Reset Zoom">1:1</button>
+              </div>
+              <div class="map-rotation-controls">
+                <button id="btn-map-rotate-left" class="btn btn-small" title="Rotate Left 90°">↺</button>
+                <span id="map-rotation-value">0°</span>
+                <button id="btn-map-rotate-right" class="btn btn-small" title="Rotate Right 90°">↻</button>
+                <button id="btn-map-rotate-reset" class="btn btn-small" title="Reset Rotation">R</button>
+                <button id="btn-map-auto-align" class="btn btn-small" title="Auto-align map (detect angle and straighten)">Auto</button>
+              </div>
+              <button id="btn-map-fullscreen" class="btn btn-small" title="Map Fullscreen (ESC to close)">⤢</button>
+              <button id="btn-follow-robot" class="btn btn-small" title="Auto-follow robot position">ViewRobot</button>
+            </div>
+
+            <!-- Robot: Pose & Navigation -->
+            <div class="map-btn-group">
+              <span class="map-group-label">Robot</span>
+              <button id="btn-set-pose-mode" class="btn btn-small" title="Click on map to set initial pose">InitPose</button>
+              <button id="btn-cov-reposition" class="btn btn-small" title="Covariance Reposition">COV</button>
+              <button id="btn-nav-goal-mode" class="btn btn-small" title="Click on map to set navigation goal">NavGoal</button>
+              <button id="btn-jog-toggle-map" class="btn btn-small jog-toggle-fullscreen" title="Jog Control">Jog</button>
+            </div>
+
+
+          </div>
+          <!-- Mapping Controls -->
+          <div class="map-mapping-controls">
+            <div class="mapping-group">
+              <span class="mapping-group-label">SLAM:</span>
+              <button id="btn-slam-start" class="btn btn-small btn-primary" title="Start SLAM mapping">Start</button>
+              <button id="btn-slam-stop" class="btn btn-small btn-danger" title="Stop SLAM mapping" disabled>Stop</button>
+              <span id="slam-status" class="mapping-status">Off</span>
+            </div>
+            <div class="mapping-group">
+              <span class="mapping-group-label">Lifelong:</span>
+              <button id="btn-lifelong-start" class="btn btn-small btn-primary" title="Start Lifelong mapping">Start</button>
+              <button id="btn-lifelong-stop" class="btn btn-small btn-danger" title="Stop Lifelong mapping" disabled>Stop</button>
+              <span id="lifelong-status" class="mapping-status">Off</span>
+            </div>
+            <div class="mapping-group">
+              <button id="btn-map-edit-toggle" class="btn btn-small" title="Map Edit Mode">Edit Map</button>
+            </div>
+            <div class="mapping-group">
+              <button id="btn-lidar-align" class="btn btn-small" title="LiDAR Alignment Check">LiDAR Align</button>
+            </div>
+          </div>
+          <!-- Map Edit Controls -->
+          <div id="map-edit-controls" class="map-edit-controls" style="display: none;">
+            <div class="map-edit-tools">
+              <span class="edit-group-label">Tool:</span>
+              <button class="btn btn-small btn-edit-tool active" data-tool="obstacle" title="Obstacle (black) [1]">Obstacle</button>
+              <button class="btn btn-small btn-edit-tool" data-tool="free" title="Free space (white) [2]">Free</button>
+              <button class="btn btn-small btn-edit-tool" data-tool="unknown" title="Unknown area (gray) [3]">Unknown</button>
+              <span class="edit-group-divider">|</span>
+              <button class="btn btn-small btn-edit-tool btn-scan-fill" data-tool="scan-fill" title="Drag area → clear + fill from LiDAR [4]">Scan Fill</button>
+              <button class="btn btn-small btn-edit-tool btn-move-tool" data-tool="move" title="Move/pan map [5]">&#9995;</button>
+            </div>
+            <div class="map-edit-brush">
+              <span class="edit-group-label">Brush:</span>
+              <button id="btn-brush-shape" class="btn btn-small btn-brush-shape" title="Brush: circle [Q]">●</button>
+              <input type="range" id="map-edit-brush-size" min="1" max="30" value="3" class="brush-slider">
+              <span id="map-edit-brush-value">3</span>px
+            </div>
+            <div class="map-edit-actions">
+              <span class="raycast-group">
+                <button id="btn-map-edit-raycast" class="btn btn-small btn-raycast" title="One-click: trace LiDAR rays">Raycast</button>
+                <select id="raycast-mode" class="raycast-select" title="Raycast mode">
+                  <option value="both">Draw+Clear</option>
+                  <option value="draw">Draw Only</option>
+                  <option value="clear">Clear Only</option>
+                </select>
+                <input type="number" id="raycast-max-range" class="raycast-range-input" value="10" min="1" max="30" step="1" title="Max range (m)">
+                <span class="raycast-range-unit">m</span>
+              </span>
+              <button id="btn-map-edit-undo" class="btn btn-small" title="Undo (Ctrl+Z)">Undo</button>
+              <button id="btn-map-edit-reset" class="btn btn-small" title="Restore original">Reset</button>
+              <button id="btn-map-edit-save" class="btn btn-small btn-primary" title="Save edited map">Save</button>
+              <button id="btn-map-edit-cancel" class="btn btn-small btn-danger" title="Cancel editing">Cancel</button>
+              <button id="btn-map-backup" class="btn btn-small" title="Map Backups">Maps</button>
+            </div>
+            <div class="map-edit-options">
+              <label><input type="checkbox" id="map-edit-apply-after-save" checked> Apply after save</label>
+              <span id="map-edit-status" class="mapping-status"></span>
+            </div>
+            <div class="map-edit-shortcuts">
+              <span class="shortcut-hint">1/2/3/4:Tool | Q:Shape | [ ]:Size | Shift+Click:Line | Space:Pan | RightClick:Pan | Ctrl+Z:Undo</span>
+            </div>
+          </div>
+          <!-- No-Go Zone Panel -->
+          <div id="nogo-panel" class="nogo-panel hidden">
+            <div class="nogo-header">
+              <span class="nogo-title">No-Go Zones</span>
+              <button id="btn-nogo-close" class="btn btn-tiny">&times;</button>
+            </div>
+            <div class="nogo-actions">
+              <button id="btn-nogo-new" class="btn btn-small btn-primary">+ New Zone</button>
+              <button id="btn-nogo-delete" class="btn btn-small btn-danger">Delete</button>
+              <button id="btn-nogo-clear" class="btn btn-small">Clear All</button>
+            </div>
+            <div id="nogo-zone-list" class="nogo-zone-list"></div>
+            <div class="nogo-footer">
+              <button id="btn-nogo-export" class="btn btn-small">Export</button>
+              <button id="btn-nogo-import" class="btn btn-small">Import</button>
+            </div>
+            <div class="nogo-help">
+              Click points to draw zone, right-click/dblclick to finish
+            </div>
+          </div>
+          <div id="robot-pose-info" class="robot-pose-info">
+            <span>X: <b id="robot-pos-x">-</b></span>
+            <span>Y: <b id="robot-pos-y">-</b></span>
+            <span>Yaw: <b id="robot-pos-yaw">-</b></span>
+          </div>
+          <div class="map-canvas-container">
+            <canvas id="map-canvas" width="600" height="600"></canvas>
+            <div id="map-correction-badge" class="map-correction-badge waiting" title="실시간 /{robotId}/map_correction">
+              <span id="map-correction-level">● Map correction</span>
+              <span id="map-correction-value">수신 대기</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Map expand button (visible when map panel is collapsed) -->
+      <button id="btn-map-panel-expand" class="map-panel-expand-btn hidden" title="Expand Map Panel">▶<br>M<br>A<br>P</button>
+
+      <!-- Tabs Panel (Right) -->
+      <div id="panel-main">
+        <!-- Split View Tab Selector -->
+        <div class="split-tab-selector" id="split-tab-selector">
+          <label>2nd Tab:</label>
+          <select id="split-tab-select">
+            <option value="tab-dashboard">Dashboard</option>
+            <option value="tab-fleet-control">관제</option>
+            <option value="tab-ros">ROS Control</option>
+            <option value="tab-action">Tasks</option>
+            <option value="tab-camera">Camera</option>
+            <option value="tab-ssh">Terminal</option>
+            <option value="tab-monitoring" selected>Monitor</option>
+            <option value="tab-diagnostics">Diagnostics</option>
+          </select>
+        </div>
+        <!-- Tabs -->
+        <div class="tabs">
+          <button class="tab-btn active" data-tab="tab-dashboard" data-i18n="tabs.dashboard">Dashboard</button>
+          <button class="tab-btn" data-tab="tab-fleet-control">관제</button>
+          <button class="tab-btn" data-tab="tab-ros" data-i18n="tabs.ros">ROS Control</button>
+          <button class="tab-btn" data-tab="tab-action" data-i18n="tabs.action">Tasks</button>
+          <button class="tab-btn" data-tab="tab-camera" data-i18n="tabs.camera">Camera</button>
+          <button class="tab-btn" data-tab="tab-ssh" data-i18n="tabs.ssh">Terminal</button>
+          <button class="tab-btn" data-tab="tab-batch">Batch</button>
+          <button class="tab-btn" data-tab="tab-files" data-i18n="tabs.files">Files</button>
+          <button class="tab-btn" data-tab="tab-docking" data-i18n="tabs.docking">Docking</button>
+          <button class="tab-btn" data-tab="tab-monitoring" data-i18n="tabs.monitoring">Monitor</button>
+          <button class="tab-btn" data-tab="tab-scheduler" data-i18n="tabs.scheduler">Scheduler</button>
+          <button class="tab-btn" data-tab="tab-diagnostics">Diagnostics</button>
+          <button class="tab-btn" data-tab="tab-can-diag" data-role="engineer">
+            <span class="tab-icon">🔧</span>
+            <span class="tab-label">Motor Diag</span>
+          </button>
+        </div>
+
+        <!-- Tab Content: Fleet Control -->
+        <div class="tab-content" id="tab-fleet-control">
+          <div class="fleet-control-section">
+            <div class="fleet-control-header">
+              <div>
+                <h4>로봇 관제</h4>
+                <span id="fleet-control-summary" class="fleet-control-summary">연결된 로봇을 기다리는 중...</span>
+              </div>
+              <div class="fleet-header-tools">
+                <label class="fleet-header-icon-size">
+                  <span>로봇 아이콘</span>
+                  <input id="fleet-icon-size" class="fleet-icon-size-slider"
+                         type="range" min="24" max="72" step="2" value="40">
+                  <strong id="fleet-icon-size-value">40 px</strong>
+                </label>
+                <button id="btn-fleet-map-refresh" class="btn btn-small">맵 다시 확인</button>
+              </div>
+            </div>
+            <div id="fleet-map-warning" class="fleet-map-warning hidden"></div>
+            <div class="fleet-control-body">
+              <div class="fleet-control-map-column">
+                <div class="fleet-control-map-wrap">
+                  <canvas id="fleet-control-map" width="1200" height="700"></canvas>
+                  <div id="fleet-control-empty" class="fleet-control-empty">연결된 로봇이 없습니다.</div>
+                </div>
+                <div id="fleet-control-legend" class="fleet-control-legend"></div>
+              </div>
+              <aside class="fleet-side-panel">
+                <section class="fleet-side-section fleet-selected-robot">
+                  <div class="fleet-side-title">선택된 로봇</div>
+                  <div id="fleet-task-robot-card" class="fleet-selected-card empty">
+                    <span class="fleet-selected-indicator">●</span>
+                    <div>
+                      <strong id="fleet-task-robot">로봇을 클릭하세요</strong>
+                      <small id="fleet-task-robot-detail">맵 아이콘 또는 하단 목록에서 선택</small>
+                    </div>
+                    <span id="fleet-task-selected-label" class="fleet-selected-label">미선택</span>
+                  </div>
+                </section>
+
+                <section class="fleet-side-section fleet-task-section">
+                  <div class="fleet-side-title">
+                    <span>저장된 Task</span>
+                    <button id="btn-fleet-task-refresh" class="btn btn-mini" title="Task 목록 새로고침">↻</button>
+                  </div>
+                  <input id="fleet-task-filter" class="fleet-task-input"
+                         placeholder="Task 검색" autocomplete="off">
+                  <div id="fleet-task-list" class="fleet-task-list">
+                    <div class="fleet-task-empty">저장된 Task가 없습니다.</div>
+                  </div>
+                  <div id="fleet-task-detail" class="task-detail-view compact">
+                    Task를 누르면 Action과 파라미터가 표시됩니다.
+                  </div>
+                </section>
+
+                <section class="fleet-side-section fleet-task-actions">
+                  <div class="fleet-task-selected-name">
+                    실행 Task <strong id="fleet-task-selected-name">선택 안 됨</strong>
+                  </div>
+                  <label class="fleet-task-loop">반복
+                    <input id="fleet-task-loop" type="number" min="0" max="9999" value="1" title="0 = 무한 반복">
+                  </label>
+                  <div class="fleet-task-buttons">
+                    <button id="btn-fleet-task-run" class="btn btn-small btn-primary" disabled>Task 실행</button>
+                    <button id="btn-fleet-task-cancel" class="btn btn-small btn-danger" disabled>실행 취소</button>
+                  </div>
+                  <div id="fleet-task-result" class="fleet-task-result">
+                    로봇과 Task를 선택하세요.
+                  </div>
+                </section>
+              </aside>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab Content: Dashboard -->
+        <div class="tab-content active" id="tab-dashboard">
+          <div class="dashboard-header">
+            <h4 data-i18n="dashboard.status">Status</h4>
+            <div class="dashboard-actions">
+              <button id="btn-export-logs-csv" class="btn btn-small" title="Export logs to CSV">CSV</button>
+              <button id="btn-widget-config" class="btn btn-small" data-i18n="dashboard.widgetConfig" title="Widget Settings">Settings</button>
+            </div>
+          </div>
+          <!-- Work State Section -->
+          <div class="work-state-section" data-widget="workstate">
+            <div class="work-state-display">
+              <div class="work-state-bar-container">
+                <div class="work-state-bar" id="work-state-bar"></div>
+              </div>
+              <div class="work-state-info">
+                <span class="work-state-label" data-i18n="dashboard.workState">Work State:</span>
+                <span class="work-state-value" id="work-state-value">--</span>
+              </div>
+            </div>
+            <div class="work-state-color-config">
+              <button id="btn-work-state-config" class="btn btn-small">Colors</button>
+              <div id="work-state-config-panel" class="work-state-config-panel" style="display:none;">
+                <h5>State Color Mapping</h5>
+                <div id="work-state-color-list" class="work-state-color-list"></div>
+                <button id="btn-work-state-save-config" class="btn btn-small">Save</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Work State Timeline -->
+          <div class="work-state-timeline-section" data-widget="timeline">
+            <div class="timeline-header">
+              <span class="timeline-title">Work State Timeline</span>
+              <span id="timeline-range" class="timeline-range">Last 10 min</span>
+            </div>
+            <canvas id="work-state-timeline" width="800" height="40"></canvas>
+          </div>
+
+          <!-- BMS Trend Graph -->
+          <div class="bms-trend-section" data-widget="bmstrend">
+            <div class="bms-trend-header">
+              <span class="bms-trend-title">BMS Trend</span>
+              <select id="bms-trend-metric" class="btn btn-small">
+                <option value="soc">SOC (%)</option>
+                <option value="voltage">Voltage (V)</option>
+                <option value="current">Current (A)</option>
+              </select>
+              <span id="bms-trend-range" class="timeline-range">Last 10 min</span>
+              <button id="btn-export-bms-csv" class="btn btn-mini" title="Export BMS to CSV">CSV</button>
+            </div>
+            <canvas id="bms-trend-canvas" width="800" height="120"></canvas>
+          </div>
+
+          <!-- Velocity Monitor Graph (3-axis) -->
+          <div class="vel-monitor-section" data-widget="velmonitor">
+            <div class="vel-monitor-header">
+              <span class="vel-monitor-title">Velocity Monitor</span>
+              <label class="vel-monitor-topic-label">Feed source:</label>
+              <select id="vel-monitor-feed-source" class="btn btn-small">
+                <option value="odom" selected>odom (Odometry twist)</option>
+                <option value="feed_vel">feed_vel (Twist)</option>
+                <option value="cmd_vel_out">cmd_vel_out (Twist)</option>
+                <option value="custom">Custom topic...</option>
+              </select>
+              <span id="vel-monitor-custom-row" style="display:none;">
+                <input type="text" id="vel-monitor-custom-topic" value="/feed_vel" class="vel-monitor-topic-input" placeholder="/topic_name">
+              </span>
+              <span id="vel-monitor-elapsed" class="vel-monitor-elapsed"></span>
+              <button id="btn-vel-monitor-toggle" class="btn btn-small btn-primary">Start</button>
+              <button id="btn-vel-monitor-csv" class="btn btn-mini" title="Export CSV">CSV</button>
+            </div>
+            <div id="vel-monitor-graph-area" style="display:none;">
+              <span id="vel-monitor-status" class="vel-monitor-status"></span>
+              <div class="vel-monitor-canvases">
+                <canvas id="vel-canvas-0" width="800" height="100"></canvas>
+                <canvas id="vel-canvas-1" width="800" height="100"></canvas>
+                <canvas id="vel-canvas-2" width="800" height="100"></canvas>
+              </div>
+            </div>
+            <div id="vel-monitor-report" class="vel-monitor-report" style="display:none;"></div>
+          </div>
+
+          <!-- Topic Hz Monitor -->
+          <div class="topic-hz-section" data-widget="topichz">
+            <div class="topic-hz-header">
+              <span class="topic-hz-title">Topic Hz Monitor</span>
+            </div>
+            <div id="topic-hz-grid" class="topic-hz-grid">
+              <div class="topic-hz-item" id="hz-bms">
+                <span class="hz-label">BMS</span>
+                <span class="hz-value" id="hz-bms-val">-- Hz</span>
+              </div>
+              <div class="topic-hz-item" id="hz-workstate">
+                <span class="hz-label">WorkState</span>
+                <span class="hz-value" id="hz-workstate-val">-- Hz</span>
+              </div>
+              <div class="topic-hz-item" id="hz-pose">
+                <span class="hz-label">Pose</span>
+                <span class="hz-value" id="hz-pose-val">-- Hz</span>
+              </div>
+              <div class="topic-hz-item" id="hz-map">
+                <span class="hz-label">Map</span>
+                <span class="hz-value" id="hz-map-val">-- Hz</span>
+              </div>
+              <div class="topic-hz-item" id="hz-lidar">
+                <span class="hz-label">LiDAR</span>
+                <span class="hz-value" id="hz-lidar-val">-- Hz</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Integration Test -->
+          <div class="integ-test-section" data-widget="integtest">
+            <div class="integ-test-header">
+              <span class="integ-test-title">Integration Test</span>
+              <button id="btn-integ-test" class="btn btn-small btn-primary">Run Test</button>
+              <button id="btn-integ-report" class="btn btn-small" style="display:none;">Save Report</button>
+              <span id="integ-test-status" class="integ-test-status"></span>
+            </div>
+            <div id="integ-test-progress" class="integ-test-progress" style="display:none;">
+              <div class="integ-test-bar"><div id="integ-test-bar-fill" class="integ-test-bar-fill"></div></div>
+              <span id="integ-test-step" class="integ-test-step"></span>
+            </div>
+            <div id="integ-test-results" class="integ-test-results"></div>
+          </div>
+
+          <!-- Setup Checklist -->
+          <div class="setup-checklist-section" data-widget="checklist">
+            <div class="setup-checklist-header">
+              <span class="setup-checklist-title">Setup Checklist</span>
+              <button id="btn-run-checklist" class="btn btn-small btn-primary">Run Check</button>
+              <span id="checklist-summary" class="checklist-summary"></span>
+            </div>
+            <div id="checklist-items" class="checklist-items"></div>
+          </div>
+
+          <!-- Connection Timeline -->
+          <div class="conn-timeline-section" data-widget="conn-timeline">
+            <div class="conn-timeline-header">
+              <span class="conn-timeline-title">Connection Timeline</span>
+              <button id="btn-clear-conn-timeline" class="btn btn-small btn-danger">Clear</button>
+            </div>
+            <div id="conn-timeline-list" class="conn-timeline-list">
+              <span class="conn-timeline-empty">No events</span>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Tab Content: ROS Info -->
+        <div class="tab-content" id="tab-ros">
+          <!-- ROS Info -->
+          <div class="ros-info-section">
+            <div class="ros-info-header">
+              <button id="btn-refresh-ros-info" class="btn btn-small" data-i18n="ros.refreshAll">Refresh All</button>
+              <button id="btn-rosbag" class="btn btn-small" title="Rosbag Control">Rosbag</button>
+              <button id="btn-param-tuning" class="btn btn-small" title="Parameter Tuning">Params</button>
+              <button id="btn-perf-profiler" class="btn btn-small" title="Performance Profiler">Perf</button>
+            </div>
+            <!-- ROS Favorites -->
+          <div class="ros-favorites-section" id="ros-favorites-section">
+            <div class="ros-favorites-header">
+              <span class="ros-favorites-title">Pinned</span>
+              <button id="btn-ros-fav-clear" class="btn-mini">Clear</button>
+            </div>
+            <div id="ros-favorites-list" class="ros-favorites-list">
+              <span class="ros-fav-empty">No pinned items</span>
+            </div>
+          </div>
+          <div class="ros-info-grid">
+              <div class="ros-info-box">
+                <h4>Nodes <span class="ros-info-count" id="ros-nodes-count"></span> <button class="btn-mini" data-refresh="nodes">R</button> <button class="btn-mini btn-danger" id="btn-node-restart" title="Kill selected node">Kill</button></h4>
+                <input type="text" class="ros-info-search" id="ros-nodes-search" placeholder="Search nodes..." data-target="ros-nodes">
+                <select id="ros-nodes" size="10"></select>
+                <p class="ros-info-hint">Double-click: rosnode info</p>
+              </div>
+              <div class="ros-info-box">
+                <h4>Topics <span class="ros-info-count" id="ros-topics-count"></span> <button class="btn-mini" data-refresh="topics">R</button></h4>
+                <input type="text" class="ros-info-search" id="ros-topics-search" placeholder="Search topics..." data-target="ros-topics">
+                <select id="ros-topics" size="10"></select>
+                <div class="ros-info-cmd-row">
+                  <select id="ros-topic-cmd" class="ros-info-cmd-select">
+                    <option value="echo">echo (subscribe)</option>
+                    <option value="info">info</option>
+                    <option value="hz">hz</option>
+                    <option value="bw">bw</option>
+                    <option value="type">type</option>
+                    <option value="show">show (msg definition)</option>
+                  </select>
+                  <button id="btn-msg-type-browser" class="btn btn-mini">📋 Browse Types</button>
+                  <p class="ros-info-hint">Double-click: Execute command</p>
+                </div>
+              </div>
+              <div class="ros-info-box">
+                <h4>Services <span class="ros-info-count" id="ros-services-count"></span> <button class="btn-mini" data-refresh="services">R</button></h4>
+                <input type="text" class="ros-info-search" id="ros-services-search" placeholder="Search services..." data-target="ros-services">
+                <select id="ros-services" size="10"></select>
+                <p class="ros-info-hint">Double-click: Prepare service call</p>
+              </div>
+              <div class="ros-info-box">
+                <h4>Params <span class="ros-info-count" id="ros-params-count"></span> <button class="btn-mini" data-refresh="params">R</button></h4>
+                <input type="text" class="ros-info-search" id="ros-params-search" placeholder="Search params..." data-target="ros-params">
+                <select id="ros-params" size="10"></select>
+                <p class="ros-info-hint">Double-click: Get value</p>
+              </div>
+            </div>
+            <!-- ROS Info Result -->
+            <div class="ros-introspect-result" id="ros-introspect-result" style="display:none;">
+              <div class="ros-introspect-result-header">
+                <h5 id="ros-introspect-result-title">Result</h5>
+                <button id="btn-introspect-close" class="btn-mini">Close</button>
+              </div>
+              <pre id="ros-introspect-result-content"></pre>
+            </div>
+          </div>
+
+          <!-- Service Call -->
+          <div class="ros-control-box">
+            <h4 data-i18n="ros.serviceCall">Service Call</h4>
+            <input type="text" id="service-name" placeholder="Service name">
+            <textarea id="service-args" placeholder='Request params (JSON): {"key": "value"}'></textarea>
+            <button id="btn-service-call" class="btn btn-primary">Call Service</button>
+            <pre id="service-result"></pre>
+          </div>
+
+          <!-- Param Get/Set -->
+          <div class="ros-control-box">
+            <h4 data-i18n="ros.paramGetSet">Parameter Get/Set</h4>
+            <input type="text" id="param-name" placeholder="Parameter Name">
+            <input type="text" id="param-value" placeholder="Value">
+            <button id="btn-param-get" class="btn">Get</button>
+            <button id="btn-param-set" class="btn btn-primary">Set</button>
+            <pre id="param-result"></pre>
+          </div>
+
+          <!-- Topic Subscribe -->
+          <div class="ros-control-box">
+            <h4 data-i18n="ros.topicSubscribe">Topic Subscribe</h4>
+            <input type="text" id="topic-name" placeholder="Topic name">
+            <input type="text" id="topic-type" placeholder="Message type">
+            <div class="topic-filter-row">
+              <input type="text" id="topic-filter" placeholder="Filter (e.g., .data, .pose.position.x)" title="JSONPath-like filter">
+              <input type="number" id="topic-throttle" placeholder="Hz" min="1" max="100" value="10" style="width:60px" title="Max update rate">
+            </div>
+            <div class="topic-quick-presets">
+              <div class="topic-quick-header">
+                <span class="topic-quick-title">Quick Monitor</span>
+                <span class="topic-quick-hint">활성 로봇 기준, 다시 누르면 해제</span>
+              </div>
+              <div class="topic-quick-group">
+                <span class="topic-quick-group-label">LiDAR</span>
+                <button class="btn btn-small topic-quick-btn" data-topic-template="/{rid}/scan_1" data-type="sensor_msgs/LaserScan" data-hz="2" data-display="laserscan">scan_1</button>
+                <button class="btn btn-small topic-quick-btn" data-topic-template="/{rid}/scan_2" data-type="sensor_msgs/LaserScan" data-hz="2" data-display="laserscan">scan_2</button>
+              </div>
+              <div class="topic-quick-group">
+                <span class="topic-quick-group-label">주행</span>
+                <button class="btn btn-small topic-quick-btn" data-topic-template="/{rid}/robot_state" data-type="syscon_msgs/RobotState" data-hz="5" data-display="robot-state">robot_state</button>
+                <button class="btn btn-small topic-quick-btn" data-topic-template="/{rid}/odom" data-type="nav_msgs/Odometry" data-hz="5" data-display="odom">odom</button>
+                <button class="btn btn-small topic-quick-btn" data-topic-template="/{rid}/amcl_pose" data-type="geometry_msgs/PoseWithCovarianceStamped" data-hz="5" data-display="pose">amcl_pose</button>
+                <button class="btn btn-small topic-quick-btn" data-topic-template="/{rid}/cmd_vel" data-type="geometry_msgs/Twist" data-hz="10" data-display="twist">cmd_vel</button>
+                <button class="btn btn-small topic-quick-btn" data-topic-template="/{rid}/feed_vel" data-type="geometry_msgs/Twist" data-hz="10" data-display="twist">feed_vel</button>
+              </div>
+              <div class="topic-quick-group">
+                <span class="topic-quick-group-label">도킹</span>
+                <button class="btn btn-small topic-quick-btn" data-topic-template="/{rid}/dock_pose" data-type="geometry_msgs/PoseStamped" data-hz="5" data-display="pose">dock_pose</button>
+                <button class="btn btn-small topic-quick-btn" data-topic-template="/{rid}/docking_state" data-type="std_msgs/Int8MultiArray" data-hz="5" data-display="int-array">docking_state</button>
+                <button class="btn btn-small topic-quick-btn" data-topic-template="/{rid}/docking/cmd_vel" data-type="geometry_msgs/Twist" data-hz="10" data-display="twist">docking/cmd_vel</button>
+                <button class="btn btn-small topic-quick-btn" data-topic-template="/{rid}/sp_routine_status" data-type="std_msgs/String" data-hz="5" data-filter=".data" data-display="string">sp_routine_status</button>
+              </div>
+              <div class="topic-quick-group">
+                <span class="topic-quick-group-label">전원</span>
+                <button class="btn btn-small topic-quick-btn" data-topic-template="/{rid}/bms" data-type="std_msgs/Float32MultiArray" data-hz="2" data-display="float-array">bms</button>
+                <button class="btn btn-small topic-quick-btn" data-topic-template="/{rid}/bms_node/battery_state" data-type="sensor_msgs/BatteryState" data-hz="2" data-display="battery">battery_state</button>
+                <button class="btn btn-small topic-quick-btn" data-topic-template="/{rid}/bms_node/bms_error" data-type="std_msgs/Int8MultiArray" data-hz="2" data-display="int-array">bms_error</button>
+              </div>
+            </div>
+            <button id="btn-topic-subscribe" class="btn btn-primary">Subscribe</button>
+            <button id="btn-topic-unsubscribe" class="btn btn-danger">Unsubscribe</button>
+            <button id="btn-topic-clear" class="btn btn-small">Clear</button>
+            <button id="btn-topic-mapping" class="btn btn-small" title="Custom Topic Mapping">Aliases</button>
+            <pre id="topic-result"></pre>
+          </div>
+
+          <!-- rosout Log Viewer -->
+          <div class="ros-control-box rosout-viewer">
+            <div class="rosout-header">
+              <h4>ROS Log Viewer (/rosout)</h4>
+              <div class="rosout-controls">
+                <select id="rosout-level-filter" class="btn btn-mini">
+                  <option value="0">All</option>
+                  <option value="1">Debug+</option>
+                  <option value="2">Info+</option>
+                  <option value="4">Warn+</option>
+                  <option value="8">Error+</option>
+                  <option value="16">Fatal</option>
+                </select>
+                <input type="text" id="rosout-search" class="rosout-search" placeholder="Filter...">
+                <button id="btn-rosout-toggle" class="btn btn-small btn-primary">Start</button>
+                <button id="btn-rosout-clear" class="btn btn-small">Clear</button>
+              </div>
+            </div>
+            <div id="rosout-log" class="rosout-log"></div>
+          </div>
+        </div>
+
+        <!-- Tab Content: Action -->
+        <div class="tab-content" id="tab-action">
+          <details class="action-tools-panel">
+            <summary>즐겨찾기 · 파라미터 프리셋</summary>
+          <!-- Favorite Actions -->
+          <div class="action-favorites-section" id="action-favorites">
+            <div class="action-favorites-header">
+              <span class="action-favorites-title" data-i18n="action.favorites">Favorites</span>
+              <button id="btn-save-favorite" class="btn btn-small" data-i18n="action.saveFavorite" title="Save current settings to favorites">+ Save</button>
+            </div>
+            <div id="action-favorites-list" class="action-favorites-list">
+              <span class="action-favorites-empty" data-i18n="action.noFavorites">No saved favorites</span>
+            </div>
+          </div>
+
+          <!-- Parameter Presets -->
+          <div class="param-preset-section" id="param-preset-section">
+            <div class="param-preset-header">
+              <span class="param-preset-title" data-i18n="action.presets">Parameter Presets</span>
+              <div class="param-preset-controls">
+                <select id="param-preset-select" class="btn btn-small">
+                  <option value="">-- Select Preset --</option>
+                </select>
+                <button id="btn-preset-apply" class="btn btn-small">Apply</button>
+                <button id="btn-preset-save" class="btn btn-small">Save Current</button>
+                <button id="btn-preset-delete" class="btn btn-small btn-danger">Delete</button>
+              </div>
+            </div>
+          </div>
+          </details>
+
+          <div class="action-section">
+            <div class="action-simple-header">
+              <div>
+                <h4>Tasks</h4>
+                <p>저장된 Task를 확인·실행하거나 새 Task를 만드세요.</p>
+              </div>
+            </div>
+
+            <!-- Target Robot (Active Robot) -->
+            <div class="action-row">
+              <label data-i18n="action.targetRobot">대상 로봇</label>
+              <span id="action-target-robot-label" class="action-target-robot-label">--</span>
+              <span id="action-target-status" class="action-target-status">Disconnected</span>
+            </div>
+
+            <div class="task-persistent-control">
+              <div id="task-execution-feedback" class="task-execution-feedback" data-state="idle">
+                <span class="task-state-badge">IDLE</span>
+                <span class="task-feedback-message">실행 중인 Task 정보가 없습니다.</span>
+              </div>
+              <div class="task-control-bar">
+                <button type="button" id="btn-pause-task" class="btn btn-small task-control-pause">일시정지</button>
+                <button type="button" id="btn-resume-task" class="btn btn-small task-control-resume">재개</button>
+                <button type="button" id="btn-cancel-task" class="btn btn-small btn-danger task-control-cancel">Task 즉시 취소</button>
+              </div>
+            </div>
+
+            <section id="task-library-view" class="task-library-section" aria-labelledby="task-library-title">
+              <div class="task-library-header">
+                <div>
+                  <h5 id="task-library-title">저장 Task</h5>
+                  <p>Task를 펼쳐 Action과 파라미터를 확인하거나 바로 실행하세요.</p>
+                </div>
+                <div class="task-library-tools">
+                  <input type="search" id="task-library-search" placeholder="Task 검색" autocomplete="off">
+                  <button type="button" id="btn-task-library-refresh" class="btn btn-small" title="Task 목록 새로고침">↻</button>
+                  <button type="button" id="btn-new-task" class="btn btn-small btn-primary">＋ Task 추가</button>
+                </div>
+              </div>
+              <div id="task-library-grid" class="task-library-grid">
+                <p class="task-library-empty">저장된 Task가 없습니다.</p>
+              </div>
+            </section>
+
+            <section id="task-builder-view" class="task-builder-view" hidden>
+            <div class="task-builder-heading">
+              <div>
+                <h5 id="task-builder-title">새 Task 만들기</h5>
+                <p>한글 설명 옆의 작은 글씨는 실제 ROS/YAML 파라미터 이름입니다.</p>
+              </div>
+              <div class="task-builder-heading-actions">
+                <button type="button" id="btn-close-task-builder" class="btn btn-small">취소</button>
+                <button type="button" id="btn-save-task-builder" class="btn btn-small btn-primary">Task 저장</button>
+              </div>
+            </div>
+
+            <!-- Action Type Select -->
+            <div class="action-row">
+              <label data-i18n="action.actionType">Action</label>
+              <select id="action-type">
+                <option value="0x01">0x01 · WayPoint</option>
+                <option value="0x02">0x02 · Basic Move</option>
+                <option value="0x07">0x07 · Standby</option>
+                <option value="0x08">0x08 · 도킹</option>
+                <option value="0x10">0x10 · 도킹아웃</option>
+                <option value="0x15">0x15 · Trajectory Following</option>
+                <option value="0x16">0x16 · 리프트</option>
+                <option value="0x17">0x17 · 맵 변경</option>
+                <option value="0x18">0x18 · 컨베이어 구동</option>
+                <option value="0x19">0x19 · Quad Basic Move</option>
+                <option value="0x21">0x21 · Forklift</option>
+                <option value="0x22">0x22 · Turntable</option>
+              </select>
+            </div>
+
+            <!-- Action Args -->
+            <div class="action-args-section">
+              <h5>필수 입력</h5>
+              <div id="action-args-container">
+                <!-- Dynamically generated based on action type -->
+              </div>
+            </div>
+
+            <details class="action-advanced-panel">
+              <summary>상세 파라미터 · 공통 설정</summary>
+              <!-- Action Params -->
+              <div class="action-params-section">
+                <h5>Action Params</h5>
+                <div id="action-params-container">
+                  <!-- Dynamically generated based on action type -->
+                </div>
+              </div>
+
+              <!-- Common Params (Collapsible) -->
+              <div class="action-common-params-section">
+                <h5 class="collapsible-header" id="common-params-toggle">
+                  <span class="collapse-icon">▶</span> Common Params
+                </h5>
+                <div id="action-common-params-container" class="collapsible-content" style="display: none;">
+                  <!-- Common params shared by all actions -->
+                </div>
+              </div>
+            </details>
+
+            <!-- Action Name -->
+            <div class="action-input-row">
+              <label>
+                <span class="action-field-friendly">Action 이름</span>
+                <small class="action-field-key">action_id</small>
+              </label>
+              <input type="text" id="action-name" placeholder="비워두면 자동 생성">
+            </div>
+
+            <!-- Send Button -->
+            <div class="action-buttons">
+              <button id="btn-add-to-queue" class="btn btn-primary" data-i18n="action.addToQueue">Task에 추가</button>
+              <button id="btn-clear-queue" class="btn btn-small" data-i18n="action.clearQueue">Action 전체 비우기</button>
+              <div class="undo-redo-controls">
+                <button id="btn-undo-queue" class="btn-mini" title="Undo (Ctrl+Z)" disabled>&#8630;</button>
+                <button id="btn-redo-queue" class="btn-mini" title="Redo (Ctrl+Y)" disabled>&#8631;</button>
+              </div>
+            </div>
+
+            <!-- Action Queue -->
+            <div class="action-queue-section">
+              <div class="action-queue-header">
+                <h5>Task 구성 (<span id="action-queue-count">0</span> Actions)</h5>
+                <div class="action-queue-save-controls">
+                  <input type="text" id="action-queue-save-name" placeholder="Task 이름 (task_id)" value="default" class="queue-name-input">
+                  <button id="btn-save-queue" class="btn btn-small btn-primary">Task 저장</button>
+                  <select id="action-queue-load-select" class="queue-load-select">
+                    <option value="">-- 저장 Task --</option>
+                  </select>
+                  <button id="btn-load-queue" class="btn btn-small">불러오기</button>
+                  <button id="btn-delete-saved-queue" class="btn btn-small btn-danger">삭제</button>
+                  <button id="btn-export-mission" class="btn btn-small" title="ROS Task YAML 저장">YAML 저장</button>
+                  <button id="btn-import-mission" class="btn btn-small" title="ROS Task YAML 불러오기">YAML 불러오기</button>
+                  <input type="file" id="mission-import-file" accept=".yaml,.yml,.json" style="display:none">
+                </div>
+              </div>
+              <div id="action-queue-list">
+                <p class="action-queue-empty">위에서 Action을 선택해 Task에 추가하세요.</p>
+              </div>
+            </div>
+
+            <div class="task-execution-simple">
+              <div class="action-row">
+                <label>
+                  <span class="action-field-friendly">반복</span>
+                  <small class="action-field-key">loop_flag</small>
+                </label>
+                <input type="number" id="action-loop-count" min="0" max="9999" value="1" placeholder="반복 횟수" class="action-loop-input">
+                <span class="action-loop-hint" id="action-loop-hint">1회 · 0은 무한 반복</span>
+              </div>
+              <div class="action-buttons">
+                <button id="btn-send-action" class="btn btn-primary" data-i18n="action.sendAll">현재 Task 실행</button>
+                <button id="btn-cancel-action" class="btn btn-danger" data-i18n="action.cancel">실행 취소</button>
+              </div>
+              <details class="action-task-id-advanced">
+                <summary>전송 ID 직접 지정</summary>
+                <div class="action-row">
+                  <label data-i18n="action.taskId">Task ID</label>
+                  <input type="text" id="action-work-id" value="default" placeholder="Task ID">
+                </div>
+              </details>
+            </div>
+
+            <!-- Result -->
+            <div class="action-result">
+              <h5>Result / Feedback</h5>
+              <pre id="action-result"></pre>
+            </div>
+
+            <!-- Action History -->
+            <div class="action-history-section" data-widget="action-history">
+              <div class="action-history-header">
+                <h5>Action History</h5>
+                <button id="btn-clear-action-history" class="btn btn-small btn-danger">Clear</button>
+              </div>
+              <div id="action-history-list" class="action-history-list">
+                <span class="action-history-empty">No history yet</span>
+              </div>
+            </div>
+            </section>
+          </div>
+        </div>
+
+        <!-- Tab Content: Camera -->
+        <div class="tab-content" id="tab-camera">
+          <div class="camera-tab-section">
+            <div class="camera-tab-header">
+              <h4>Camera Output</h4>
+              <div class="camera-tab-controls">
+                <label><input type="checkbox" class="cam-select-chk" data-cam="cam1-depth"> Cam1 Depth</label>
+                <label><input type="checkbox" class="cam-select-chk" data-cam="cam1-color" checked> Cam1 Color</label>
+                <label><input type="checkbox" class="cam-select-chk" data-cam="cam2-depth"> Cam2 Depth</label>
+                <label><input type="checkbox" class="cam-select-chk" data-cam="cam2-color" checked> Cam2 Color</label>
+                <select id="cam-layout-select" class="cam-layout-select" title="표시할 카메라 개수" aria-label="표시할 카메라 개수">
+                  <option value="1">카메라 1개</option>
+                  <option value="2" selected>카메라 2개</option>
+                  <option value="3">카메라 3개</option>
+                  <option value="4">카메라 4개</option>
+                </select>
+                <button id="btn-cam-snapshot-all" class="btn btn-small btn-cam-snapshot" title="Save all camera snapshots">Snap All</button>
+              </div>
+            </div>
+            <div class="camera-tab-grid layout-2" id="camera-tab-grid">
+              <div class="camera-tab-pane" id="cam-pane-0">
+                <span class="camera-pane-label" id="cam-pane-0-label">Cam1 Color</span>
+                <canvas id="cam-pane-0-canvas" width="640" height="480"></canvas>
+              </div>
+              <div class="camera-tab-pane" id="cam-pane-1">
+                <span class="camera-pane-label" id="cam-pane-1-label">Cam2 Color</span>
+                <canvas id="cam-pane-1-canvas" width="640" height="480"></canvas>
+              </div>
+              <div class="camera-tab-pane" id="cam-pane-2" style="display:none;">
+                <span class="camera-pane-label" id="cam-pane-2-label">-</span>
+                <canvas id="cam-pane-2-canvas" width="640" height="480"></canvas>
+              </div>
+              <div class="camera-tab-pane" id="cam-pane-3" style="display:none;">
+                <span class="camera-pane-label" id="cam-pane-3-label">-</span>
+                <canvas id="cam-pane-3-canvas" width="640" height="480"></canvas>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab Content: SSH Terminal -->
+        <div class="tab-content" id="tab-ssh">
+          <div class="ssh-controls">
+            <input type="text" id="ssh-user" placeholder="Username" value="syscon">
+            <input type="password" id="ssh-password" placeholder="Password (optional)">
+            <button id="btn-ssh-connect" class="btn btn-primary" data-i18n="ssh.connect">Connect</button>
+            <button id="btn-ssh-disconnect" class="btn btn-danger" data-i18n="ssh.disconnect" disabled>Disconnect</button>
+            <span id="ssh-status" class="status" data-i18n="header.disconnected">Disconnected</span>
+          </div>
+          <!-- Multi-Terminal Tabs -->
+          <div class="terminal-tabs" id="terminal-tabs">
+            <button class="terminal-tab active" data-term-idx="0">Terminal 1</button>
+            <button class="terminal-tab-add" id="btn-add-terminal" title="Add Terminal">+</button>
+          </div>
+          <div class="terminal-search-bar" id="terminal-search-bar">
+            <input type="text" id="terminal-search-input" placeholder="Search terminal... (Ctrl+F)">
+            <button id="btn-terminal-search-prev" class="btn btn-mini">↑</button>
+            <button id="btn-terminal-search-next" class="btn btn-mini">↓</button>
+            <button id="btn-terminal-search-close" class="btn btn-mini">&times;</button>
+            <span id="terminal-search-count" class="terminal-search-count"></span>
+          </div>
+          <div id="terminal-container"></div>
+        </div>
+
+        <!-- Tab Content: File Transfer -->
+        <div class="tab-content" id="tab-files">
+          <div class="file-controls">
+            <input type="text" id="remote-path" placeholder="Remote path" value="/home">
+            <button id="btn-browse" class="btn" data-i18n="files.browse">Browse</button>
+            <button id="btn-file-diff" class="btn btn-small" title="Compare Files">Diff</button>
+          </div>
+          <div class="file-list-container">
+            <table id="file-list">
+              <thead>
+                <tr>
+                  <th data-i18n="files.fileName">Name</th>
+                  <th data-i18n="files.fileSize">Size</th>
+                  <th data-i18n="files.fileModified">Modified</th>
+                  <th data-i18n="files.fileAction">Actions</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="file-upload">
+            <h4 data-i18n="files.uploadTitle">File Upload</h4>
+            <input type="file" id="upload-file">
+            <button id="btn-upload" class="btn btn-primary" data-i18n="files.upload">Upload</button>
+            <span id="upload-status"></span>
+          </div>
+        </div>
+
+        <!-- Tab Content: Commands -->
+        <!-- tab-commands moved to floating panel -->
+
+        <!-- Tab Content: Batch Commands -->
+        <div class="tab-content" id="tab-batch">
+          <div class="batch-section">
+            <div class="batch-header">
+              <h4>Batch Command Execution</h4>
+              <div class="batch-controls">
+                <button id="btn-batch-run" class="btn btn-primary">Run All</button>
+                <button id="btn-batch-abort" class="btn btn-danger" disabled>Abort</button>
+              </div>
+            </div>
+            <div class="batch-editor">
+              <label>Commands (one per line, # for comments):</label>
+              <textarea id="batch-commands" placeholder="# Example batch commands
+hostname
+uptime
+df -h
+free -h"></textarea>
+            </div>
+            <div class="batch-result">
+              <label>Output:</label>
+              <pre id="batch-output"></pre>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab Content: Jog Control -->
+
+        <!-- Tab Content: Docking Test -->
+        <div class="tab-content" id="tab-docking">
+          <div class="docking-test-section">
+            <h4>Docking Test</h4>
+
+            <!-- Test Configuration Row -->
+            <div class="docking-config-row">
+              <!-- Test Type -->
+              <div class="docking-config-item">
+                <label>Test Type:</label>
+                <div class="radio-group">
+                  <label><input type="radio" name="docking-test-type" value="timer" checked> Timer</label>
+                  <label><input type="radio" name="docking-test-type" value="precision"> Precision</label>
+                </div>
+              </div>
+
+              <!-- Docking Type -->
+              <div class="docking-config-item">
+                <label>Docking Type:</label>
+                <select id="docking-type-select">
+                  <option value="L_dock">L_dock (Riser)</option>
+                  <option value="LV_dock" selected>LV_dock (Vertical Marker + Riser)</option>
+                  <option value="Cradle_dock">Cradle_dock (Cradle)</option>
+                  <option value="Rack_dock">Rack_dock (Rack)</option>
+                  <option value="Aruco_dock">Aruco_dock (ArUco Marker)</option>
+                  <option value="ML_LV_dock">ML_LV_dock (ML + LV)</option>
+                </select>
+              </div>
+
+              <!-- Cycle Count -->
+              <div class="docking-config-item">
+                <label>Repeat Count:</label>
+                <input type="number" id="docking-cycle-count" value="10" min="1" max="100">
+              </div>
+            </div>
+
+            <!-- OptiTrack Section -->
+            <div class="optitrack-section">
+              <h5>OptiTrack Motion Capture <span id="optitrack-status" class="optitrack-status-badge">Disconnected</span></h5>
+              <div class="optitrack-config">
+                <div class="optitrack-input-row">
+                  <label>Server IP:</label>
+                  <input type="text" id="optitrack-ip" placeholder="192.168.1.100" value="">
+                  <button id="btn-optitrack-scan" class="btn btn-small">Scan</button>
+                  <button id="btn-optitrack-connect" class="btn btn-primary btn-small">Connect</button>
+                  <button id="btn-optitrack-disconnect" class="btn btn-danger btn-small" disabled>Disconnect</button>
+                </div>
+                <div class="optitrack-input-row">
+                  <label>Rigid Body:</label>
+                  <select id="optitrack-rigid-body">
+                    <option value="">-- Select --</option>
+                  </select>
+                  <label style="margin-left: 15px;">Reference:</label>
+                  <select id="optitrack-reference">
+                    <option value="">-- Select --</option>
+                  </select>
+                  <button id="btn-optitrack-set-ref" class="btn btn-small">Set Reference</button>
+                </div>
+              </div>
+              <div class="optitrack-data" id="optitrack-data-panel" style="display: none;">
+                <div class="optitrack-pose">
+                  <div class="pose-group">
+                  <span class="pose-label">Position:</span>
+                    <span class="pose-value">X: <span id="optitrack-pos-x">-</span></span>
+                    <span class="pose-value">Y: <span id="optitrack-pos-y">-</span></span>
+                    <span class="pose-value">Z: <span id="optitrack-pos-z">-</span></span>
+                  </div>
+                  <div class="pose-group">
+                  <span class="pose-label">Orientation:</span>
+                    <span class="pose-value">Roll: <span id="optitrack-rot-r">-</span></span>
+                    <span class="pose-value">Pitch: <span id="optitrack-rot-p">-</span></span>
+                    <span class="pose-value">Yaw: <span id="optitrack-rot-y">-</span></span>
+                  </div>
+                </div>
+                <div class="optitrack-precision" id="optitrack-precision-panel">
+                  <h6>Docking Precision (vs Reference)</h6>
+                  <table class="precision-table">
+                    <tr><td>X Error:</td><td id="precision-x-error">-</td><td>Y Error:</td><td id="precision-y-error">-</td></tr>
+                    <tr><td>Yaw Error:</td><td id="precision-yaw-error">-</td><td>Distance:</td><td id="precision-distance">-</td></tr>
+                  </table>
+                </div>
+              </div>
+
+              <!-- Cluster Graph Monitoring (Always visible) -->
+                <div class="optitrack-graph-section">
+                  <div class="graph-header">
+                    <h6>Position Cluster Graph (Real-time)</h6>
+                    <div class="graph-controls">
+                      <label><input type="checkbox" id="chk-graph-record" checked> Record</label>
+                      <label>Max Points: <input type="number" id="graph-max-points" value="500" min="50" max="2000" step="50"></label>
+                      <label>Scale: <input type="number" id="graph-scale" value="50" min="10" max="200" step="10"> mm</label>
+                      <button id="btn-graph-clear" class="btn btn-small">Clear</button>
+                      <button id="btn-graph-snapshot" class="btn btn-small">Snapshot</button>
+                      <button id="btn-graph-test" class="btn btn-small">Test Data</button>
+                    </div>
+                  </div>
+                <div class="graph-container">
+                  <!-- X-Y Position Scatter Plot -->
+                  <div class="graph-panel">
+                    <div class="graph-title">X-Y Position (Top View)</div>
+                    <canvas id="graph-xy" width="300" height="300"></canvas>
+                    <div class="graph-stats" id="graph-xy-stats">
+                      <span>Points: <b id="stat-xy-count">0</b></span>
+                      <span>X: <b id="stat-xy-x-mean">-</b> (3σ: <b id="stat-xy-x-sigma">-</b>)</span>
+                      <span>Y: <b id="stat-xy-y-mean">-</b> (3σ: <b id="stat-xy-y-sigma">-</b>)</span>
+                    </div>
+                  </div>
+                  <!-- Yaw Angle Time Series -->
+                  <div class="graph-panel">
+                    <div class="graph-title">Yaw Angle (Time Series)</div>
+                    <canvas id="graph-yaw" width="300" height="300"></canvas>
+                    <div class="graph-stats" id="graph-yaw-stats">
+                      <span>Points: <b id="stat-yaw-count">0</b></span>
+                      <span>Mean: <b id="stat-yaw-mean">-</b></span>
+                      <span>3σ: <b id="stat-yaw-sigma">-</b></span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Docking Parameters -->
+            <div class="docking-params-section">
+            <h5>Docking Parameters</h5>
+              <div id="docking-params-container" class="docking-params-grid">
+                <!-- Dynamically generated -->
+              </div>
+            </div>
+
+            <!-- Docking Arguments -->
+            <div class="docking-args-section">
+            <h5>Docking Arguments</h5>
+              <div id="docking-args-container" class="docking-args-grid">
+                <div class="docking-input-row">
+                  <label>charge_request:</label>
+                  <select id="dock-arg-charge">
+                    <option value="0" selected>0 (No Charge)</option>
+                    <option value="1">1 (Charge)</option>
+                  </select>
+                </div>
+                <div class="docking-input-row">
+                  <label>dock_direction:</label>
+                  <div class="radio-group">
+                    <label><input type="radio" name="dock-direction" value="0"> Forward</label>
+                    <label><input type="radio" name="dock-direction" value="1" checked> Backward</label>
+                  </div>
+                </div>
+                <div class="docking-input-row">
+                  <label>docking_type:</label>
+                  <input type="number" id="dock-arg-type" value="2" min="0" max="10">
+                </div>
+                <div class="docking-input-row">
+                  <label>dock_end_sign:</label>
+                  <input type="number" id="dock-arg-end-sign" value="1" min="0" max="10">
+                </div>
+              </div>
+            </div>
+
+            <!-- Control Buttons -->
+            <div class="docking-buttons">
+              <button id="btn-docking-start" class="btn btn-primary">Start Test</button>
+              <button id="btn-docking-stop" class="btn btn-danger" disabled>Stop</button>
+              <button id="btn-docking-export" class="btn">Export CSV</button>
+            </div>
+
+            <!-- Results -->
+            <div class="docking-result-section">
+              <h5>Results <span id="docking-status" class="docking-status-badge">Ready</span></h5>
+              <div class="docking-progress">
+                <div class="progress-bar">
+                  <div id="docking-progress-fill" class="progress-fill" style="width: 0%"></div>
+                </div>
+                <span id="docking-progress-text">0 / 0 cycles</span>
+              </div>
+              <div class="docking-stats">
+                <div class="stats-group">
+                  <h6>Dock In</h6>
+                  <table class="stats-table">
+                    <tr><td>Average:</td><td id="stat-dock-in-avg">-</td></tr>
+                    <tr><td>Max:</td><td id="stat-dock-in-max">-</td></tr>
+                    <tr><td>Min:</td><td id="stat-dock-in-min">-</td></tr>
+                    <tr><td>3-Sigma:</td><td id="stat-dock-in-sigma">-</td></tr>
+                  </table>
+                </div>
+                <div class="stats-group">
+                  <h6>Dock Out</h6>
+                  <table class="stats-table">
+                    <tr><td>Average:</td><td id="stat-dock-out-avg">-</td></tr>
+                    <tr><td>Max:</td><td id="stat-dock-out-max">-</td></tr>
+                    <tr><td>Min:</td><td id="stat-dock-out-min">-</td></tr>
+                    <tr><td>3-Sigma:</td><td id="stat-dock-out-sigma">-</td></tr>
+                  </table>
+                </div>
+              </div>
+              <div class="docking-log">
+                <h6>Log</h6>
+                <pre id="docking-log-content">Ready for test...</pre>
+              </div>
+            </div>
+          </div>
+        </div>
+        <!-- Tab Content: Monitoring -->
+        <div class="tab-content" id="tab-monitoring">
+          <div class="monitoring-section">
+            <div class="monitoring-header">
+              <h4 data-i18n="monitoring.title">Robot Monitoring</h4>
+            </div>
+            <div id="monitoring-grid" class="monitoring-grid">
+              <p class="monitoring-empty" data-i18n="monitoring.noRobots">No robots registered. Add robots from "Robots" button.</p>
+            </div>
+          </div>
+          <!-- System Resources Section -->
+        </div>
+
+        <!-- Tab Content: Mission Scheduler -->
+        <div class="tab-content" id="tab-scheduler">
+          <div class="scheduler-section">
+            <div class="scheduler-header">
+              <h4 data-i18n="scheduler.title">Mission Scheduler</h4>
+              <span class="scheduler-mode-badge" id="scheduler-mode-badge">MANUAL</span>
+              <button id="btn-scheduler-add" class="btn btn-small btn-primary" data-i18n="scheduler.addMission">+ Add Mission</button>
+              <button id="btn-scheduler-clear" class="btn btn-small btn-danger" data-i18n="scheduler.clearAll">Clear All</button>
+            </div>
+            <div id="scheduler-list" class="scheduler-list">
+              <span class="scheduler-empty" data-i18n="scheduler.noMissions">No missions registered.</span>
+            </div>
+            <div class="scheduler-log-header">
+              <h5 data-i18n="scheduler.execLog">Execution Log</h5>
+              <button id="btn-scheduler-clear-log" class="btn btn-small" data-i18n="common.clear">Clear</button>
+            </div>
+            <div id="scheduler-log" class="scheduler-log">
+              <span class="scheduler-log-empty" data-i18n="scheduler.noLogs">No logs</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab Content: Diagnostics -->
+        <div class="tab-content" id="tab-diagnostics">
+          <div class="diag-section">
+            <div class="diag-header">
+              <h4>System Diagnostics</h4>
+              <div class="diag-score" id="diag-score">--</div>
+              <button id="btn-diag-boot" class="btn btn-small">Boot Check</button>
+              <button id="btn-diag-steady" class="btn btn-small">30s Monitor</button>
+              <button id="btn-diag-stop" class="btn btn-small btn-danger" style="display:none">Stop</button>
+            </div>
+
+            <div class="diag-progress" id="diag-progress" style="display:none">
+              <div class="diag-progress-fill" id="diag-progress-fill"></div>
+              <span id="diag-progress-text">0 / 30s</span>
+            </div>
+
+            <div id="diag-results" class="diag-results">
+              <div class="diag-category" id="diag-cat-nodes">
+                <div class="diag-cat-header">
+                  <span class="diag-cat-icon">&#x25CF;</span>
+                  <span class="diag-cat-title">Nodes</span>
+                  <span class="diag-cat-summary" id="diag-nodes-summary"></span>
+                </div>
+                <div class="diag-cat-items" id="diag-nodes-items"></div>
+              </div>
+
+              <div class="diag-category" id="diag-cat-topics">
+                <div class="diag-cat-header">
+                  <span class="diag-cat-icon">&#x25CF;</span>
+                  <span class="diag-cat-title">Topics</span>
+                  <span class="diag-cat-summary" id="diag-topics-summary"></span>
+                </div>
+                <div class="diag-cat-items" id="diag-topics-items"></div>
+              </div>
+
+              <div class="diag-category" id="diag-cat-tf">
+                <div class="diag-cat-header">
+                  <span class="diag-cat-icon">&#x25CF;</span>
+                  <span class="diag-cat-title">TF Tree</span>
+                  <span class="diag-cat-summary" id="diag-tf-summary"></span>
+                </div>
+                <div class="diag-cat-items" id="diag-tf-items"></div>
+              </div>
+
+              <div class="diag-category" id="diag-cat-services">
+                <div class="diag-cat-header">
+                  <span class="diag-cat-icon">&#x25CF;</span>
+                  <span class="diag-cat-title">Services</span>
+                  <span class="diag-cat-summary" id="diag-services-summary"></span>
+                </div>
+                <div class="diag-cat-items" id="diag-services-items"></div>
+              </div>
+
+              <div class="diag-category" id="diag-cat-state">
+                <div class="diag-cat-header">
+                  <span class="diag-cat-icon">&#x25CF;</span>
+                  <span class="diag-cat-title">State Values</span>
+                  <span class="diag-cat-summary" id="diag-state-summary"></span>
+                </div>
+                <div class="diag-cat-items" id="diag-state-items"></div>
+              </div>
+
+              <div class="diag-category" id="diag-cat-system">
+                <div class="diag-cat-header">
+                  <span class="diag-cat-icon">&#x25CF;</span>
+                  <span class="diag-cat-title">System Resources</span>
+                  <span class="diag-cat-summary" id="diag-system-summary"></span>
+                </div>
+                <div class="diag-cat-items" id="diag-system-items"></div>
+              </div>
+
+              <div class="diag-category" id="diag-cat-stability" style="display:none">
+                <div class="diag-cat-header">
+                  <span class="diag-cat-icon">&#x25CF;</span>
+                  <span class="diag-cat-title">30s Stability</span>
+                  <span class="diag-cat-summary" id="diag-stability-summary"></span>
+                </div>
+                <div class="diag-cat-items" id="diag-stability-items"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab Content: CAN Motor Diagnostics -->
+        <div class="tab-content" id="tab-can-diag">
+          <!-- can-diagnostics.js가 동적으로 생성 -->
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- Robot Manager Modal -->
+  <div id="robot-manager-modal" class="modal">
+    <div class="modal-content robot-manager-modal-content">
+      <h3 data-i18n="robotManager.title">로봇 설정</h3>
+      <!-- Auto Discovery Section -->
+      <div class="robot-scan-section">
+        <div class="robot-scan-header">
+          <span class="robot-scan-title">네트워크 설정</span>
+          <label class="rm-subnet-label" for="rm-scan-subnet">IP 대역</label>
+          <input type="text" id="rm-scan-subnet" list="rm-scan-subnet-presets" placeholder="192.168.20" class="rm-subnet-input" value="192.168.20" inputmode="decimal">
+          <datalist id="rm-scan-subnet-presets">
+            <option value="192.168.20"></option>
+            <option value="192.168.3"></option>
+          </datalist>
+          <button id="btn-rm-scan" class="btn btn-small btn-primary">로봇 스캔</button>
+          <span id="rm-scan-status" class="rm-scan-status"></span>
+        </div>
+        <div class="rm-scan-help">검색된 로봇은 연결 대기 상태로 추가되며 토픽 데이터는 받지 않습니다. 목록에서 선택한 활성 로봇 1대의 데이터만 수신합니다. <code>192.168.3.5</code>는 항상 검색합니다.</div>
+        <div id="rm-scan-results" class="rm-scan-results" style="display:none;">
+          <div class="rm-scan-list" id="rm-scan-list"></div>
+        </div>
+      </div>
+      <div class="robot-manager-body">
+        <div class="robot-settings-section-title">연결된 로봇 및 고급 설정</div>
+        <table class="robot-manager-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>IP 주소</th>
+              <th>로봇 ID</th>
+              <th>SSH</th>
+              <th>Tunnel</th>
+              <th>상태</th>
+              <th>작업</th>
+            </tr>
+          </thead>
+          <tbody id="robot-manager-tbody">
+          </tbody>
+        </table>
+        <div class="robot-settings-section-title">수동 로봇 추가 <span>자동 검색이 안 되는 예외 장비용</span></div>
+        <div class="robot-manager-add-row">
+          <select id="rm-template" class="rm-template-select" title="Robot Model Template">
+            <option value="">-- Template --</option>
+            <option value="ULW-100">ULW-100</option>
+            <option value="ULW-200">ULW-200</option>
+            <option value="ULW-300">ULW-300</option>
+            <option value="SCOUT">SCOUT</option>
+            <option value="CUSTOM">Custom</option>
+          </select>
+          <input type="text" id="rm-new-ip" placeholder="IP Address (e.g. 192.168.20.51)">
+          <input type="text" id="rm-new-id" placeholder="Robot # (e.g. 13)">
+          <input type="number" id="rm-new-ssh-port" placeholder="SSH Port (default: 22)" min="1" max="65535" class="rm-port-input">
+          <label class="rm-tunnel-label" title="Connect via SSH tunnel to 127.0.0.[#]:9090">
+            <input type="checkbox" id="rm-new-tunnel-mode"> Port Forward
+          </label>
+          <input type="password" id="rm-new-ssh-password" placeholder="SSH Password" class="rm-password-input">
+          <button id="btn-rm-add" class="btn btn-primary btn-small" data-i18n="robotManager.addRobot">수동 추가</button>
+        </div>
+        <div class="robot-clone-row">
+          <span class="clone-label">설정 복사:</span>
+          <select id="rm-clone-from" class="btn btn-small"></select>
+          <span>→</span>
+          <select id="rm-clone-to" class="btn btn-small"></select>
+          <button id="btn-rm-clone" class="btn btn-small">복사</button>
+        </div>
+      </div>
+      <div class="modal-buttons">
+        <button id="btn-rm-close" class="btn" data-i18n="common.close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- LiDAR Alignment Modal -->
+  <div id="lidar-align-modal" class="modal">
+    <div class="modal-content modal-wide">
+      <div class="modal-header">
+        <h3>LiDAR Alignment Check</h3>
+        <button id="btn-lidar-align-close" class="btn btn-small btn-danger">Close</button>
+      </div>
+      <div class="lidar-align-body">
+        <div class="lidar-align-controls">
+          <button id="btn-lidar-align-start" class="btn btn-small btn-primary">Start Scan</button>
+          <button id="btn-lidar-align-stop" class="btn btn-small btn-danger" disabled>Stop</button>
+          <button id="btn-lidar-align-check" class="btn btn-small" disabled>Check Alignment</button>
+          <span id="lidar-align-status" class="mapping-status">Off</span>
+        </div>
+        <div class="lidar-align-result">
+          <div class="lidar-align-meters">
+            <div class="lidar-meter">
+              <span class="meter-label">Pitch (Height)</span>
+              <div class="meter-bar-wrap">
+                <div class="meter-bar" id="lidar-meter-pitch"></div>
+                <div class="meter-zero"></div>
+              </div>
+              <span class="meter-value" id="lidar-val-pitch">-- mm</span>
+            </div>
+            <div class="lidar-meter">
+              <span class="meter-label">Yaw (Angle)</span>
+              <div class="meter-bar-wrap">
+                <div class="meter-bar" id="lidar-meter-yaw"></div>
+                <div class="meter-zero"></div>
+              </div>
+              <span class="meter-value" id="lidar-val-yaw">-- °</span>
+            </div>
+          </div>
+          <div class="lidar-align-verdict" id="lidar-align-verdict"></div>
+        </div>
+        <div class="lidar-align-visual">
+          <canvas id="lidar-align-canvas" width="600" height="400"></canvas>
+          <div class="lidar-align-legend">
+            <span class="legend-item"><span class="legend-dot" style="background:#ff4444"></span>scan_1 (Front)</span>
+            <span class="legend-item"><span class="legend-dot" style="background:#4488ff"></span>scan_2 (Rear)</span>
+            <span class="legend-item"><span class="legend-dot" style="background:#44ff88"></span>Overlap</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Password Modal for SSH -->
+  <div id="ssh-password-modal" class="modal">
+    <div class="modal-content">
+      <h3 data-i18n="ssh.passwordRequired">SSH Password Required</h3>
+      <p id="ssh-password-message"></p>
+      <input type="password" id="modal-ssh-password" placeholder="Password">
+      <div class="modal-buttons">
+        <button id="btn-modal-ssh-connect" class="btn btn-primary" data-i18n="ssh.connect">Connect</button>
+        <button id="btn-modal-ssh-cancel" class="btn" data-i18n="common.cancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- BMS Detail Modal -->
+  <div id="bms-detail-modal" class="modal">
+    <div class="modal-content bms-modal-content">
+      <h3 data-i18n="bms.title">BMS Details</h3>
+      <div class="bms-detail-grid" id="bms-detail-grid">
+        <div class="bms-detail-item">
+          <span class="bms-label">Voltage</span>
+          <span class="bms-value" id="bms-voltage">--</span>
+        </div>
+        <div class="bms-detail-item">
+          <span class="bms-label">Current</span>
+          <span class="bms-value" id="bms-current">--</span>
+        </div>
+        <div class="bms-detail-item">
+          <span class="bms-label">SOC</span>
+          <span class="bms-value" id="bms-soc">--</span>
+        </div>
+      </div>
+      <div id="bms-charge-section" class="bms-charge-section" style="display:none;">
+        <h4>Charge Time Estimate</h4>
+        <div class="bms-charge-row">
+          <span class="bms-charge-label">To Full:</span>
+          <span class="bms-charge-value" id="bms-charge-full-eta">--</span>
+        </div>
+        <div class="bms-charge-row">
+          <span class="bms-charge-label">Target:</span>
+          <span class="bms-charge-value" id="bms-charge-target-eta">--</span>
+          <div class="bms-charge-target-set">
+            <input type="number" id="bms-charge-target-input" min="1" max="100" value="80">
+            <span>%</span>
+            <button id="btn-bms-set-target" class="btn btn-small">Set</button>
+          </div>
+        </div>
+      </div>
+      <div id="bms-usage-section" class="bms-charge-section" style="display:none;">
+        <h4>Estimated Usage Time</h4>
+        <div class="bms-charge-row">
+          <span class="bms-charge-label">Remaining:</span>
+          <span class="bms-charge-value" id="bms-usage-time-eta">--</span>
+        </div>
+      </div>
+      <div class="bms-raw-data">
+        <h4>Raw Data</h4>
+        <pre id="bms-content">No data</pre>
+      </div>
+      <div class="modal-buttons">
+        <button id="btn-bms-modal-close" class="btn" data-i18n="common.close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Jog Floating Panel -->
+  <!-- CMD Floating Panel -->
+  <div id="cmd-panel" class="cmd-floating-panel" style="display:none;">
+    <div class="cmd-panel-header" id="cmd-panel-header">
+      <span class="cmd-panel-title" data-i18n="cmd.title">Quick Commands</span>
+      <button class="cmd-panel-close" id="cmd-panel-close" title="Close">&times;</button>
+    </div>
+    <div class="cmd-panel-body">
+      <!-- Camera Serial Section -->
+      <div class="camera-serial-section-mini">
+        <div class="cmd-sub-header">Camera Serial</div>
+        <button id="btn-check-serial" class="btn btn-small">Check Serial</button>
+        <div class="serial-comparison" id="serial-comparison" style="display: none;">
+          <table class="serial-table-mini">
+            <thead>
+              <tr><th>CAM</th><th>Actual</th><th>Config</th><th>Status</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>1</td><td id="actual-cam1">-</td><td id="config-cam1">-</td><td id="status-cam1">-</td></tr>
+              <tr><td>2</td><td id="actual-cam2">-</td><td id="config-cam2">-</td><td id="status-cam2">-</td></tr>
+            </tbody>
+          </table>
+          <div class="serial-actions-mini">
+            <button id="btn-fix-serials" class="btn btn-small" style="display: none;">Apply</button>
+            <span id="serial-status"></span>
+          </div>
+        </div>
+      </div>
+      <div class="cmd-divider"></div>
+      <div class="cmd-sub-header">Quick Commands</div>
+      <div class="cmd-buttons-grid">
+        <button class="btn btn-small cmd-btn" data-cmd="scorpion-restart">Restart Scorpion</button>
+        <button class="btn btn-small cmd-btn" data-cmd="check-ros">ROS Status</button>
+        <button class="btn btn-small cmd-btn" data-cmd="system-info">System Info</button>
+        <button class="btn btn-small cmd-btn" data-cmd="disk-usage">Disk Usage</button>
+        <button class="btn btn-small cmd-btn" data-cmd="network-info">Network Info</button>
+        <button class="btn btn-small cmd-btn" data-cmd="reboot">Reboot Robot</button>
+      </div>
+      <div class="cmd-divider"></div>
+      <!-- Command Snippets Section -->
+      <div class="cmd-snippet-section">
+        <div class="cmd-sub-header">
+          <span>Snippets</span>
+          <button id="btn-snippet-add" class="btn btn-mini" title="Add Snippet">+</button>
+        </div>
+        <div id="cmd-snippet-list" class="cmd-snippet-list">
+          <span class="snippet-empty">No snippets saved</span>
+        </div>
+        <div id="cmd-snippet-add-form" class="cmd-snippet-form" style="display:none;">
+          <input type="text" id="snippet-name" placeholder="Snippet name" class="snippet-input">
+          <input type="text" id="snippet-cmd" placeholder="Command" class="snippet-input">
+          <div class="snippet-form-btns">
+            <button id="btn-snippet-save" class="btn btn-mini btn-primary">Save</button>
+            <button id="btn-snippet-cancel" class="btn btn-mini">Cancel</button>
+          </div>
+        </div>
+      </div>
+      <div class="cmd-output-section">
+        <pre id="command-result" class="cmd-result-pre"></pre>
+      </div>
+    </div>
+  </div>
+
+  <div id="jog-panel" class="jog-floating-panel" style="display:none;">
+    <div class="jog-panel-header" id="jog-panel-header">
+      <span class="jog-panel-title" data-i18n="jog.title">Jog Control</span>
+      <button class="jog-panel-close" id="jog-panel-close" title="Close">&times;</button>
+    </div>
+    <div class="jog-panel-body">
+      <div class="jog-chassis-selector">
+        <div class="jog-chassis-header">
+          <span>차상 선택</span>
+          <strong id="jog-chassis-current">선택 안 함 (기본) · DD</strong>
+        </div>
+        <details id="jog-chassis-picker" class="jog-chassis-picker">
+          <summary>모델 목록 펼치기</summary>
+          <div id="jog-chassis-options" class="jog-chassis-options"
+               role="radiogroup" aria-label="Jog 차상 모델 선택"></div>
+        </details>
+        <small>모델 선택에 따라 주행 타입과 차상 제어가 함께 변경됩니다.</small>
+      </div>
+      <div class="jog-speed-panel">
+        <div class="jog-speed-row">
+          <label>Linear (m/s):</label>
+          <input type="range" id="jog-linear-speed" min="0.05" max="1.0" step="0.05" value="0.2">
+          <span id="jog-linear-speed-val">0.20</span>
+        </div>
+        <div class="jog-speed-row">
+          <label>Angular (rad/s):</label>
+          <input type="range" id="jog-angular-speed" min="0.1" max="2.0" step="0.1" value="0.5">
+          <span id="jog-angular-speed-val">0.50</span>
+        </div>
+        <div class="jog-speed-row">
+          <label>Type:</label>
+          <select id="jog-drive-type" class="jog-topic-input" disabled
+                  title="차상 모델에 따라 자동으로 결정됩니다">
+            <option value="dd">DD (Differential)</option>
+            <option value="qd">QD (Quad/Omni)</option>
+          </select>
+        </div>
+        <div class="jog-speed-row">
+          <label>Topic:</label>
+          <input type="text" id="jog-topic" value="/cmd_vel" class="jog-topic-input">
+        </div>
+      </div>
+      <div class="jog-dpad">
+        <!-- QD: rotation row (q/e) -->
+        <div class="jog-dpad-row jog-qd-only" style="display:none;">
+          <div class="jog-dpad-cell">
+            <button class="jog-btn jog-btn-rotl" id="jog-rot-left" title="Rotate Left (Q)">
+              &#8634;<span class="jog-key-hint">Q</span>
+            </button>
+          </div>
+          <div class="jog-dpad-cell"></div>
+          <div class="jog-dpad-cell">
+            <button class="jog-btn jog-btn-rotr" id="jog-rot-right" title="Rotate Right (E)">
+              &#8635;<span class="jog-key-hint">E</span>
+            </button>
+          </div>
+        </div>
+        <div class="jog-dpad-row">
+          <div class="jog-dpad-cell"></div>
+          <div class="jog-dpad-cell">
+            <button class="jog-btn jog-btn-fwd" id="jog-fwd" title="Forward (W / Arrow Up)">
+              &#9650;<span class="jog-key-hint">W</span>
+            </button>
+          </div>
+          <div class="jog-dpad-cell"></div>
+        </div>
+        <div class="jog-dpad-row">
+          <div class="jog-dpad-cell">
+            <button class="jog-btn jog-btn-left" id="jog-left" title="DD: Turn Left / QD: Strafe Left (A)">
+              &#9664;<span class="jog-key-hint">A</span>
+            </button>
+          </div>
+          <div class="jog-dpad-cell">
+            <button class="jog-btn jog-btn-stop" id="jog-stop" title="Stop (S / Space)">
+              STOP<span class="jog-key-hint">S</span>
+            </button>
+          </div>
+          <div class="jog-dpad-cell">
+            <button class="jog-btn jog-btn-right" id="jog-right" title="DD: Turn Right / QD: Strafe Right (D)">
+              &#9654;<span class="jog-key-hint">D</span>
+            </button>
+          </div>
+        </div>
+        <div class="jog-dpad-row">
+          <div class="jog-dpad-cell"></div>
+          <div class="jog-dpad-cell">
+            <button class="jog-btn jog-btn-bwd" id="jog-bwd" title="Backward (X / Arrow Down)">
+              &#9660;<span class="jog-key-hint">X</span>
+            </button>
+          </div>
+          <div class="jog-dpad-cell"></div>
+        </div>
+      </div>
+      <div class="jog-status-compact">
+        <span>Lx: <strong id="jog-cur-lx">0.00</strong></span>
+        <span>Ly: <strong id="jog-cur-ly">0.00</strong></span>
+        <span>Az: <strong id="jog-cur-az">0.00</strong></span>
+        <span>Pub: <strong id="jog-pub-status">Off</strong></span>
+      </div>
+      <p class="jog-hint">DD: W/X/A/D | QD: W/X=fwd/bwd, A/D=strafe, Q/E=rotate</p>
+      <div class="jog-service-btns">
+        <button class="btn btn-small btn-warning" id="jog-motor-reset" title="Call /rid/motor_reset">Motor Reset</button>
+        <button class="btn btn-small btn-warning" id="jog-lift-motor-reset" title="Call /rid/lift_motor_reset">Lift Motor Reset</button>
+      </div>
+      <div class="jog-manual-lift">
+        <div class="jog-manual-lift-header">
+          <span>수동 리프트</span>
+          <strong id="jog-manual-lift-target">활성 로봇: --</strong>
+        </div>
+        <div class="jog-manual-lift-buttons">
+          <button class="btn btn-small btn-primary" id="jog-lift-up">리프트 UP</button>
+          <button class="btn btn-small" id="jog-lift-down">리프트 DOWN</button>
+        </div>
+        <div id="jog-manual-lift-status" class="jog-manual-lift-status">대기</div>
+      </div>
+      <div id="jog-model-io-control" class="jog-model-io-control" hidden>
+        <div class="jog-model-io-header">
+          <span>sr3_ls_1st 차상 제어</span>
+          <strong id="jog-model-io-target">활성 로봇: --</strong>
+        </div>
+        <div class="jog-model-io-group">
+          <span class="jog-model-io-label">전방 도어</span>
+          <button class="btn btn-small btn-primary" data-chassis-command="frontDoorOpen">OPEN</button>
+          <button class="btn btn-small" data-chassis-command="frontDoorClose">CLOSE</button>
+        </div>
+        <div class="jog-model-io-group">
+          <span class="jog-model-io-label">후방 도어</span>
+          <button class="btn btn-small btn-primary" data-chassis-command="rearDoorOpen">OPEN</button>
+          <button class="btn btn-small" data-chassis-command="rearDoorClose">CLOSE</button>
+        </div>
+        <div class="jog-model-io-group">
+          <span class="jog-model-io-label">컨베이어</span>
+          <button class="btn btn-small btn-warning" data-chassis-command="frontDischarge">전방 배출</button>
+          <button class="btn btn-small btn-warning" data-chassis-command="rearDischarge">후방 배출</button>
+        </div>
+        <div id="jog-model-io-status" class="jog-model-io-status">명령 대기</div>
+      </div>
+      <div class="jog-charge-control">
+        <div class="jog-charge-header">
+          <span>로봇 충전</span>
+          <strong id="jog-charge-relay-state" class="unknown">상태 확인 중</strong>
+        </div>
+        <div class="jog-charge-buttons">
+          <button class="btn btn-small btn-primary" id="jog-charge-on">충전 ON</button>
+          <button class="btn btn-small" id="jog-charge-off">충전 OFF</button>
+        </div>
+        <div id="jog-charge-progress" class="jog-charge-progress idle">
+          BMS 충전 전류를 기다리는 중입니다.
+        </div>
+      </div>
+      <div class="jog-quick-tasks">
+        <div class="jog-quick-task-header">
+          <span>Quick Task</span>
+          <strong id="jog-quick-task-target">활성 로봇: --</strong>
+        </div>
+        <div id="jog-quick-task-list" class="jog-quick-task-list"></div>
+        <div id="jog-quick-task-status" class="jog-quick-task-status">
+          저장된 Task를 각 슬롯에 지정하세요.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Hidden subscription checkboxes and canvases -->
+  <input type="checkbox" id="chk-bms" style="display:none;">
+  <input type="checkbox" id="chk-cam1-depth" style="display:none;">
+  <input type="checkbox" id="chk-cam1-color" style="display:none;">
+  <input type="checkbox" id="chk-cam2-depth" style="display:none;">
+  <input type="checkbox" id="chk-cam2-color" style="display:none;">
+  <canvas id="cam1-depth" width="1" height="1" style="display:none;"></canvas>
+  <canvas id="cam1-color" width="1" height="1" style="display:none;"></canvas>
+  <canvas id="cam2-depth" width="1" height="1" style="display:none;"></canvas>
+  <canvas id="cam2-color" width="1" height="1" style="display:none;"></canvas>
+
+  <!-- Keyboard Shortcuts Help -->
+  <div id="shortcuts-overlay" class="shortcuts-overlay hidden">
+    <div class="shortcuts-content">
+      <h3 data-i18n="shortcuts.title">Keyboard Shortcuts</h3>
+      <div class="shortcuts-grid">
+        <div class="sc-item"><kbd>숫자</kbd> <span>호기 전환 (예: 1, 10, 101 입력 후 잠시 대기 또는 Enter)</span></div>
+        <div class="sc-item"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> <span data-i18n="shortcuts.jogMove">Jog Move</span></div>
+        <div class="sc-item"><kbd>Q</kbd><kbd>E</kbd> <span data-i18n="shortcuts.jogRotate">Jog Rotate</span></div>
+        <div class="sc-item"><kbd>Space</kbd> <span data-i18n="shortcuts.emergencyStop">Emergency Stop</span></div>
+        <div class="sc-item"><kbd>Enter</kbd> <span data-i18n="shortcuts.sendAction">Send Action</span></div>
+        <div class="sc-item"><kbd>Esc</kbd> <span data-i18n="shortcuts.closeModal">Close Modal</span></div>
+        <div class="sc-item"><kbd>?</kbd> <span data-i18n="shortcuts.showHelp">This Help</span></div>
+        <div class="sc-item"><kbd>Ctrl</kbd>+<kbd>1</kbd>~<kbd>9</kbd> <span>탭 전환</span></div>
+        <div class="sc-item"><kbd>Ctrl</kbd>+<kbd>K</kbd> <span data-i18n="shortcuts.search">Search</span></div>
+        <div class="sc-item"><kbd>Ctrl</kbd>+<kbd>M</kbd> <span data-i18n="shortcuts.toggleMap">Toggle Map</span></div>
+        <div class="sc-item"><kbd>F</kbd> <span data-i18n="shortcuts.fullscreen">Fullscreen</span></div>
+        <div class="sc-item"><kbd>G</kbd> <span data-i18n="shortcuts.navGoal">Nav Goal</span></div>
+        <div class="sc-item"><kbd>P</kbd> <span data-i18n="shortcuts.setPose">Set Pose</span></div>
+        <div class="sc-item"><kbd>Ctrl</kbd>+<kbd>Z</kbd> <span>Undo</span></div>
+        <div class="sc-item"><kbd>Ctrl</kbd>+<kbd>Y</kbd> <span>Redo</span></div>
+      </div>
+      <button id="btn-shortcuts-close" class="btn btn-small" data-i18n="shortcuts.close">Close</button>
+    </div>
+  </div>
+
+  <!-- Nav Goal Parameter Popup -->
+  <div id="nav-goal-popup" class="nav-goal-popup hidden">
+    <div class="nav-goal-popup-header">
+      <span class="nav-goal-popup-title">Nav Goal Parameters</span>
+    </div>
+    <div class="nav-goal-popup-body">
+      <div class="nav-goal-coord">
+        <span>X: <b id="nav-goal-x">0.00</b></span>
+        <span>Y: <b id="nav-goal-y">0.00</b></span>
+        <span>Yaw: <b id="nav-goal-yaw">0.0</b>&deg;</span>
+      </div>
+      <div class="nav-goal-param-row">
+        <label>Max Vel (m/s)</label>
+        <input type="number" id="nav-goal-max-vel" value="0.8" min="0.1" max="2.0" step="0.1">
+      </div>
+      <div class="nav-goal-param-row">
+        <label>Passing</label>
+        <select id="nav-goal-passing">
+          <option value="false">Stop at goal</option>
+          <option value="true">Pass through</option>
+        </select>
+      </div>
+      <div class="nav-goal-param-row">
+        <label>Avoid</label>
+        <select id="nav-goal-avoid">
+          <option value="false">Avoid Obstacles ON</option>
+          <option value="true">Avoid OFF</option>
+        </select>
+      </div>
+    </div>
+    <div class="nav-goal-popup-actions">
+      <button id="btn-nav-goal-send" class="btn btn-primary btn-small">Send</button>
+      <button id="btn-nav-goal-cancel" class="btn btn-small">Cancel</button>
+    </div>
+  </div>
+
+  <!-- Widget Config Popover -->
+  <div id="widget-config-panel" class="widget-config-panel hidden">
+    <h5>Widget Display Settings</h5>
+    <div id="widget-config-list" class="widget-config-list">
+      <label><input type="checkbox" data-wid="workstate" checked> Work State</label>
+      <label><input type="checkbox" data-wid="timeline" checked> WS Timeline</label>
+      <label><input type="checkbox" data-wid="bmstrend" checked> BMS Trend</label>
+      <label><input type="checkbox" data-wid="topichz" checked> Topic Hz</label>
+    </div>
+    <button id="btn-widget-config-save" class="btn btn-small">Apply</button>
+  </div>
+
+  <!-- Health Check Modal -->
+  <div id="health-check-modal" class="modal">
+    <div class="modal-content health-check-modal-content">
+      <div class="modal-header">
+        <h3>Health Check Suite</h3>
+        <button class="modal-close" id="btn-health-check-close">&times;</button>
+      </div>
+      <div class="health-check-body">
+        <button id="btn-health-check-run" class="btn btn-primary">Run Health Check</button>
+        <div id="health-check-results" class="health-check-results">
+          <div class="hc-empty">Click "Run Health Check" to start</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Error Code DB Modal -->
+  <div id="error-code-modal" class="modal">
+    <div class="modal-content error-code-modal-content">
+      <div class="modal-header">
+        <h3>Error Code Database</h3>
+        <button class="modal-close" id="btn-error-code-close">&times;</button>
+      </div>
+      <div class="error-code-controls">
+        <input type="text" id="error-code-search" placeholder="Search by code, name, or description..." class="error-code-search">
+        <button id="btn-add-error-code" class="btn btn-small btn-primary">+ Add Custom</button>
+      </div>
+      <div id="error-code-list" class="error-code-list"></div>
+    </div>
+  </div>
+
+  <!-- Audit Trail Modal -->
+  <div id="audit-trail-modal" class="modal">
+    <div class="modal-content audit-trail-modal-content">
+      <div class="modal-header">
+        <h3>Audit Trail</h3>
+        <button class="modal-close" id="btn-audit-close">&times;</button>
+      </div>
+      <div class="audit-trail-controls">
+        <input type="text" id="audit-search" placeholder="Search actions..." class="audit-search">
+        <select id="audit-filter" class="audit-filter">
+          <option value="all">All Actions</option>
+          <option value="action_send">Action Send</option>
+          <option value="ssh_command">SSH Command</option>
+          <option value="file_upload">File Upload</option>
+          <option value="file_download">File Download</option>
+        </select>
+        <button id="btn-export-audit" class="btn btn-small btn-primary">Export CSV</button>
+        <button id="btn-clear-audit" class="btn btn-small btn-danger">Clear</button>
+      </div>
+      <div id="audit-trail-list" class="audit-trail-list"></div>
+    </div>
+  </div>
+
+  <!-- Alarm Settings Modal -->
+  <div id="alarm-settings-modal" class="modal">
+    <div class="modal-content alarm-modal-content">
+      <h3 data-i18n="alarm.title">Alarm Settings</h3>
+      <div class="alarm-settings-body">
+        <div class="alarm-row">
+          <label><input type="checkbox" id="alarm-bms-low-en" checked> BMS SOC Low Battery</label>
+          <div class="alarm-row-val">
+            <input type="number" id="alarm-bms-low-val" value="20" min="0" max="100" step="1">
+            <span>% or below</span>
+          </div>
+        </div>
+        <div class="alarm-row">
+          <label><input type="checkbox" id="alarm-ws-error-en" checked> Work State Error Detection</label>
+          <div class="alarm-row-val">
+            <input type="text" id="alarm-ws-error-vals" value="99,100" placeholder="Error state values (comma-sep)">
+          </div>
+        </div>
+        <div class="alarm-row">
+          <label><input type="checkbox" id="alarm-topic-drop-en" checked> Topic Drop Detection</label>
+          <div class="alarm-row-val">
+            <input type="number" id="alarm-topic-drop-sec" value="5" min="1" max="60" step="1">
+            <span>sec no response</span>
+          </div>
+        </div>
+        <div class="alarm-row">
+          <label><input type="checkbox" id="alarm-sound-en"> Alarm Sound</label>
+        </div>
+      </div>
+      <!-- Smart Alarm Rules (복합 조건) -->
+      <div class="smart-alarm-section">
+        <h4>Smart Alarm Rules</h4>
+        <div id="smart-alarm-list" class="smart-alarm-list"></div>
+        <button id="btn-add-smart-alarm" class="btn btn-small">+ Add Rule</button>
+      </div>
+      <!-- Smart Alarm Rule Template (hidden) -->
+      <template id="smart-alarm-rule-tpl">
+        <div class="smart-alarm-rule" data-rule-id="">
+          <div class="sar-header">
+            <input type="checkbox" class="sar-enabled" checked>
+            <input type="text" class="sar-name" placeholder="Rule name">
+            <button class="btn btn-mini btn-danger sar-delete">&times;</button>
+          </div>
+          <div class="sar-conditions">
+            <div class="sar-cond-row">
+              <select class="sar-metric">
+                <option value="cpu">CPU Usage</option>
+                <option value="mem">Memory Usage</option>
+                <option value="disk">Disk Usage</option>
+                <option value="temp">CPU Temp</option>
+                <option value="bms">Battery SOC</option>
+                <option value="workstate">Work State</option>
+              </select>
+              <select class="sar-op">
+                <option value="gt">&gt;</option>
+                <option value="gte">&ge;</option>
+                <option value="lt">&lt;</option>
+                <option value="lte">&le;</option>
+                <option value="eq">=</option>
+                <option value="ne">&ne;</option>
+              </select>
+              <input type="number" class="sar-value" value="80" min="0">
+            </div>
+          </div>
+          <div class="sar-action-row">
+            <span>Action:</span>
+            <label><input type="checkbox" class="sar-act-toast" checked> Toast</label>
+            <label><input type="checkbox" class="sar-act-sound"> Sound</label>
+            <label><input type="checkbox" class="sar-act-log" checked> Log</label>
+          </div>
+        </div>
+      </template>
+      <div class="alarm-actions">
+        <button id="btn-alarm-save" class="btn btn-primary" data-i18n="common.save">Save</button>
+        <button id="btn-alarm-close" class="btn" data-i18n="common.close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Floating Widget (BMS/WorkState) -->
+  <div id="floating-widget" class="floating-widget hidden">
+    <div class="floating-widget-header" id="floating-widget-header">
+      <span class="floating-widget-title">Status</span>
+      <button class="floating-widget-close" id="floating-widget-close">&times;</button>
+    </div>
+    <div class="floating-widget-body">
+      <div class="fw-row">
+        <span class="fw-label">Robot</span>
+        <span class="fw-value" id="fw-robot-id">--</span>
+      </div>
+      <div class="fw-row">
+        <span class="fw-label">BMS</span>
+        <span class="fw-value" id="fw-bms-soc">--%</span>
+      </div>
+      <div class="fw-row">
+        <span class="fw-label">Battery</span>
+        <div class="fw-bms-bar"><div class="fw-bms-fill" id="fw-bms-fill"></div></div>
+      </div>
+      <div class="fw-row">
+        <span class="fw-label">State</span>
+        <span class="fw-value" id="fw-work-state"><span class="fw-ws-dot" id="fw-ws-dot"></span>--</span>
+      </div>
+      <div class="fw-row">
+        <span class="fw-label">Pose</span>
+        <span class="fw-value" id="fw-pose">--</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Undo/Redo for Action Queue (in action tab header) -->
+
+  <!-- Initial Setup Mode Modal -->
+  <div id="init-setup-modal" class="modal">
+    <div class="modal-content init-setup-modal-content">
+      <div class="init-setup-header">
+        <h3 data-i18n="initSetup.title">Initial Setup Mode</h3>
+        <button id="init-setup-close" class="btn btn-small">&times;</button>
+      </div>
+
+      <!-- Connection -->
+      <div class="init-setup-conn">
+        <input type="text" id="init-setup-ip" placeholder="Robot IP (e.g. 192.168.3.5)" value="192.168.3.5">
+        <input type="number" id="init-setup-port" placeholder="SSH Port" value="22" min="1" max="65535" style="width:80px;">
+        <input type="text" id="init-setup-user" placeholder="Username" value="syscon" style="width:100px;">
+        <input type="password" id="init-setup-pw" placeholder="Password (optional)">
+        <button id="init-setup-connect" class="btn btn-primary btn-small">Connect</button>
+        <button id="init-setup-disconnect" class="btn btn-danger btn-small" disabled>Disconnect</button>
+        <span id="init-setup-status" class="status">Disconnected</span>
+      </div>
+
+      <!-- System Info Panel (auto-detected on connect) -->
+      <div id="init-setup-sysinfo-panel" class="init-setup-sysinfo-panel" style="display:none;">
+        <div class="sysinfo-grid">
+          <div class="sysinfo-item">
+            <span class="sysinfo-label">PC Manufacturer</span>
+            <span class="sysinfo-value" id="sysinfo-manufacturer">-</span>
+          </div>
+          <div class="sysinfo-item">
+            <span class="sysinfo-label">Ubuntu</span>
+            <span class="sysinfo-value" id="sysinfo-ubuntu">-</span>
+          </div>
+          <div class="sysinfo-item">
+            <span class="sysinfo-label">ROS</span>
+            <span class="sysinfo-value" id="sysinfo-ros">-</span>
+          </div>
+          <div class="sysinfo-item">
+            <span class="sysinfo-label">LAN Cards</span>
+            <span class="sysinfo-value" id="sysinfo-lan-cards">-</span>
+          </div>
+          <div class="sysinfo-item">
+            <span class="sysinfo-label">Hostname</span>
+            <span class="sysinfo-value" id="sysinfo-hostname">-</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tabs -->
+      <div class="init-setup-tabs">
+        <button class="init-setup-tab active" data-target="init-tab-network">Network</button>
+        <button class="init-setup-tab" data-target="init-tab-bashrc">.bashrc Env Vars</button>
+        <button class="init-setup-tab" data-target="init-tab-hosts">/etc/hosts</button>
+      </div>
+
+      <!-- Tab: Network Settings -->
+      <div class="init-setup-tab-content active" id="init-tab-network">
+        <div class="init-setup-toolbar">
+          <button id="init-setup-load-network" class="btn btn-small" disabled>Load Current</button>
+          <button id="init-setup-apply-network" class="btn btn-primary btn-small" disabled>Apply Settings</button>
+          <span id="init-setup-network-status" class="init-setup-file-status"></span>
+        </div>
+
+        <div class="init-setup-network-form">
+          <div class="init-setup-form-section">
+            <h4>Essential Settings</h4>
+            <div class="init-setup-form-row">
+              <label for="net-robot-id">Robot ID (ROS_HOSTNAME)</label>
+              <input type="text" id="net-robot-id" placeholder="미설정 — Load Current를 먼저 실행하세요" disabled>
+              <span class="form-hint">ex: R_001, R_TEST</span>
+            </div>
+            <div class="init-setup-form-row">
+              <label for="net-lan-card">LAN Card Name</label>
+              <input type="text" id="net-lan-card" placeholder="미설정 — Load Current를 먼저 실행하세요" disabled>
+              <span class="form-hint">ex: eno2 (Siemens), enp2s0 (Advantech)</span>
+            </div>
+            <div class="init-setup-form-row">
+              <label for="net-ip">IP Address</label>
+              <input type="text" id="net-ip" placeholder="미설정 — Load Current를 먼저 실행하세요" disabled>
+              <span class="form-hint">Robot's IP address (ex: 192.168.20.101)</span>
+            </div>
+            <div class="init-setup-form-row">
+              <label for="net-subnet">Subnet Mask</label>
+              <input type="text" id="net-subnet" placeholder="255.255.255.0" value="255.255.255.0" disabled>
+              <span class="form-hint">기본값 255.255.255.0</span>
+            </div>
+          </div>
+
+          <div class="init-setup-form-section">
+            <h4>Optional Settings</h4>
+            <div class="init-setup-form-row">
+              <label for="net-gateway">Gateway</label>
+              <input type="text" id="net-gateway" placeholder="미설정 (선택사항)" disabled>
+              <span class="form-hint">인터넷 연결된 인터페이스에만 설정 (ex: 192.168.20.1)</span>
+            </div>
+            <div class="init-setup-form-row">
+              <label for="net-dns">DNS Servers</label>
+              <input type="text" id="net-dns" placeholder="미설정 (선택사항)" disabled>
+              <span class="form-hint">공백으로 구분 (ex: 8.8.8.8 8.8.4.4)</span>
+            </div>
+            <div class="init-setup-form-row">
+              <label for="net-robot-model">Robot Model</label>
+              <input type="text" id="net-robot-model" placeholder="미설정 (선택사항)" disabled>
+              <span class="form-hint">ROBOT_MODEL environment variable</span>
+            </div>
+            <div class="init-setup-form-row">
+              <label for="net-plc-ip">PLC IP Address</label>
+              <input type="text" id="net-plc-ip" placeholder="미설정 (선택사항)" disabled>
+              <span class="form-hint">PLC 장비 IP (ex: 192.168.20.200)</span>
+            </div>
+          </div>
+
+          <input type="hidden" id="net-ubuntu-ver">
+          <input type="hidden" id="net-lan-cards-list">
+        </div>
+      </div>
+
+      <!-- Tab: bashrc -->
+      <div class="init-setup-tab-content" id="init-tab-bashrc">
+        <div class="init-setup-toolbar">
+          <button id="init-setup-load-bashrc" class="btn btn-small" disabled>Load</button>
+          <button id="init-setup-save-bashrc" class="btn btn-primary btn-small" disabled>Save (bashrc)</button>
+          <span id="init-setup-bashrc-status" class="init-setup-file-status"></span>
+        </div>
+        <div class="init-setup-env-list" id="init-setup-env-list">
+          <p class="init-setup-placeholder">Connect first, then click "Load"</p>
+        </div>
+        <div class="init-setup-env-add">
+          <input type="text" id="init-setup-new-key" placeholder="Variable name (e.g. ROBOT_MODEL)">
+          <input type="text" id="init-setup-new-val" placeholder="Value">
+          <button id="init-setup-add-env" class="btn btn-small" disabled>Add</button>
+        </div>
+      </div>
+
+      <!-- Tab: hosts -->
+      <div class="init-setup-tab-content" id="init-tab-hosts">
+        <div class="init-setup-toolbar">
+          <button id="init-setup-load-hosts" class="btn btn-small" disabled>Load</button>
+          <button id="init-setup-save-hosts" class="btn btn-primary btn-small" disabled>Save (hosts)</button>
+          <span id="init-setup-hosts-status" class="init-setup-file-status"></span>
+        </div>
+        <textarea id="init-setup-hosts-editor" class="init-setup-editor" placeholder="Connect first, then click Load" rows="12" disabled></textarea>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
+
+  <!-- Scripts -->
+  <script src="https://cdn.jsdelivr.net/npm/roslib@1.0.1/build/roslib.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-search@0.13.0/lib/xterm-addon-search.min.js"></script>
+  <script src="js/i18n.js"></script>
+  <script src="js/app.js?v=20260723-resume-active-robot"></script>
+  <script src="js/dashboard.js"></script>
+  <script src="js/ros-manager.js?v=20260723-charge-service-compat"></script>
+  <script src="js/test-mode.js"></script>
+  <script src="js/ros-info.js"></script>
+  <script src="js/map-context-menu.js"></script>
+  <!-- Test Mode Loading Overlay -->
+  <div id="testmode-loading-overlay" class="testmode-loading-overlay" style="display:none;">
+    <div class="testmode-loading-box">
+      <div class="testmode-loading-title">Starting Test Mode...</div>
+      <div class="testmode-loading-step" id="testmode-step-text">Waiting for rosbridge server</div>
+      <div class="testmode-progress-bar">
+        <div class="testmode-progress-fill" id="testmode-progress-fill"></div>
+      </div>
+      <div class="testmode-loading-pct" id="testmode-loading-pct">0%</div>
+    </div>
+  </div>
+
+  <!-- Map Backup Modal -->
+  <div id="map-backup-modal" class="modal">
+    <div class="modal-content map-backup-modal-content">
+      <div class="modal-header">
+        <h3>Map Backups</h3>
+        <button class="modal-close" id="btn-map-backup-close">&times;</button>
+      </div>
+      <div class="map-backup-body">
+        <div class="map-backup-list" id="map-backup-list">
+          <div class="map-backup-empty">No backups found</div>
+        </div>
+        <div class="map-backup-preview" id="map-backup-preview">
+          <canvas id="map-backup-canvas"></canvas>
+        </div>
+      </div>
+      <div class="modal-buttons">
+        <button id="btn-map-backup-restore" class="btn btn-primary" disabled>Restore</button>
+        <button id="btn-map-backup-rename" class="btn" disabled>Rename</button>
+        <button id="btn-map-backup-delete" class="btn btn-danger" disabled>Delete</button>
+        <button class="btn" id="btn-map-backup-close2">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/ssh-terminal.js"></script>
+  <script src="js/file-transfer.js?v=20260723-active-robot-session"></script>
+  <script src="js/commands.js"></script>
+  <script src="js/action-sender.js?v=20260723-action-type-codes"></script>
+  <script src="js/jog-control.js?v=20260723-chassis-picker"></script>
+  <script src="js/vel-monitor.js"></script>
+  <script src="js/docking-test.js"></script>
+  <script src="js/init-setup.js"></script>
+  <script src="js/sysinfo.js"></script>
+  <script src="js/smart-alarm.js"></script>
+  <script src="js/rosout-viewer.js"></script>
+  <script src="js/error-codes.js"></script>
+  <script src="js/health-check.js"></script>
+  <script src="js/rosbag-control.js"></script>
+  <script src="js/incident-report.js"></script>
+  <script src="js/file-diff.js"></script>
+  <script src="js/map-file-manager.js"></script>
+  <script src="js/network-config.js"></script>
+  <script src="js/param-tuning.js"></script>
+  <script src="js/diagnostic-tree.js"></script>
+  <script src="js/performance-profiler.js"></script>
+  <script src="js/no-go-zone-editor.js"></script>
+  <script src="js/map-version-control.js"></script>
+  <script src="js/fleet-dashboard.js"></script>
+  <script src="js/fleet-control.js?v=20260723-fleet-robot-shape"></script>
+  <script src="js/robot-comparison.js"></script>
+  <script src="js/diagnostics.js"></script>
+  <script src="js/lidar-align.js"></script>
+  <script src="js/can-robot-view.js"></script>
+  <script src="js/can-diagnostics.js"></script>
+</body>
+</html>

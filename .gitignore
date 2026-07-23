@@ -1,0 +1,25 @@
+# Local secrets and runtime configuration
+.env
+config/robots.json
+
+# Dependencies and generated output
+node_modules/
+dist/
+__pycache__/
+*.py[cod]
+*.log
+coverage/
+
+# Local agent/editor state
+.agents/
+.claude/
+.codex/
+.sisyphus/
+.vscode/
+.idea/
+
+# Local backups and platform artifacts
+backup/
+NUL
+.DS_Store
+Thumbs.db

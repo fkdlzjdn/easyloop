@@ -1,0 +1,180 @@
+{
+  "header": {
+    "title": "EasyLoop",
+    "noRobot": "-- ロボットなし --",
+    "disconnected": "未接続",
+    "connected": "接続済み",
+    "robotManager": "ロボット管理",
+    "testMode": "テストモード",
+    "alarm": "アラーム",
+    "log": "ログ",
+    "export": "エクスポート",
+    "import": "インポート",
+    "logout": "ログアウト",
+    "settings": "設定"
+  },
+  "login": {
+    "title": "EasyLoop",
+    "placeholder": "パスワード",
+    "submit": "ログイン",
+    "error": "パスワードが正しくありません",
+    "required": "パスワードを入力してください"
+  },
+  "tabs": {
+    "dashboard": "ダッシュボード",
+    "ros": "ROS制御",
+    "action": "アクション",
+    "camera": "カメラ",
+    "ssh": "SSHターミナル",
+    "files": "ファイル転送",
+    "docking": "ドッキングテスト",
+    "monitoring": "モニタリング",
+    "scheduler": "ミッションスケジューラ"
+  },
+  "map": {
+    "title": "マップ",
+    "collapse": "マップパネルの折りたたみ/展開",
+    "zoomIn": "ズームイン",
+    "zoomOut": "ズームアウト",
+    "resetZoom": "ズームリセット",
+    "setPose": "ポーズ設定",
+    "navGoal": "ナビゴール",
+    "follow": "フォロー",
+    "addPoi": "+ POI",
+    "slamStart": "開始",
+    "slamStop": "停止",
+    "saveMap": "保存"
+  },
+  "dashboard": {
+    "status": "ステータス",
+    "refresh": "更新",
+    "widgetConfig": "設定",
+    "workState": "作業状態",
+    "colorConfig": "色設定",
+    "recentActions": "最近のアクション/コマンド",
+    "clearHistory": "履歴をクリア",
+    "testHistory": "テスト履歴",
+    "notifications": "通知",
+    "clearNotifications": "通知をクリア"
+  },
+  "action": {
+    "sendAction": "アクション送信",
+    "targetRobot": "対象ロボット:",
+    "actionType": "アクションタイプ:",
+    "taskId": "タスクID:",
+    "loop": "ループ:",
+    "addToQueue": "キューに追加",
+    "sendAll": "ゴール送信",
+    "cancel": "キャンセル",
+    "clearQueue": "キューをクリア",
+    "favorites": "お気に入り",
+    "saveFavorite": "+ 保存",
+    "noFavorites": "保存されたお気に入りはありません",
+    "presets": "パラメータプリセット"
+  },
+  "ros": {
+    "refreshAll": "すべて更新",
+    "nodes": "ノード",
+    "topics": "トピック",
+    "services": "サービス",
+    "params": "パラメータ",
+    "serviceCall": "サービス呼び出し",
+    "paramGetSet": "パラメータ取得/設定",
+    "topicSubscribe": "トピック購読"
+  },
+  "ssh": {
+    "connect": "接続",
+    "disconnect": "切断"
+  },
+  "files": {
+    "browse": "参照",
+    "upload": "アップロード",
+    "fileName": "名前",
+    "fileSize": "サイズ",
+    "fileModified": "更新日時",
+    "fileAction": "操作"
+  },
+  "monitoring": {
+    "title": "全ロボットモニタリング",
+    "noRobots": "登録されたロボットがありません。「ロボット管理」でロボットを追加してください。"
+  },
+  "scheduler": {
+    "title": "ミッションスケジューラ",
+    "addMission": "+ ミッション追加",
+    "clearAll": "すべて削除",
+    "noMissions": "登録されたミッションがありません。"
+  },
+  "settings": {
+    "title": "設定",
+    "fontScale": "フォントサイズ",
+    "colorBlind": "色覚異常モード",
+    "language": "言語",
+    "touchMode": "タッチモード",
+    "touchAuto": "自動",
+    "touchOn": "常にオン",
+    "touchOff": "常にオフ",
+    "darkMap": "ダークマップ",
+    "breadcrumb": "軌跡表示",
+    "splitView": "分割ビュー",
+    "reset": "デフォルトに戻す",
+    "close": "閉じる"
+  },
+  "contextMenu": {
+    "navigateHere": "ここに移動",
+    "setPose": "ここにポーズを設定",
+    "addPoi": "POI追加",
+    "copyCoords": "座標をコピー"
+  },
+  "shortcuts": {
+    "title": "キーボードショートカット",
+    "tabSwitch": "タブ切り替え",
+    "jogMove": "ジョグ移動",
+    "jogRotate": "ジョグ回転",
+    "emergencyStop": "緊急停止",
+    "sendAction": "アクション送信",
+    "closeModal": "モーダルを閉じる",
+    "showHelp": "ヘルプ表示",
+    "close": "閉じる",
+    "search": "検索",
+    "toggleMap": "マップ切り替え",
+    "fullscreen": "フルスクリーン",
+    "navGoal": "ナビゴール",
+    "setPose": "ポーズ設定"
+  },
+  "wizard": {
+    "title": "セットアップウィザード",
+    "step1Title": "ロボット接続",
+    "step1Desc": "ロボットIPとIDを入力してください",
+    "step2Title": "接続確認",
+    "step2Desc": "ROS Bridge接続を確認します",
+    "step3Title": "トピック確認",
+    "step3Desc": "必須トピック受信を確認します",
+    "step4Title": "マップ読み込み",
+    "step4Desc": "マップデータを確認します",
+    "step5Title": "完了",
+    "step5Desc": "セットアップが完了しました",
+    "next": "次へ",
+    "prev": "前へ",
+    "finish": "完了",
+    "skip": "スキップ"
+  },
+  "health": {
+    "ssh": "SSH",
+    "ros": "ROS",
+    "net": "NET"
+  },
+  "toast": {
+    "copied": "クリップボードにコピーしました",
+    "savedPoi": "POIを保存しました",
+    "settingsSaved": "設定を保存しました",
+    "settingsReset": "設定を初期化しました"
+  },
+  "common": {
+    "save": "保存",
+    "close": "閉じる",
+    "cancel": "キャンセル",
+    "apply": "適用",
+    "delete": "削除",
+    "ok": "OK"
+  }
+}

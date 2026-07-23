@@ -1,0 +1,107 @@
+{
+  "templates": [
+    {
+      "id": "scorpion_v1",
+      "name": "Scorpion V1",
+      "description": "Standard Scorpion AMR platform",
+      "rosBridgePort": 9090,
+      "defaultParams": {
+        "max_trans_vel": 0.8,
+        "max_rot_vel": 1.0,
+        "dock_type": "LV_dock",
+        "camera_count": 2
+      },
+      "topics": {
+        "bms": "/{robotId}/bms",
+        "robotState": "/{robotId}/robot_state",
+        "pose": "/{robotId}/amcl_pose",
+        "map": "/{robotId}/map",
+        "scan": "/{robotId}/scan",
+        "cam1Color": "/{robotId}/cam_1/color/image_raw/compressed",
+        "cam2Color": "/{robotId}/cam_2/color/image_raw/compressed"
+      },
+      "services": {
+        "goal": "/{robotId}/TARU/goal",
+        "cancel": "/{robotId}/TARU/cancel"
+      }
+    },
+    {
+      "id": "scorpion_v2",
+      "name": "Scorpion V2",
+      "description": "Enhanced Scorpion with lift mechanism",
+      "rosBridgePort": 9090,
+      "defaultParams": {
+        "max_trans_vel": 1.0,
+        "max_rot_vel": 1.5,
+        "dock_type": "LV_dock",
+        "camera_count": 2,
+        "has_lift": true
+      },
+      "topics": {
+        "bms": "/{robotId}/bms",
+        "robotState": "/{robotId}/robot_state",
+        "pose": "/{robotId}/amcl_pose",
+        "map": "/{robotId}/map",
+        "scan": "/{robotId}/scan",
+        "cam1Color": "/{robotId}/cam_1/color/image_raw/compressed",
+        "cam2Color": "/{robotId}/cam_2/color/image_raw/compressed",
+        "liftStatus": "/{robotId}/lift_status"
+      },
+      "services": {
+        "goal": "/{robotId}/TARU/goal",
+        "cancel": "/{robotId}/TARU/cancel",
+        "lift": "/{robotId}/TARU/lift"
+      }
+    },
+    {
+      "id": "conveyor_bot",
+      "name": "Conveyor Bot",
+      "description": "AMR with conveyor belt system",
+      "rosBridgePort": 9090,
+      "defaultParams": {
+        "max_trans_vel": 0.6,
+        "max_rot_vel": 0.8,
+        "dock_type": "Rack_dock",
+        "camera_count": 1,
+        "has_conveyor": true
+      },
+      "topics": {
+        "bms": "/{robotId}/bms",
+        "robotState": "/{robotId}/robot_state",
+        "pose": "/{robotId}/amcl_pose",
+        "map": "/{robotId}/map",
+        "scan": "/{robotId}/scan",
+        "cam1Color": "/{robotId}/cam_1/color/image_raw/compressed",
+        "conveyorStatus": "/{robotId}/conveyor_status"
+      },
+      "services": {
+        "goal": "/{robotId}/TARU/goal",
+        "cancel": "/{robotId}/TARU/cancel",
+        "conveyor": "/{robotId}/TARU/conveyor"
+      }
+    },
+    {
+      "id": "custom",
+      "name": "Custom Robot",
+      "description": "User-defined robot configuration",
+      "rosBridgePort": 9090,
+      "defaultParams": {
+        "max_trans_vel": 0.5,
+        "max_rot_vel": 0.5,
+        "dock_type": "L_dock",
+        "camera_count": 0
+      },
+      "topics": {
+        "bms": "/{robotId}/bms",
+        "robotState": "/{robotId}/robot_state",
+        "pose": "/{robotId}/amcl_pose",
+        "map": "/{robotId}/map",
+        "scan": "/{robotId}/scan"
+      },
+      "services": {
+        "goal": "/{robotId}/TARU/goal",
+        "cancel": "/{robotId}/TARU/cancel"
+      }
+    }
+  ]
+}

@@ -1,0 +1,234 @@
+{
+  "header": {
+    "title": "EasyLoop",
+    "noRobot": "-- No Robot --",
+    "disconnected": "Disconnected",
+    "connected": "Connected",
+    "robotManager": "Robot Settings",
+    "testMode": "Test Mode",
+    "alarm": "Alarm",
+    "log": "Log",
+    "export": "Export",
+    "import": "Import",
+    "logout": "Logout",
+    "settings": "Settings"
+  },
+  "login": {
+    "title": "EasyLoop",
+    "placeholder": "Password",
+    "submit": "Sign In",
+    "error": "Invalid password",
+    "required": "Please enter password"
+  },
+  "eventLog": {
+    "title": "Event Log",
+    "all": "All",
+    "info": "Info",
+    "success": "Success",
+    "warning": "Warning",
+    "error": "Error",
+    "clear": "Clear"
+  },
+  "tabs": {
+    "dashboard": "Dashboard",
+    "ros": "ROS Control",
+    "action": "Action",
+    "camera": "Camera",
+    "ssh": "SSH Terminal",
+    "files": "File Transfer",
+    "docking": "Docking Test",
+    "monitoring": "Monitoring",
+    "scheduler": "Mission Scheduler"
+  },
+  "map": {
+    "title": "Map",
+    "collapse": "Collapse/Expand Map Panel",
+    "zoomIn": "Zoom In",
+    "zoomOut": "Zoom Out",
+    "resetZoom": "Reset Zoom",
+    "setPose": "Set Pose",
+    "navGoal": "Nav Goal",
+    "follow": "Follow",
+    "addPoi": "+ POI",
+    "slamStart": "Start",
+    "slamStop": "Stop",
+    "saveMap": "Save"
+  },
+  "dashboard": {
+    "status": "Status",
+    "refresh": "Refresh",
+    "widgetConfig": "Settings",
+    "workState": "Work State:",
+    "colorConfig": "Color Settings",
+    "recentActions": "Recent Actions",
+    "clearHistory": "Clear History",
+    "testHistory": "Test History",
+    "notifications": "Notifications",
+    "clearNotifications": "Clear Notifications",
+    "bmsDetails": "BMS Details"
+  },
+  "action": {
+    "sendAction": "Send Action",
+    "targetRobot": "Target Robot:",
+    "actionType": "Action Type:",
+    "taskId": "Task ID:",
+    "loop": "Loop:",
+    "addToQueue": "Add to Queue",
+    "sendAll": "Send Goal",
+    "cancel": "Cancel",
+    "clearQueue": "Clear Queue",
+    "favorites": "Favorites",
+    "saveFavorite": "+ Save",
+    "noFavorites": "No saved favorites",
+    "presets": "Parameter Presets"
+  },
+  "ros": {
+    "refreshAll": "Refresh All",
+    "nodes": "Nodes",
+    "topics": "Topics",
+    "services": "Services",
+    "params": "Params",
+    "serviceCall": "Service Call",
+    "paramGetSet": "Get/Set Parameter",
+    "topicSubscribe": "Subscribe Topic"
+  },
+  "ssh": {
+    "connect": "Connect",
+    "disconnect": "Disconnect",
+    "passwordRequired": "SSH Password Required"
+  },
+  "files": {
+    "browse": "Browse",
+    "upload": "Upload",
+    "uploadTitle": "File Upload",
+    "fileName": "Name",
+    "fileSize": "Size",
+    "fileModified": "Modified",
+    "fileAction": "Actions"
+  },
+  "monitoring": {
+    "title": "Robot Monitoring",
+    "noRobots": "No robots connected. Use Robot Scan or add one manually from ⚙ settings."
+  },
+  "robotManager": {
+    "title": "Robot Settings",
+    "addRobot": "Add Manually",
+    "ipAddress": "IP Address",
+    "robotId": "Robot ID",
+    "status": "Status",
+    "actions": "Actions"
+  },
+  "bms": {
+    "title": "BMS Details",
+    "voltage": "Voltage",
+    "current": "Current",
+    "soc": "SOC"
+  },
+  "cmd": {
+    "title": "Quick Commands",
+    "cameraSerial": "Camera Serial",
+    "checkSerial": "Check Serial"
+  },
+  "jog": {
+    "title": "Jog Control",
+    "linear": "Linear (m/s):",
+    "angular": "Angular (rad/s):",
+    "topic": "Topic:"
+  },
+  "alarm": {
+    "title": "Alarm Settings",
+    "bmsLow": "BMS SOC Low Battery",
+    "wsError": "Work State Error Detection",
+    "topicDrop": "Topic Drop Detection",
+    "sound": "Alarm Sound"
+  },
+  "initSetup": {
+    "title": "Initial Setup Mode",
+    "connect": "Connect",
+    "disconnect": "Disconnect",
+    "load": "Load",
+    "save": "Save"
+  },
+  "scheduler": {
+    "title": "Mission Scheduler",
+    "addMission": "+ Add Mission",
+    "clearAll": "Clear All",
+    "noMissions": "No missions registered.",
+    "execLog": "Execution Log",
+    "noLogs": "No logs"
+  },
+  "settings": {
+    "title": "Settings",
+    "fontScale": "Font Size",
+    "colorBlind": "Colorblind Mode",
+    "language": "Language",
+    "touchMode": "Touch Mode",
+    "touchAuto": "Auto",
+    "touchOn": "Always On",
+    "touchOff": "Always Off",
+    "darkMap": "Dark Map",
+    "breadcrumb": "Show Trajectory",
+    "splitView": "Split View",
+    "reset": "Reset to Default",
+    "close": "Close"
+  },
+  "contextMenu": {
+    "navigateHere": "Navigate Here",
+    "setPose": "Set Pose Here",
+    "addPoi": "Add POI",
+    "copyCoords": "Copy Coordinates"
+  },
+  "shortcuts": {
+    "title": "Keyboard Shortcuts",
+    "tabSwitch": "Switch Tab",
+    "jogMove": "Jog Move",
+    "jogRotate": "Jog Rotate",
+    "emergencyStop": "Emergency Stop",
+    "sendAction": "Send Action",
+    "closeModal": "Close Modal",
+    "showHelp": "Show Help",
+    "close": "Close",
+    "search": "Search",
+    "toggleMap": "Toggle Map",
+    "fullscreen": "Fullscreen",
+    "navGoal": "Nav Goal",
+    "setPose": "Set Pose"
+  },
+  "wizard": {
+    "title": "Setup Wizard",
+    "step1Title": "Robot Connection",
+    "step1Desc": "Enter robot IP and ID",
+    "step2Title": "Connection Check",
+    "step2Desc": "Verifying ROS Bridge connection",
+    "step3Title": "Topic Check",
+    "step3Desc": "Verifying required topic reception",
+    "step4Title": "Map Load",
+    "step4Desc": "Verifying map data",
+    "step5Title": "Complete",
+    "step5Desc": "Setup completed",
+    "next": "Next",
+    "prev": "Previous",
+    "finish": "Finish",
+    "skip": "Skip"
+  },
+  "health": {
+    "ssh": "SSH",
+    "ros": "ROS",
+    "net": "NET"
+  },
+  "toast": {
+    "copied": "Copied to clipboard",
+    "savedPoi": "POI saved",
+    "settingsSaved": "Settings saved",
+    "settingsReset": "Settings reset"
+  },
+  "common": {
+    "save": "Save",
+    "close": "Close",
+    "cancel": "Cancel",
+    "apply": "Apply",
+    "delete": "Delete",
+    "ok": "OK",
+    "clear": "Clear"
+  }
+}
