@@ -536,59 +536,84 @@ const App = {
   setupTabs() {
     const tabs = document.querySelectorAll('.tab-btn');
     const contents = document.querySelectorAll('.tab-content');
+    const miniControlBtn = document.getElementById('btn-mini-control');
+    const miniControlLabel = document.getElementById('mini-control-button-label');
+    let previousWorkspaceTabId = 'tab-dashboard';
+
+    const activateWorkspace = targetId => {
+      const targetContent = document.getElementById(targetId);
+      if (!targetContent) return;
+      const fleetControlActive = targetId === 'tab-fleet-control';
+
+      tabs.forEach(t => t.classList.remove('active'));
+      contents.forEach(c => c.classList.remove('active'));
+
+      const targetTab = document.querySelector(`.tab-btn[data-tab="${targetId}"]`);
+      if (targetTab) targetTab.classList.add('active');
+      targetContent.classList.add('active');
+
+      if (!fleetControlActive) previousWorkspaceTabId = targetId;
+      if (miniControlBtn) {
+        miniControlBtn.classList.toggle('active', fleetControlActive);
+        miniControlBtn.setAttribute('aria-pressed', String(fleetControlActive));
+        miniControlBtn.title = fleetControlActive
+          ? '직전에 보던 작업 화면으로 돌아가기'
+          : '연결된 로봇을 한 화면에서 보는 미니관제로 전환';
+      }
+      if (miniControlLabel) {
+        miniControlLabel.textContent = fleetControlActive ? '작업화면' : '미니관제';
+      }
+
+      // Save active workspace to session
+      _safeSetItem('amrActiveTab', targetId);
+
+      // Resize terminal when switching to SSH tab
+      if (targetId === 'tab-ssh' && SSHTerminal.terminal) {
+        setTimeout(() => SSHTerminal.fit(), 100);
+      }
+
+      // Render graphs when switching to Docking tab
+      if (targetId === 'tab-docking' && typeof DockingTest !== 'undefined') {
+        setTimeout(() => DockingTest.renderGraphs(), 100);
+      }
+
+      // Re-render monitoring cards when switching to monitoring tab
+      if (targetId === 'tab-monitoring') {
+        this.renderMonitoringCards();
+      }
+
+      document.getElementById('main-layout')?.classList.toggle('fleet-control-mode', fleetControlActive);
+      if (typeof FleetControl !== 'undefined') {
+        if (fleetControlActive) FleetControl.activate();
+        else FleetControl.deactivate();
+      }
+
+      // Notify Diagnostics module when tab is activated
+      if (targetId === 'tab-diagnostics' && typeof Diagnostics !== 'undefined') {
+        Diagnostics.onTabActivated();
+      }
+
+      // Notify CAN Diagnostics module when tab is activated
+      if (targetId === 'tab-can-diag' && typeof CanDiag !== 'undefined') {
+        CanDiag.onTabActivated();
+      }
+    };
 
     tabs.forEach(tab => {
-      tab.addEventListener('click', () => {
-        const targetId = tab.dataset.tab;
+      tab.addEventListener('click', () => activateWorkspace(tab.dataset.tab));
+    });
 
-        tabs.forEach(t => t.classList.remove('active'));
-        contents.forEach(c => c.classList.remove('active'));
-
-        tab.classList.add('active');
-        document.getElementById(targetId).classList.add('active');
-
-        // Save active tab to session
-        _safeSetItem('amrActiveTab', targetId);
-
-        // Resize terminal when switching to SSH tab
-        if (targetId === 'tab-ssh' && SSHTerminal.terminal) {
-          setTimeout(() => SSHTerminal.fit(), 100);
-        }
-
-        // Render graphs when switching to Docking tab
-        if (targetId === 'tab-docking' && typeof DockingTest !== 'undefined') {
-          setTimeout(() => DockingTest.renderGraphs(), 100);
-        }
-
-        // Re-render monitoring cards when switching to monitoring tab
-        if (targetId === 'tab-monitoring') {
-          this.renderMonitoringCards();
-        }
-
-        const fleetControlActive = targetId === 'tab-fleet-control';
-        document.getElementById('main-layout')?.classList.toggle('fleet-control-mode', fleetControlActive);
-        if (typeof FleetControl !== 'undefined') {
-          if (fleetControlActive) FleetControl.activate();
-          else FleetControl.deactivate();
-        }
-
-        // Notify Diagnostics module when tab is activated
-        if (targetId === 'tab-diagnostics' && typeof Diagnostics !== 'undefined') {
-          Diagnostics.onTabActivated();
-        }
-
-        // Notify CAN Diagnostics module when tab is activated
-        if (targetId === 'tab-can-diag' && typeof CanDiag !== 'undefined') {
-          CanDiag.onTabActivated();
-        }
-      });
+    miniControlBtn?.addEventListener('click', () => {
+      const fleetControlActive = document.getElementById('main-layout')
+        ?.classList.contains('fleet-control-mode');
+      activateWorkspace(fleetControlActive ? previousWorkspaceTabId : 'tab-fleet-control');
     });
 
     // Restore last active tab
     const savedTab = localStorage.getItem('amrActiveTab');
     if (savedTab) {
       const tabBtn = document.querySelector(`.tab-btn[data-tab="${savedTab}"]`);
-      if (tabBtn) tabBtn.click();
+      if (tabBtn || savedTab === 'tab-fleet-control') activateWorkspace(savedTab);
     }
 
     // Camera tab checkbox handlers
@@ -742,9 +767,8 @@ const App = {
       bmsGaugeEl.style.cursor = 'pointer';
       bmsGaugeEl.addEventListener('click', () => {
         if (typeof TestMode !== 'undefined' && TestMode.enabled) {
-          TestMode._bmsCharging = !TestMode._bmsCharging;
-          TestMode._bmsChargingManual = true; // prevent setWorkState from overriding
-          this.toast(TestMode._bmsCharging ? 'Charging started (test)' : 'Charging stopped (test)', 'info');
+          const charging = TestMode.toggleActiveCharging();
+          this.toast(charging ? 'Charging started (test)' : 'Charging stopped (test)', 'info');
         }
       });
     }
@@ -1473,7 +1497,9 @@ const App = {
 
     const previousIndex = this.activeSlotIndex;
     this.activeSlotIndex = index;
-    this._rememberActiveRobot(this.robotSlots[index]);
+    if (!this.robotSlots[index].virtualTestRobot) {
+      this._rememberActiveRobot(this.robotSlots[index]);
+    }
     this.updateActiveRobotStatus();
     this.renderActiveRobotSelector();
 
@@ -1510,12 +1536,9 @@ const App = {
 
     this.toast(`활성 로봇 전환: ${this.robotSlots[index].robotId}`, 'info');
 
-    // B4 fix: TestMode.start()에 password 전달 (비밀번호 프롬프트로 받아서 전달)
+    // Test Mode virtual robots share one local bridge and can switch instantly.
     if (typeof TestMode !== 'undefined' && TestMode.enabled) {
-      TestMode.stop();
-      TestMode._promptPassword().then(password => {
-        if (password !== null) TestMode.start(password);
-      });
+      TestMode.onActiveRobotChanged(index);
     }
   },
 
@@ -1672,12 +1695,14 @@ const App = {
         <td>${tunnelDisplay}</td>
         <td><span class="rm-status-dot ${connClass}">${connDot}</span>${connText}</td>
         <td>
-          ${slot.connected
+          ${slot.virtualTestRobot
+            ? '<span class="test-robot-badge">Test Mode 임시 로봇</span>'
+            : slot.connected
             ? `<button class="btn btn-small btn-danger" onclick="App.disconnectSlot(${index}); App.renderRobotManagerList();">연결 해제</button>`
             : `<button class="btn btn-small btn-primary" onclick="App.connectSlot(${index}); App.renderRobotManagerList();">연결</button>`
           }
           <button class="btn btn-small" onclick="App.switchActiveRobot(${index}); App.renderRobotManagerList();" ${isActive ? 'disabled' : ''}>활성화</button>
-          <button class="btn btn-small btn-danger" onclick="App.removeRobotSlot(${index});">삭제</button>
+          ${slot.virtualTestRobot ? '' : `<button class="btn btn-small btn-danger" onclick="App.removeRobotSlot(${index});">삭제</button>`}
         </td>
       `;
       tbody.appendChild(tr);

@@ -14,7 +14,8 @@ function loadJogControl(savedConfig = null) {
   const liftStatus = { className: '', textContent: '' };
   const makeButton = () => ({
     disabled: false,
-    classList: { add: jest.fn(), remove: jest.fn() }
+    classList: { add: jest.fn(), remove: jest.fn() },
+    setAttribute: jest.fn()
   });
   const liftUpButton = makeButton();
   const liftDownButton = makeButton();
@@ -28,6 +29,24 @@ function loadJogControl(savedConfig = null) {
     })
   };
   const sendSavedQueueToSlot = jest.fn().mockResolvedValue({ result: { success: true } });
+  const published = [];
+  const topics = [];
+  const documentListeners = {};
+  class Topic {
+    constructor(options) {
+      this.options = options;
+      topics.push(this);
+    }
+
+    publish(message) {
+      published.push({ topic: this.options.name, message });
+    }
+  }
+  class Message {
+    constructor(values) {
+      Object.assign(this, values);
+    }
+  }
   const context = {
     App: {
       activeSlotIndex: 0,
@@ -41,19 +60,27 @@ function loadJogControl(savedConfig = null) {
         '기본 - 리프트 다운': { queue: [{}] }
       })
     },
-    RosManager: {},
-    ROSLIB: {},
+    RosManager: {
+      getRos: jest.fn(() => context.App.robotSlots[0].ros),
+      getRobotId: jest.fn(() => context.App.robotSlots[0].robotId)
+    },
+    ROSLIB: { Topic, Message },
     localStorage: {
       getItem: jest.fn(key => storage.get(key) || null),
       setItem: jest.fn((key, value) => storage.set(key, String(value)))
     },
     document: {
-      addEventListener: jest.fn(),
+      activeElement: null,
+      hidden: false,
+      addEventListener: jest.fn((name, callback) => {
+        documentListeners[name] = callback;
+      }),
       getElementById: jest.fn(id => {
         if (id === 'jog-quick-task-status') return status;
         if (id === 'jog-manual-lift-status') return liftStatus;
         if (id === 'jog-lift-up') return liftUpButton;
         if (id === 'jog-lift-down') return liftDownButton;
+        if (id === 'jog-panel') return { style: { display: 'flex' } };
         return null;
       }),
       querySelector: jest.fn(() => row)
@@ -74,7 +101,10 @@ function loadJogControl(savedConfig = null) {
     button: { disabled: false },
     liftStatus,
     liftUpButton,
-    liftDownButton
+    liftDownButton,
+    published,
+    topics,
+    documentListeners
   };
 }
 
@@ -107,25 +137,54 @@ describe('Jog Quick Task', () => {
     expect(button.disabled).toBe(false);
   });
 
-  test('manual lift up uses the shared built-in lift task on the active robot', async () => {
+  test('manual lift publishes UP while held and STOP when released', () => {
     const {
       manager,
       sendSavedQueueToSlot,
       liftStatus,
-      liftUpButton
+      liftUpButton,
+      published,
+      topics
     } = loadJogControl();
     manager._stopVel = jest.fn();
 
-    await manager._runManualLift('up', liftUpButton);
+    manager._startManualLift('up', liftUpButton);
 
     expect(manager._stopVel).toHaveBeenCalled();
-    expect(sendSavedQueueToSlot).toHaveBeenCalledWith(
-      '기본 - 리프트 업',
-      0,
-      1,
-      'Manual_LiftUp'
-    );
+    expect(topics[0].options).toMatchObject({
+      name: '/R_051/Lift/manual_cmd',
+      messageType: 'std_msgs/Int8'
+    });
+    expect(published[0]).toMatchObject({
+      topic: '/R_051/Lift/manual_cmd',
+      message: { data: 1 }
+    });
+    expect(liftStatus.className).toContain('running');
+    expect(sendSavedQueueToSlot).not.toHaveBeenCalled();
+
+    manager._stopManualLift();
+
+    expect(published.at(-1).message.data).toBe(0);
     expect(liftStatus.className).toContain('success');
-    expect(liftUpButton.disabled).toBe(false);
+  });
+
+  test('Z is lift up and C is lift down only until keyup', () => {
+    const { manager, documentListeners, published } = loadJogControl();
+    manager._stopVel = jest.fn();
+    manager._setupKeyboard();
+
+    const zDown = { key: 'z', repeat: false, preventDefault: jest.fn() };
+    documentListeners.keydown(zDown);
+    expect(zDown.preventDefault).toHaveBeenCalled();
+    expect(published.at(-1).message.data).toBe(1);
+
+    documentListeners.keyup({ key: 'z', preventDefault: jest.fn() });
+    expect(published.at(-1).message.data).toBe(0);
+
+    documentListeners.keydown({ key: 'c', repeat: false, preventDefault: jest.fn() });
+    expect(published.at(-1).message.data).toBe(-1);
+
+    documentListeners.keyup({ key: 'c', preventDefault: jest.fn() });
+    expect(published.at(-1).message.data).toBe(0);
   });
 });

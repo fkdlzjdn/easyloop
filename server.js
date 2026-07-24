@@ -72,20 +72,10 @@ function getSharedPassword() {
 }
 
 const authMiddleware = createAuthMiddleware(authSessions);
-const localOnlyIps = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 let testModeProcess = null;
 let rosapiProcess = null;
 let roscoreProcess = null;
 let roscoreStartedByUs = false;
-
-function ensureLocalRequest(req, res) {
-  const ip = req.ip;
-  if (!localOnlyIps.has(ip)) {
-    res.status(403).json({ success: false, message: 'Local requests only' });
-    return false;
-  }
-  return true;
-}
 
 function waitForPort(port, timeout) {
   const net = require('net');
@@ -269,8 +259,8 @@ app.use('/api/auth', createAuthRouter({
 }));
 app.use('/api', authMiddleware);
 app.post('/api/testmode/start', async (req, res) => {
-  if (!ensureLocalRequest(req, res)) return;
-  // Verify password
+  // This route is already protected by the authenticated session middleware.
+  // Verify the shared password again because starting local ROS processes is privileged.
   const { password } = req.body || {};
   const sharedPw = getSharedPassword();
   if (sharedPw && password !== sharedPw) {
@@ -285,7 +275,6 @@ app.post('/api/testmode/start', async (req, res) => {
 });
 
 app.post('/api/testmode/stop', (req, res) => {
-  if (!ensureLocalRequest(req, res)) return;
   const result = stopTestModeProcess();
   res.json({ success: true, ...result });
 });

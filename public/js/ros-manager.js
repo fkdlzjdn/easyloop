@@ -41,6 +41,7 @@ const RosManager = {
   _waypointStartY: 0,
   _waypointCurrentX: 0,
   _waypointCurrentY: 0,
+  _quickTaskOverlay: [],
   // Topic Hz monitoring
   _hzCounters: { bms: 0, workstate: 0, pose: 0, map: 0, lidar: 0 },
   _hzValues: { bms: 0, workstate: 0, pose: 0, map: 0, lidar: 0 },
@@ -162,6 +163,9 @@ const RosManager = {
       App.saveRobotSlots();
       App.updateMultiRobotButtons();
       if (typeof FleetControl !== 'undefined') FleetControl.onSlotConnected(index);
+      if (typeof ActionSender !== 'undefined') {
+        ActionSender.onSlotConnectionChanged(index, true);
+      }
     });
 
     rosConn.on('close', () => {
@@ -187,6 +191,9 @@ const RosManager = {
       App.renderMonitoringCards();
       App.updateMultiRobotButtons();
       if (typeof FleetControl !== 'undefined') FleetControl.onSlotDisconnected(index);
+      if (typeof ActionSender !== 'undefined') {
+        ActionSender.onSlotConnectionChanged(index, false);
+      }
 
       // Don't save during page unload (beforeunload already saved with connected=true)
       if (!App._isUnloading) {
@@ -208,6 +215,9 @@ const RosManager = {
       if (typeof ConnTimeline !== 'undefined') ConnTimeline.record(robotId, ip, 'error', String(error));
       if (index === App.activeSlotIndex) {
         App.updateActiveRobotStatus();
+      }
+      if (typeof ActionSender !== 'undefined') {
+        ActionSender.onSlotConnectionChanged(index, false);
       }
     });
   },
@@ -1727,6 +1737,9 @@ const RosManager = {
     // Draw dock pose markers (inside map transform)
     this._drawDockPoseMarkers(ctx, width, height, resolution, origin);
 
+    // Draw the map points currently being composed by Quick Task.
+    this._drawQuickTaskOverlay(ctx, width, height, resolution, origin);
+
     ctx.restore();
 
     // Draw POI markers
@@ -2966,6 +2979,83 @@ const RosManager = {
     if (btnNavGoal) btnNavGoal.classList.remove('active');
     if (canvas) canvas.style.cursor = 'grab';
     this.requestRender();
+  },
+
+  setQuickTaskOverlay(points) {
+    this._quickTaskOverlay = Array.isArray(points)
+      ? points.map(point => ({ ...point }))
+      : [];
+    this.requestRender();
+  },
+
+  _drawQuickTaskOverlay(ctx, mapWidth, mapHeight, resolution, origin) {
+    const points = this._quickTaskOverlay || [];
+    if (points.length === 0) return;
+    const scale = Math.max(this.mapZoom || 1, 0.1);
+    const toMap = point => ({
+      x: (point.x - origin.position.x) / resolution - mapWidth / 2,
+      y: mapHeight - (point.y - origin.position.y) / resolution - mapHeight / 2
+    });
+    const colors = {
+      waypoint: '#22d3ee',
+      trajectory: '#facc15',
+      'trajectory-draft': '#fb923c',
+      docking: '#c084fc'
+    };
+
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    for (let index = 1; index < points.length; index += 1) {
+      const previous = toMap(points[index - 1]);
+      const current = toMap(points[index]);
+      ctx.beginPath();
+      ctx.setLineDash(points[index - 1].group === points[index].group
+        ? []
+        : [6 / scale, 5 / scale]);
+      ctx.strokeStyle = points[index].kind === 'trajectory-draft'
+        ? colors['trajectory-draft']
+        : 'rgba(34, 211, 238, 0.72)';
+      ctx.lineWidth = 2.5 / scale;
+      ctx.moveTo(previous.x, previous.y);
+      ctx.lineTo(current.x, current.y);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    points.forEach(point => {
+      const mapPoint = toMap(point);
+      const color = colors[point.kind] || colors.waypoint;
+      const radius = 8 / scale;
+      ctx.save();
+      ctx.translate(mapPoint.x, mapPoint.y);
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.88)';
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 3 / scale;
+      ctx.beginPath();
+      ctx.arc(0, 0, radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.save();
+      ctx.rotate(-(Number(point.theta) || 0));
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(15 / scale, 0);
+      ctx.lineTo(5 / scale, -5 / scale);
+      ctx.lineTo(5 / scale, 5 / scale);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = `700 ${9 / scale}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(point.label || ''), 0, 0);
+      ctx.restore();
+    });
+    ctx.restore();
   },
 
   // Enter waypoint select mode (called from ActionSender)

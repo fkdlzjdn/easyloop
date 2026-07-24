@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/style.css?v=20260723-action-type-codes">
+  <link rel="stylesheet" href="css/style.css?v=20260724-test-fleet-sim">
   <link rel="stylesheet" href="css/can-diagnostics.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
 </head>
@@ -74,6 +74,12 @@
           <div id="multi-robot-btns" class="multi-robot-btns hidden">
             <!-- Fleet/Cmp/Prop: disabled, pending reimplementation -->
           </div>
+          <button id="btn-mini-control" class="btn btn-small btn-mini-control"
+                  type="button" aria-pressed="false"
+                  title="연결된 로봇을 한 화면에서 보는 미니관제로 전환">
+            <span class="mini-control-icon" aria-hidden="true">▦</span>
+            <span id="mini-control-button-label">미니관제</span>
+          </button>
           <button id="btn-jog-toggle" class="btn btn-small" title="Jog Control">Jog</button>
           <button id="btn-cmd-toggle" class="btn btn-small" title="Quick Commands">CMD</button>
         </div>
@@ -81,6 +87,14 @@
       <div class="header-right">
         <div class="test-mode-chip" id="test-mode-chip">
           <span class="test-mode-label">Test</span>
+          <label class="test-mode-robot-count" title="Test Mode에서 생성할 임시 가상 로봇 수">
+            <span>Robots</span>
+            <select id="test-mode-robot-count">
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3" selected>3</option>
+            </select>
+          </label>
           <span id="test-mode-status" class="test-mode-status">OFF</span>
           <button id="btn-test-mode" class="btn btn-ghost" title="Toggle Test Mode">Toggle</button>
         </div>
@@ -284,6 +298,10 @@
           </div>
           <div class="map-canvas-container">
             <canvas id="map-canvas" width="600" height="600"></canvas>
+            <div id="quick-task-map-hud" class="quick-task-map-hud" hidden>
+              <strong>⚡ Quick Task 포인트 입력</strong>
+              <span id="quick-task-map-hud-status">오른쪽에서 입력 도구를 선택하세요.</span>
+            </div>
             <div id="map-correction-badge" class="map-correction-badge waiting" title="실시간 /{robotId}/map_correction">
               <span id="map-correction-level">● Map correction</span>
               <span id="map-correction-value">수신 대기</span>
@@ -302,7 +320,6 @@
           <label>2nd Tab:</label>
           <select id="split-tab-select">
             <option value="tab-dashboard">Dashboard</option>
-            <option value="tab-fleet-control">관제</option>
             <option value="tab-ros">ROS Control</option>
             <option value="tab-action">Tasks</option>
             <option value="tab-camera">Camera</option>
@@ -314,7 +331,6 @@
         <!-- Tabs -->
         <div class="tabs">
           <button class="tab-btn active" data-tab="tab-dashboard" data-i18n="tabs.dashboard">Dashboard</button>
-          <button class="tab-btn" data-tab="tab-fleet-control">관제</button>
           <button class="tab-btn" data-tab="tab-ros" data-i18n="tabs.ros">ROS Control</button>
           <button class="tab-btn" data-tab="tab-action" data-i18n="tabs.action">Tasks</button>
           <button class="tab-btn" data-tab="tab-camera" data-i18n="tabs.camera">Camera</button>
@@ -331,12 +347,12 @@
           </button>
         </div>
 
-        <!-- Tab Content: Fleet Control -->
+        <!-- Workspace Content: Mini Control -->
         <div class="tab-content" id="tab-fleet-control">
           <div class="fleet-control-section">
             <div class="fleet-control-header">
               <div>
-                <h4>로봇 관제</h4>
+                <h4>미니관제</h4>
                 <span id="fleet-control-summary" class="fleet-control-summary">연결된 로봇을 기다리는 중...</span>
               </div>
               <div class="fleet-header-tools">
@@ -714,35 +730,6 @@
 
         <!-- Tab Content: Action -->
         <div class="tab-content" id="tab-action">
-          <details class="action-tools-panel">
-            <summary>즐겨찾기 · 파라미터 프리셋</summary>
-          <!-- Favorite Actions -->
-          <div class="action-favorites-section" id="action-favorites">
-            <div class="action-favorites-header">
-              <span class="action-favorites-title" data-i18n="action.favorites">Favorites</span>
-              <button id="btn-save-favorite" class="btn btn-small" data-i18n="action.saveFavorite" title="Save current settings to favorites">+ Save</button>
-            </div>
-            <div id="action-favorites-list" class="action-favorites-list">
-              <span class="action-favorites-empty" data-i18n="action.noFavorites">No saved favorites</span>
-            </div>
-          </div>
-
-          <!-- Parameter Presets -->
-          <div class="param-preset-section" id="param-preset-section">
-            <div class="param-preset-header">
-              <span class="param-preset-title" data-i18n="action.presets">Parameter Presets</span>
-              <div class="param-preset-controls">
-                <select id="param-preset-select" class="btn btn-small">
-                  <option value="">-- Select Preset --</option>
-                </select>
-                <button id="btn-preset-apply" class="btn btn-small">Apply</button>
-                <button id="btn-preset-save" class="btn btn-small">Save Current</button>
-                <button id="btn-preset-delete" class="btn btn-small btn-danger">Delete</button>
-              </div>
-            </div>
-          </div>
-          </details>
-
           <div class="action-section">
             <div class="action-simple-header">
               <div>
@@ -771,6 +758,20 @@
             </div>
 
             <section id="task-library-view" class="task-library-section" aria-labelledby="task-library-title">
+              <div class="task-yaml-file-bar">
+                <div class="task-yaml-file-info">
+                  <label for="task-yaml-file-select">Task YAML 파일</label>
+                  <select id="task-yaml-file-select">
+                    <option value="__local__">로컬 Task</option>
+                  </select>
+                  <span id="task-yaml-file-summary">브라우저에 저장된 Task</span>
+                </div>
+                <div class="task-yaml-file-actions">
+                  <button id="btn-import-mission" class="btn btn-small btn-primary" title="여러 Task가 포함된 ROS Task YAML 불러오기">YAML 불러오기</button>
+                  <button id="btn-export-mission" class="btn btn-small" title="현재 YAML 파일의 모든 Task 저장">YAML 전체 저장</button>
+                  <input type="file" id="mission-import-file" accept=".yaml,.yml,.json" style="display:none">
+                </div>
+              </div>
               <div class="task-library-header">
                 <div>
                   <h5 id="task-library-title">저장 Task</h5>
@@ -779,11 +780,141 @@
                 <div class="task-library-tools">
                   <input type="search" id="task-library-search" placeholder="Task 검색" autocomplete="off">
                   <button type="button" id="btn-task-library-refresh" class="btn btn-small" title="Task 목록 새로고침">↻</button>
+                  <button type="button" id="btn-quick-task" class="btn btn-small quick-task-launch"
+                          title="맵에서 WayPoint, Trajectory, 도킹 시작점을 찍어 Task를 빠르게 만듭니다">⚡ Quick Task 생성</button>
                   <button type="button" id="btn-new-task" class="btn btn-small btn-primary">＋ Task 추가</button>
                 </div>
               </div>
               <div id="task-library-grid" class="task-library-grid">
                 <p class="task-library-empty">저장된 Task가 없습니다.</p>
+              </div>
+            </section>
+
+            <section id="quick-task-builder-view" class="quick-task-builder-view" hidden>
+              <div class="task-builder-heading">
+                <div>
+                  <h5>⚡ Quick Task 생성</h5>
+                  <p>반복 주행·도킹 시험용 경로를 맵에서 빠르게 구성합니다.</p>
+                </div>
+                <div class="task-builder-heading-actions">
+                  <button type="button" id="btn-close-quick-task" class="btn btn-small">취소</button>
+                  <button type="button" id="btn-quick-task-edit" class="btn btn-small">상세 편집</button>
+                  <button type="button" id="btn-save-quick-task" class="btn btn-small btn-primary">Task 저장</button>
+                  <button type="button" id="btn-run-quick-task" class="btn btn-small quick-task-run"
+                          title="현재 Quick Task를 저장한 뒤 활성 로봇에서 바로 실행합니다">저장 후 실행</button>
+                </div>
+              </div>
+
+              <div class="quick-task-meta">
+                <label>
+                  <span>Task 이름</span>
+                  <small>task_id</small>
+                  <input type="text" id="quick-task-name" placeholder="예: pallet_to_dock">
+                </label>
+                <label>
+                  <span>반복</span>
+                  <small>loop_flag</small>
+                  <input type="number" id="quick-task-loop" min="0" max="9999" value="1">
+                </label>
+              </div>
+
+              <div class="quick-task-guide">
+                <strong>빠른 반복시험</strong>
+                <span>① 주행 포인트 입력 → ② 필요하면 도킹 시작점/Standby 추가 → ③ 반복 횟수 설정 → ④ 저장 후 실행</span>
+              </div>
+
+              <div class="quick-task-tools">
+                <button type="button" id="btn-quick-waypoint" class="btn btn-small"
+                        title="맵에서 한 지점을 찍어 Way_Point Action을 추가합니다">📍 WayPoint</button>
+                <button type="button" id="btn-quick-trajectory" class="btn btn-small"
+                        title="맵에서 여러 경유점을 연속으로 찍어 TrajectoryFollowing Action을 만듭니다">〰 Trajectory 시작</button>
+                <button type="button" id="btn-quick-trajectory-finish" class="btn btn-small btn-primary" disabled
+                        title="현재 Trajectory 경유점 입력을 완료합니다">Trajectory 완료</button>
+                <button type="button" id="btn-quick-docking" class="btn btn-small"
+                        title="맵에서 도킹 진입 시작점을 찍고 WayPoint + Docking Action을 추가합니다">🔌 도킹 시작점</button>
+              </div>
+
+              <div class="quick-task-options">
+                <details>
+                  <summary>Trajectory 설정</summary>
+                  <div class="quick-task-option-grid">
+                    <label>Lane 이름<input type="text" id="quick-trajectory-lane" value="lane_tmp"></label>
+                    <label>최대 속도 (m/s)<input type="number" id="quick-trajectory-velocity" step="0.1" min="0.1" value="0.7"></label>
+                    <label>경로 방식
+                      <select id="quick-trajectory-lane-type">
+                        <option value="0">Strict</option>
+                        <option value="1" selected>Smooth</option>
+                        <option value="2">Off</option>
+                      </select>
+                    </label>
+                    <label>주행 방향
+                      <select id="quick-trajectory-direction">
+                        <option value="0">전진</option>
+                        <option value="3">후진</option>
+                      </select>
+                    </label>
+                  </div>
+                </details>
+
+                <details>
+                  <summary>도킹 설정</summary>
+                  <div class="quick-task-option-grid">
+                    <label>충전 여부
+                      <select id="quick-dock-charge">
+                        <option value="0">충전 안 함</option>
+                        <option value="1">충전 요청</option>
+                      </select>
+                    </label>
+                    <label>도킹 방향
+                      <select id="quick-dock-direction">
+                        <option value="1">전방</option>
+                        <option value="-1">후방</option>
+                        <option value="2">왼쪽</option>
+                        <option value="3">오른쪽</option>
+                      </select>
+                    </label>
+                    <label>마커 종류
+                      <select id="quick-dock-scan-type">
+                        <option value="1">L 마커</option>
+                        <option value="2">LV 마커</option>
+                        <option value="3">Cradle</option>
+                        <option value="4">Rack / CFG</option>
+                        <option value="5">Aruco</option>
+                        <option value="6">ML-LV</option>
+                        <option value="7">Direct</option>
+                      </select>
+                    </label>
+                    <label>완료 판정
+                      <select id="quick-dock-end-condition">
+                        <option value="1">거리 / 위치 도달</option>
+                        <option value="2">IR 센서</option>
+                        <option value="3">충전 접점</option>
+                      </select>
+                    </label>
+                  </div>
+                </details>
+              </div>
+
+              <div class="quick-standby-row">
+                <label for="quick-standby-duration">중간 Standby</label>
+                <input type="number" id="quick-standby-duration" min="0" step="0.1" value="5">
+                <span>초</span>
+                <button type="button" id="btn-quick-standby" class="btn btn-small">＋ Standby 추가</button>
+              </div>
+
+              <div id="quick-task-status" class="quick-task-status">
+                도구를 선택한 뒤 왼쪽 맵에서 위치를 지정하세요.
+              </div>
+
+              <div class="quick-task-sequence-header">
+                <strong>Task 순서 (<span id="quick-task-count">0</span>)</strong>
+                <div>
+                  <button type="button" id="btn-quick-task-undo" class="btn btn-small" disabled>마지막 취소</button>
+                  <button type="button" id="btn-quick-task-clear" class="btn btn-small">전체 비우기</button>
+                </div>
+              </div>
+              <div id="quick-task-sequence" class="quick-task-sequence">
+                <p class="quick-task-empty">아직 추가된 항목이 없습니다.</p>
               </div>
             </section>
 
@@ -878,9 +1009,6 @@
                   </select>
                   <button id="btn-load-queue" class="btn btn-small">불러오기</button>
                   <button id="btn-delete-saved-queue" class="btn btn-small btn-danger">삭제</button>
-                  <button id="btn-export-mission" class="btn btn-small" title="ROS Task YAML 저장">YAML 저장</button>
-                  <button id="btn-import-mission" class="btn btn-small" title="ROS Task YAML 불러오기">YAML 불러오기</button>
-                  <input type="file" id="mission-import-file" accept=".yaml,.yml,.json" style="display:none">
                 </div>
               </div>
               <div id="action-queue-list">
@@ -917,15 +1045,21 @@
             </div>
 
             <!-- Action History -->
-            <div class="action-history-section" data-widget="action-history">
-              <div class="action-history-header">
-                <h5>Action History</h5>
-                <button id="btn-clear-action-history" class="btn btn-small btn-danger">Clear</button>
+            <details class="action-history-section" data-widget="action-history">
+              <summary class="action-history-summary">
+                <span>액션 히스토리</span>
+                <small>이전 실행 내역 보기</small>
+              </summary>
+              <div class="action-history-body">
+                <div class="action-history-actions">
+                  <span>최근 실행한 Action을 다시 불러올 수 있습니다.</span>
+                  <button id="btn-clear-action-history" class="btn btn-small btn-danger">Clear</button>
+                </div>
+                <div id="action-history-list" class="action-history-list">
+                  <span class="action-history-empty">No history yet</span>
+                </div>
               </div>
-              <div id="action-history-list" class="action-history-list">
-                <span class="action-history-empty">No history yet</span>
-              </div>
-            </div>
+            </details>
             </section>
           </div>
         </div>
@@ -1725,7 +1859,7 @@ free -h"></textarea>
         <span>Az: <strong id="jog-cur-az">0.00</strong></span>
         <span>Pub: <strong id="jog-pub-status">Off</strong></span>
       </div>
-      <p class="jog-hint">DD: W/X/A/D | QD: W/X=fwd/bwd, A/D=strafe, Q/E=rotate</p>
+      <p class="jog-hint">DD: W/X/A/D | QD: W/X=fwd/bwd, A/D=strafe, Q/E=rotate | Lift: Z=up, C=down</p>
       <div class="jog-service-btns">
         <button class="btn btn-small btn-warning" id="jog-motor-reset" title="Call /rid/motor_reset">Motor Reset</button>
         <button class="btn btn-small btn-warning" id="jog-lift-motor-reset" title="Call /rid/lift_motor_reset">Lift Motor Reset</button>
@@ -1736,10 +1870,14 @@ free -h"></textarea>
           <strong id="jog-manual-lift-target">활성 로봇: --</strong>
         </div>
         <div class="jog-manual-lift-buttons">
-          <button class="btn btn-small btn-primary" id="jog-lift-up">리프트 UP</button>
-          <button class="btn btn-small" id="jog-lift-down">리프트 DOWN</button>
+          <button class="btn btn-small btn-primary" id="jog-lift-up" aria-pressed="false">
+            리프트 UP <kbd>Z</kbd>
+          </button>
+          <button class="btn btn-small" id="jog-lift-down" aria-pressed="false">
+            리프트 DOWN <kbd>C</kbd>
+          </button>
         </div>
-        <div id="jog-manual-lift-status" class="jog-manual-lift-status">대기</div>
+        <div id="jog-manual-lift-status" class="jog-manual-lift-status">버튼 또는 키를 누르는 동안만 동작</div>
       </div>
       <div id="jog-model-io-control" class="jog-model-io-control" hidden>
         <div class="jog-model-io-header">
@@ -1756,11 +1894,13 @@ free -h"></textarea>
           <button class="btn btn-small btn-primary" data-chassis-command="rearDoorOpen">OPEN</button>
           <button class="btn btn-small" data-chassis-command="rearDoorClose">CLOSE</button>
         </div>
-        <div class="jog-model-io-group">
+        <div class="jog-model-io-group jog-model-io-conveyor">
           <span class="jog-model-io-label">컨베이어</span>
-          <button class="btn btn-small btn-warning" data-chassis-command="frontDischarge">전방 배출</button>
+          <button class="btn btn-small btn-primary" data-chassis-command="frontIntake">전방 투입</button>
           <button class="btn btn-small btn-warning" data-chassis-command="rearDischarge">후방 배출</button>
+          <button class="btn btn-small btn-danger" data-chassis-command="conveyorStop">정지</button>
         </div>
+        <pre id="jog-model-io-command-preview" class="jog-model-io-command-preview">버튼에 마우스를 올리거나 포커스하면 설명과 서비스 명령을 확인할 수 있습니다.</pre>
         <div id="jog-model-io-status" class="jog-model-io-status">명령 대기</div>
       </div>
       <div class="jog-charge-control">
@@ -2191,10 +2331,10 @@ free -h"></textarea>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-search@0.13.0/lib/xterm-addon-search.min.js"></script>
   <script src="js/i18n.js"></script>
-  <script src="js/app.js?v=20260723-resume-active-robot"></script>
+  <script src="js/app.js?v=20260724-test-fleet-sim"></script>
   <script src="js/dashboard.js"></script>
-  <script src="js/ros-manager.js?v=20260723-charge-service-compat"></script>
-  <script src="js/test-mode.js"></script>
+  <script src="js/ros-manager.js?v=20260724-quick-task-builder"></script>
+  <script src="js/test-mode.js?v=20260724-test-fleet-sim"></script>
   <script src="js/ros-info.js"></script>
   <script src="js/map-context-menu.js"></script>
   <!-- Test Mode Loading Overlay -->
@@ -2236,8 +2376,8 @@ free -h"></textarea>
   <script src="js/ssh-terminal.js"></script>
   <script src="js/file-transfer.js?v=20260723-active-robot-session"></script>
   <script src="js/commands.js"></script>
-  <script src="js/action-sender.js?v=20260723-action-type-codes"></script>
-  <script src="js/jog-control.js?v=20260723-chassis-picker"></script>
+  <script src="js/action-sender.js?v=20260724-test-fleet-sim"></script>
+  <script src="js/jog-control.js?v=20260724-conveyor-commands"></script>
   <script src="js/vel-monitor.js"></script>
   <script src="js/docking-test.js"></script>
   <script src="js/init-setup.js"></script>

@@ -2,6 +2,8 @@
 const ActionSender = {
   STORAGE_KEY: 'actionSenderLastParams',
   QUEUE_STORAGE_KEY: 'actionSenderSavedQueues',
+  TASK_FILE_SELECTION_KEY: 'actionSenderTaskFileSelection',
+  LOCAL_TASK_SOURCE: '__local__',
   BUILTIN_TASK_VERSION: 3,
   DOCKING_TARGET_CFG_MODEL: 'sl400_vri',
   actionQueue: [],
@@ -16,8 +18,14 @@ const ActionSender = {
   _expandedTaskNames: new Set(),
   _taskTelemetry: null,
   _taskTelemetryToken: 0,
+  _taskCancelRequests: new Map(),
   _builderMode: 'list',
   _editingTaskName: '',
+  _activeTaskSource: '__local__',
+  _quickTaskItems: [],
+  _quickTaskMode: '',
+  _quickTrajectoryDraft: [],
+  _quickTaskSequence: 0,
 
   // Action type definitions with default args and params
   // Based on sp_task action modules from stl_ulsan
@@ -389,6 +397,8 @@ const ActionSender = {
   ],
 
   init() {
+    this._activeTaskSource = localStorage.getItem(this.TASK_FILE_SELECTION_KEY)
+      || this.LOCAL_TASK_SOURCE;
     this.setupEventListeners();
     this.setupCommonParamsUI();
     this.updateActionForm('0x01'); // Default to WayPoint
@@ -538,12 +548,57 @@ const ActionSender = {
 
     const librarySearch = document.getElementById('task-library-search');
     librarySearch?.addEventListener('input', () => this.renderTaskLibrary(librarySearch.value));
+    document.getElementById('task-yaml-file-select')?.addEventListener('change', event => {
+      this._activeTaskSource = event.target.value || this.LOCAL_TASK_SOURCE;
+      try {
+        localStorage.setItem(this.TASK_FILE_SELECTION_KEY, this._activeTaskSource);
+      } catch (error) {
+        console.warn('Task YAML selection save failed:', error.message);
+      }
+      this.refreshSavedQueueList();
+    });
     document.getElementById('btn-task-library-refresh')?.addEventListener('click', () => {
       this.refreshSavedQueueList();
       this.renderTaskLibrary(librarySearch?.value || '');
     });
     document.getElementById('btn-new-task')?.addEventListener('click', () => {
       this.openTaskBuilder();
+    });
+    document.getElementById('btn-quick-task')?.addEventListener('click', () => {
+      this.openQuickTaskBuilder();
+    });
+    document.getElementById('btn-close-quick-task')?.addEventListener('click', () => {
+      this.closeQuickTaskBuilder();
+    });
+    document.getElementById('btn-save-quick-task')?.addEventListener('click', () => {
+      this.finishQuickTask(true);
+    });
+    document.getElementById('btn-run-quick-task')?.addEventListener('click', event => {
+      this.saveAndRunQuickTask(event.currentTarget);
+    });
+    document.getElementById('btn-quick-task-edit')?.addEventListener('click', () => {
+      this.finishQuickTask(false);
+    });
+    document.getElementById('btn-quick-waypoint')?.addEventListener('click', () => {
+      this.startQuickMapCapture('waypoint');
+    });
+    document.getElementById('btn-quick-trajectory')?.addEventListener('click', () => {
+      this.startQuickMapCapture('trajectory');
+    });
+    document.getElementById('btn-quick-trajectory-finish')?.addEventListener('click', () => {
+      this.finishQuickTrajectory();
+    });
+    document.getElementById('btn-quick-docking')?.addEventListener('click', () => {
+      this.startQuickMapCapture('docking');
+    });
+    document.getElementById('btn-quick-standby')?.addEventListener('click', () => {
+      this.addQuickStandby();
+    });
+    document.getElementById('btn-quick-task-undo')?.addEventListener('click', () => {
+      this.undoQuickTaskItem();
+    });
+    document.getElementById('btn-quick-task-clear')?.addEventListener('click', () => {
+      this.clearQuickTask();
     });
     document.getElementById('btn-close-task-builder')?.addEventListener('click', () => {
       this.closeTaskBuilder();
@@ -587,8 +642,9 @@ const ActionSender = {
       const nameInput = document.getElementById('action-queue-save-name');
       const taskIdInput = document.getElementById('action-work-id');
       const loopInput = document.getElementById('action-loop-count');
-      if (name && nameInput) nameInput.value = name;
-      if (name && taskIdInput) taskIdInput.value = name;
+      const taskId = entry?.yamlTaskId || name;
+      if (name && nameInput) nameInput.value = taskId;
+      if (name && taskIdInput) taskIdInput.value = taskId;
       if (entry && loopInput) loopInput.value = String(entry.loopFlag ?? 1);
       this.renderTaskDetail(document.getElementById('action-saved-task-detail'), name);
     });
@@ -651,18 +707,541 @@ const ActionSender = {
   updateTargetStatus() {
     App.updateActionTargetLabel();
     this._updateTaskControlsAvailability();
+    this._updateQuickTaskRunAvailability();
     this.renderTaskLibrary(document.getElementById('task-library-search')?.value || '');
+  },
+
+  onSlotConnectionChanged(slotIndex, connected) {
+    if (slotIndex !== this.getTargetSlot()) return;
+    const slot = App.robotSlots?.[slotIndex];
+    if (slot && connected) delete slot.taskInterface;
+    this.updateTargetStatus();
+    this._subscribeTaskTelemetry();
+  },
+
+  openQuickTaskBuilder() {
+    const libraryView = document.getElementById('task-library-view');
+    const builderView = document.getElementById('task-builder-view');
+    const quickView = document.getElementById('quick-task-builder-view');
+    if (!libraryView || !quickView) return;
+
+    this._exitWaypointSelectMode();
+    this._builderMode = 'quick';
+    this._editingTaskName = '';
+    this._quickTaskItems = [];
+    this._quickTrajectoryDraft = [];
+    this._quickTaskMode = '';
+    this._quickTaskSequence = 0;
+
+    const nameInput = document.getElementById('quick-task-name');
+    const loopInput = document.getElementById('quick-task-loop');
+    if (nameInput) nameInput.value = `quick_task_${new Date().toISOString().slice(11, 19).replace(/:/g, '')}`;
+    if (loopInput) loopInput.value = '1';
+
+    libraryView.hidden = true;
+    if (builderView) builderView.hidden = true;
+    quickView.hidden = false;
+    const mapPanel = document.getElementById('panel-map');
+    if (mapPanel?.classList?.contains('collapsed')) {
+      document.getElementById('btn-map-panel-expand')?.click();
+    }
+    this._setQuickTaskMapHudVisible(true);
+    this._updateQuickTaskRunAvailability();
+    this.renderQuickTask();
+    this._setQuickTaskStatus('도구를 선택한 뒤 왼쪽 맵에서 위치를 지정하세요.');
+    quickView.scrollIntoView?.({ block: 'start' });
+  },
+
+  closeQuickTaskBuilder(force = false) {
+    const hasDraft = this._quickTaskItems.length > 0 || this._quickTrajectoryDraft.length > 0;
+    if (!force && hasDraft && typeof confirm === 'function'
+        && !confirm('작성 중인 Quick Task를 취소하시겠습니까?')) {
+      return;
+    }
+    this._stopQuickMapCapture();
+    this._quickTaskItems = [];
+    this._quickTrajectoryDraft = [];
+    this._syncQuickTaskOverlay();
+    this._setQuickTaskMapHudVisible(false);
+    const quickView = document.getElementById('quick-task-builder-view');
+    const libraryView = document.getElementById('task-library-view');
+    if (quickView) quickView.hidden = true;
+    if (libraryView) {
+      libraryView.hidden = false;
+      libraryView.scrollIntoView?.({ block: 'start' });
+    }
+    this._builderMode = 'list';
+    this.refreshSavedQueueList();
+  },
+
+  _setQuickTaskMapHudVisible(visible) {
+    const hud = document.getElementById('quick-task-map-hud');
+    if (hud) hud.hidden = !visible;
+  },
+
+  _updateQuickTaskRunAvailability() {
+    const button = document.getElementById('btn-run-quick-task');
+    if (!button || button.classList.contains('loading')) return;
+    const slot = App.robotSlots?.[this.getTargetSlot()];
+    button.disabled = !slot?.connected || !slot.ros;
+    button.title = button.disabled
+      ? '활성 로봇이 연결되면 저장 후 바로 실행할 수 있습니다.'
+      : `${slot.robotId}에 현재 Quick Task를 저장 후 실행합니다.`;
+  },
+
+  startQuickMapCapture(mode) {
+    if (typeof RosManager === 'undefined' || !RosManager.lastMapMsg) {
+      this._setQuickTaskStatus('현재 표시할 맵 데이터가 없습니다.', true);
+      return;
+    }
+
+    if (this._quickTaskMode === 'trajectory' && mode !== 'trajectory'
+        && this._quickTrajectoryDraft.length > 0) {
+      if (this._quickTrajectoryDraft.length < 2) {
+        this._setQuickTaskStatus('Trajectory는 두 점 이상 필요합니다. 완료하거나 마지막 취소를 눌러주세요.', true);
+        return;
+      }
+      this.finishQuickTrajectory();
+    } else {
+      this._stopQuickMapCapture();
+    }
+
+    this._quickTaskMode = mode;
+    this._updateQuickTaskToolState();
+    RosManager._enterWaypointSelectMode((x, y, theta) => {
+      const pose = {
+        x: Number(x.toFixed(3)),
+        y: Number(y.toFixed(3)),
+        theta: Number(theta.toFixed(3))
+      };
+      if (mode === 'trajectory') {
+        this._quickTrajectoryDraft.push(pose);
+        this._setQuickTaskStatus(
+          `Trajectory 경유점 ${this._quickTrajectoryDraft.length}개 · 계속 찍거나 "Trajectory 완료"를 누르세요.`
+        );
+        this._syncQuickTaskOverlay();
+        this.renderQuickTask();
+        return;
+      }
+      if (mode === 'docking') {
+        this._quickTaskItems.push({
+          kind: 'docking',
+          pose,
+          docking: this._readQuickDockingOptions()
+        });
+        this._setQuickTaskStatus(
+          `도킹 시작점 추가: (${pose.x.toFixed(2)}, ${pose.y.toFixed(2)}, ${(pose.theta * 180 / Math.PI).toFixed(1)}°)`
+        );
+      } else {
+        this._quickTaskItems.push({ kind: 'waypoint', pose });
+        this._setQuickTaskStatus(
+          `WayPoint 추가: (${pose.x.toFixed(2)}, ${pose.y.toFixed(2)}, ${(pose.theta * 180 / Math.PI).toFixed(1)}°)`
+        );
+      }
+      this._quickTaskSequence += 1;
+      this._stopQuickMapCapture();
+      this.renderQuickTask();
+    });
+
+    const label = mode === 'trajectory'
+      ? 'Trajectory 경유점을 순서대로 찍으세요. 마지막 점은 드래그해서 최종 방향을 지정할 수 있습니다.'
+      : mode === 'docking'
+        ? '맵에서 도킹 주행을 시작할 위치를 클릭하고, 드래그해서 진입 방향을 지정하세요.'
+        : '맵에서 WayPoint 위치를 클릭하고, 드래그해서 도착 방향을 지정하세요.';
+    this._setQuickTaskStatus(label);
+  },
+
+  _stopQuickMapCapture() {
+    this._quickTaskMode = '';
+    if (typeof RosManager !== 'undefined') RosManager._exitWaypointSelectMode();
+    this._updateQuickTaskToolState();
+  },
+
+  _updateQuickTaskToolState() {
+    const modes = {
+      waypoint: 'btn-quick-waypoint',
+      trajectory: 'btn-quick-trajectory',
+      docking: 'btn-quick-docking'
+    };
+    Object.entries(modes).forEach(([mode, id]) => {
+      document.getElementById(id)?.classList?.toggle('active', this._quickTaskMode === mode);
+    });
+    const trajectoryButton = document.getElementById('btn-quick-trajectory');
+    if (trajectoryButton) {
+      trajectoryButton.textContent = this._quickTaskMode === 'trajectory'
+        ? '〰 Trajectory 입력 중'
+        : '〰 Trajectory 시작';
+    }
+    const finishButton = document.getElementById('btn-quick-trajectory-finish');
+    if (finishButton) {
+      finishButton.disabled = this._quickTaskMode !== 'trajectory'
+        || this._quickTrajectoryDraft.length < 2;
+    }
+  },
+
+  finishQuickTrajectory() {
+    if (this._quickTrajectoryDraft.length < 2) {
+      this._setQuickTaskStatus('Trajectory는 경유점이 두 개 이상 필요합니다.', true);
+      return false;
+    }
+    this._quickTaskItems.push({
+      kind: 'trajectory',
+      points: JSON.parse(JSON.stringify(this._quickTrajectoryDraft)),
+      trajectory: this._readQuickTrajectoryOptions()
+    });
+    this._quickTaskSequence += 1;
+    const pointCount = this._quickTrajectoryDraft.length;
+    this._quickTrajectoryDraft = [];
+    this._stopQuickMapCapture();
+    this._setQuickTaskStatus(`Trajectory 추가 완료: ${pointCount}개 경유점`);
+    this.renderQuickTask();
+    return true;
+  },
+
+  _readQuickTrajectoryOptions() {
+    return {
+      laneName: document.getElementById('quick-trajectory-lane')?.value?.trim() || 'lane_tmp',
+      maxTransVel: Number(document.getElementById('quick-trajectory-velocity')?.value) || 0.7,
+      laneType: Number(document.getElementById('quick-trajectory-lane-type')?.value) || 0,
+      laneDirection: Number(document.getElementById('quick-trajectory-direction')?.value) || 0
+    };
+  },
+
+  _readQuickDockingOptions() {
+    return {
+      isCharge: Number(document.getElementById('quick-dock-charge')?.value) || 0,
+      direction: Number(document.getElementById('quick-dock-direction')?.value) || 1,
+      scanType: Number(document.getElementById('quick-dock-scan-type')?.value) || 1,
+      endCondition: Number(document.getElementById('quick-dock-end-condition')?.value) || 1
+    };
+  },
+
+  addQuickStandby() {
+    if (this._quickTaskMode === 'trajectory' && this._quickTrajectoryDraft.length > 0) {
+      if (!this.finishQuickTrajectory()) return;
+    }
+    const durationInput = document.getElementById('quick-standby-duration');
+    const duration = Math.max(0, Number(durationInput?.value));
+    if (!Number.isFinite(duration)) {
+      this._setQuickTaskStatus('Standby 시간을 확인해주세요.', true);
+      return;
+    }
+    this._quickTaskItems.push({ kind: 'standby', duration });
+    this._quickTaskSequence += 1;
+    this._setQuickTaskStatus(`Standby ${duration}초 추가`);
+    this.renderQuickTask();
+  },
+
+  undoQuickTaskItem() {
+    if (this._quickTrajectoryDraft.length > 0) {
+      this._quickTrajectoryDraft.pop();
+      this._setQuickTaskStatus(
+        this._quickTrajectoryDraft.length > 0
+          ? `Trajectory 경유점 ${this._quickTrajectoryDraft.length}개`
+          : 'Trajectory 경유점을 모두 취소했습니다.'
+      );
+    } else {
+      this._quickTaskItems.pop();
+      this._setQuickTaskStatus('마지막 항목을 취소했습니다.');
+    }
+    this.renderQuickTask();
+  },
+
+  clearQuickTask() {
+    if ((this._quickTaskItems.length > 0 || this._quickTrajectoryDraft.length > 0)
+        && typeof confirm === 'function'
+        && !confirm('Quick Task 항목을 모두 비우시겠습니까?')) {
+      return;
+    }
+    this._quickTaskItems = [];
+    this._quickTrajectoryDraft = [];
+    this._stopQuickMapCapture();
+    this._setQuickTaskStatus('모든 항목을 비웠습니다.');
+    this.renderQuickTask();
+  },
+
+  moveQuickTaskItem(index, direction) {
+    const target = index + direction;
+    if (index < 0 || target < 0 || target >= this._quickTaskItems.length) return;
+    const [item] = this._quickTaskItems.splice(index, 1);
+    this._quickTaskItems.splice(target, 0, item);
+    this.renderQuickTask();
+  },
+
+  removeQuickTaskItem(index) {
+    if (index < 0 || index >= this._quickTaskItems.length) return;
+    this._quickTaskItems.splice(index, 1);
+    this.renderQuickTask();
+  },
+
+  renderQuickTask() {
+    const list = document.getElementById('quick-task-sequence');
+    const count = document.getElementById('quick-task-count');
+    const undoButton = document.getElementById('btn-quick-task-undo');
+    if (count) count.textContent = String(this._quickTaskItems.length);
+    if (undoButton) {
+      undoButton.disabled = this._quickTaskItems.length === 0
+        && this._quickTrajectoryDraft.length === 0;
+    }
+    this._updateQuickTaskToolState();
+    this._syncQuickTaskOverlay();
+    if (!list) return;
+    list.innerHTML = '';
+    if (this._quickTaskItems.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'quick-task-empty';
+      empty.textContent = this._quickTrajectoryDraft.length > 0
+        ? `Trajectory 경유점 ${this._quickTrajectoryDraft.length}개 입력 중`
+        : '아직 추가된 항목이 없습니다.';
+      list.appendChild(empty);
+      return;
+    }
+
+    this._quickTaskItems.forEach((item, index) => {
+      const row = document.createElement('div');
+      row.className = `quick-task-item quick-task-item-${item.kind}`;
+      const labels = {
+        waypoint: {
+          icon: '📍',
+          title: 'WayPoint',
+          detail: `0x01 · x=${item.pose.x}, y=${item.pose.y}, θ=${item.pose.theta}`
+        },
+        trajectory: {
+          icon: '〰',
+          title: 'TrajectoryFollowing',
+          detail: `0x15 · ${item.points.length} points · ${item.trajectory.laneName}`
+        },
+        standby: {
+          icon: '⏸',
+          title: 'Standby',
+          detail: `0x07 · ${item.duration} sec`
+        },
+        docking: {
+          icon: '🔌',
+          title: '도킹 시작점 + Docking',
+          detail: `0x01 → 0x08 · x=${item.pose.x}, y=${item.pose.y}, θ=${item.pose.theta}`
+        }
+      };
+      const label = labels[item.kind];
+      row.innerHTML = `
+        <span class="quick-task-item-num">${index + 1}</span>
+        <span class="quick-task-item-icon">${label.icon}</span>
+        <span class="quick-task-item-main"><strong></strong><small></small></span>
+        <span class="quick-task-item-actions">
+          <button type="button" class="btn-mini quick-item-up" title="위로" ${index === 0 ? 'disabled' : ''}>▲</button>
+          <button type="button" class="btn-mini quick-item-down" title="아래로" ${index === this._quickTaskItems.length - 1 ? 'disabled' : ''}>▼</button>
+          <button type="button" class="btn-mini quick-item-remove" title="삭제">✕</button>
+        </span>`;
+      row.querySelector('.quick-task-item-main strong').textContent = label.title;
+      row.querySelector('.quick-task-item-main small').textContent = label.detail;
+      row.querySelector('.quick-item-up')?.addEventListener('click', () => this.moveQuickTaskItem(index, -1));
+      row.querySelector('.quick-item-down')?.addEventListener('click', () => this.moveQuickTaskItem(index, 1));
+      row.querySelector('.quick-item-remove')?.addEventListener('click', () => this.removeQuickTaskItem(index));
+      list.appendChild(row);
+    });
+  },
+
+  _setQuickTaskStatus(message, error = false) {
+    const status = document.getElementById('quick-task-status');
+    if (status) {
+      status.textContent = message;
+      status.classList.toggle('error', error);
+    }
+    const mapStatus = document.getElementById('quick-task-map-hud-status');
+    if (mapStatus) mapStatus.textContent = message;
+  },
+
+  _syncQuickTaskOverlay() {
+    if (typeof RosManager === 'undefined' || typeof RosManager.setQuickTaskOverlay !== 'function') return;
+    const overlay = [];
+    this._quickTaskItems.forEach((item, itemIndex) => {
+      if (item.kind === 'waypoint' || item.kind === 'docking') {
+        overlay.push({
+          ...item.pose,
+          kind: item.kind,
+          label: String(itemIndex + 1),
+          group: `item-${itemIndex}`
+        });
+      } else if (item.kind === 'trajectory') {
+        item.points.forEach((point, pointIndex) => overlay.push({
+          ...point,
+          kind: 'trajectory',
+          label: `${itemIndex + 1}.${pointIndex + 1}`,
+          group: `trajectory-${itemIndex}`
+        }));
+      }
+    });
+    this._quickTrajectoryDraft.forEach((point, pointIndex) => overlay.push({
+      ...point,
+      kind: 'trajectory-draft',
+      label: `T${pointIndex + 1}`,
+      group: 'trajectory-draft'
+    }));
+    RosManager.setQuickTaskOverlay(overlay);
+  },
+
+  _buildQuickAction(actionType, args, name, overrides = {}) {
+    const config = this.actionTypes[actionType];
+    const params = (config?.params || []).map(param => ({
+      param_name: param.name,
+      type: param.type,
+      value: String(Object.prototype.hasOwnProperty.call(overrides, param.name)
+        ? overrides[param.name]
+        : param.default ?? '')
+    }));
+    return {
+      name,
+      actionType,
+      args: Array.from(args || []),
+      params,
+      summary: `${name}: ${config?.name || actionType}`,
+      missionId: 'quick_mission',
+      missionIndex: 0
+    };
+  },
+
+  compileQuickTaskItems(items = this._quickTaskItems) {
+    const actions = [];
+    let waypointIndex = 0;
+    let trajectoryIndex = 0;
+    let standbyIndex = 0;
+    let dockingIndex = 0;
+    (items || []).forEach(item => {
+      if (item.kind === 'waypoint') {
+        waypointIndex += 1;
+        actions.push(this._buildQuickAction(
+          '0x01',
+          [item.pose.x, item.pose.y, item.pose.theta],
+          `WayPoint_${waypointIndex}`
+        ));
+      } else if (item.kind === 'trajectory') {
+        trajectoryIndex += 1;
+        const finalTheta = item.points.at(-1)?.theta || 0;
+        const args = item.points.flatMap(point => [point.x, point.y]);
+        args.push(finalTheta);
+        actions.push(this._buildQuickAction(
+          '0x15',
+          args,
+          `Trajectory_${trajectoryIndex}`,
+          {
+            lane_name: item.trajectory?.laneName || 'lane_tmp',
+            max_trans_vel: item.trajectory?.maxTransVel ?? 0.7,
+            lane_type: item.trajectory?.laneType ?? 1,
+            lane_direction: item.trajectory?.laneDirection ?? 0,
+            backward_driving: Number(item.trajectory?.laneDirection) === 3
+          }
+        ));
+      } else if (item.kind === 'standby') {
+        standbyIndex += 1;
+        actions.push(this._buildQuickAction(
+          '0x07',
+          [item.duration],
+          `Standby_${standbyIndex}`
+        ));
+      } else if (item.kind === 'docking') {
+        dockingIndex += 1;
+        actions.push(this._buildQuickAction(
+          '0x01',
+          [item.pose.x, item.pose.y, item.pose.theta],
+          `Dock_Start_${dockingIndex}`
+        ));
+        const dock = item.docking || {};
+        actions.push(this._buildQuickAction(
+          '0x08',
+          [
+            dock.isCharge ?? 0,
+            dock.direction ?? 1,
+            dock.scanType ?? 1,
+            dock.endCondition ?? 1
+          ],
+          `Docking_${dockingIndex}`
+        ));
+      }
+    });
+    return actions;
+  },
+
+  finishQuickTask(saveNow = true) {
+    if (this._quickTrajectoryDraft.length > 0 && !this.finishQuickTrajectory()) return false;
+    const name = document.getElementById('quick-task-name')?.value?.trim() || '';
+    if (!name) {
+      this._setQuickTaskStatus('Task 이름을 입력하세요.', true);
+      return false;
+    }
+    const actions = this.compileQuickTaskItems();
+    if (actions.length === 0) {
+      this._setQuickTaskStatus('Task에 항목을 하나 이상 추가하세요.', true);
+      return false;
+    }
+
+    this._stopQuickMapCapture();
+    this.actionQueue = actions;
+    this._undoStack = [];
+    this._redoStack = [];
+    const queueName = document.getElementById('action-queue-save-name');
+    const taskId = document.getElementById('action-work-id');
+    const loopInput = document.getElementById('action-loop-count');
+    if (queueName) queueName.value = name;
+    if (taskId) taskId.value = name;
+    if (loopInput) loopInput.value = String(
+      Math.max(0, Number(document.getElementById('quick-task-loop')?.value) || 0)
+    );
+    this._editingTaskName = '';
+    this._builderMode = 'create';
+    this.renderQueue();
+    this._updateUndoRedoButtons();
+    this._quickTaskItems = [];
+    this._quickTrajectoryDraft = [];
+    this._syncQuickTaskOverlay();
+    this._setQuickTaskMapHudVisible(false);
+
+    if (saveNow) return this.saveQueue();
+
+    const quickView = document.getElementById('quick-task-builder-view');
+    const builderView = document.getElementById('task-builder-view');
+    const title = document.getElementById('task-builder-title');
+    if (quickView) quickView.hidden = true;
+    if (builderView) {
+      builderView.hidden = false;
+      builderView.scrollIntoView?.({ block: 'start' });
+    }
+    if (title) title.textContent = `Task 상세 편집 · ${name}`;
+    App.toast('Quick Task를 일반 편집기로 넘겼습니다.', 'success');
+    return true;
+  },
+
+  async saveAndRunQuickTask(button) {
+    const slot = App.robotSlots?.[this.getTargetSlot()];
+    if (!slot?.connected || !slot.ros) {
+      this._setQuickTaskStatus('활성 로봇이 연결되어 있지 않습니다.', true);
+      return false;
+    }
+    const saved = this.finishQuickTask(true);
+    if (!saved) return false;
+    const storageKey = document.getElementById('action-queue-load-select')?.value;
+    if (!storageKey) {
+      App.toast('저장된 Quick Task를 찾을 수 없습니다.', 'error');
+      return false;
+    }
+    await this.runSavedTask(storageKey, button);
+    return true;
   },
 
   openTaskBuilder(taskName = '') {
     const libraryView = document.getElementById('task-library-view');
     const builderView = document.getElementById('task-builder-view');
+    const quickView = document.getElementById('quick-task-builder-view');
     if (!libraryView || !builderView) return;
 
+    this._stopQuickMapCapture();
+    this._syncQuickTaskOverlay();
+    this._setQuickTaskMapHudVisible(false);
     this._builderMode = taskName ? 'edit' : 'create';
     this._editingTaskName = taskName || '';
     const title = document.getElementById('task-builder-title');
-    if (title) title.textContent = taskName ? `Task 수정 · ${taskName}` : '새 Task 만들기';
+    const entry = taskName ? this.getSavedQueues()[taskName] : null;
+    const displayName = entry?.yamlTaskId || taskName;
+    if (title) title.textContent = taskName ? `Task 수정 · ${displayName}` : '새 Task 만들기';
 
     if (taskName) {
       this.loadSavedQueue(taskName, { silent: true });
@@ -683,6 +1262,7 @@ const ActionSender = {
     }
 
     libraryView.hidden = true;
+    if (quickView) quickView.hidden = true;
     builderView.hidden = false;
     builderView.scrollIntoView?.({ block: 'start' });
   },
@@ -690,8 +1270,15 @@ const ActionSender = {
   closeTaskBuilder() {
     const libraryView = document.getElementById('task-library-view');
     const builderView = document.getElementById('task-builder-view');
+    const quickView = document.getElementById('quick-task-builder-view');
     if (!libraryView || !builderView) return;
+    this._stopQuickMapCapture();
+    this._quickTaskItems = [];
+    this._quickTrajectoryDraft = [];
+    this._syncQuickTaskOverlay();
+    this._setQuickTaskMapHudVisible(false);
     builderView.hidden = true;
+    if (quickView) quickView.hidden = true;
     libraryView.hidden = false;
     this._builderMode = 'list';
     this._editingTaskName = '';
@@ -946,6 +1533,28 @@ const ActionSender = {
     this.renderQueue();
   },
 
+  duplicateAction(index) {
+    if (index < 0 || index >= this.actionQueue.length) return;
+    this._saveSnapshot();
+    const source = this.actionQueue[index];
+    const copy = JSON.parse(JSON.stringify(source));
+    const originalName = copy.name || copy.action_id || `Action_${index + 1}`;
+    const existingNames = new Set(this.actionQueue.map(item => item.name || item.action_id));
+    let copyName = `${originalName}_copy`;
+    let suffix = 2;
+    while (existingNames.has(copyName)) {
+      copyName = `${originalName}_copy${suffix}`;
+      suffix += 1;
+    }
+    copy.name = copyName;
+    if (copy.action_id !== undefined) copy.action_id = copyName;
+    const config = this.actionTypes[this._actionTypeKey(copy)];
+    copy.summary = `${copyName}: ${config?.name || this._actionTypeKey(copy)}`;
+    this.actionQueue.splice(index + 1, 0, copy);
+    this.renderQueue();
+    App.toast(`Action "${originalName}"을 복사했습니다.`, 'success');
+  },
+
   _saveSnapshot() {
     this._undoStack.push(JSON.stringify(this.actionQueue));
     if (this._undoStack.length > this._maxUndoStack) this._undoStack.shift();
@@ -1012,6 +1621,7 @@ const ActionSender = {
         <span class="action-queue-actions">
           <button class="btn-mini" onclick="ActionSender.moveInQueue(${idx}, -1)" title="Up" ${idx === 0 ? 'disabled' : ''}>&#9650;</button>
           <button class="btn-mini" onclick="ActionSender.moveInQueue(${idx}, 1)" title="Down" ${idx === this.actionQueue.length - 1 ? 'disabled' : ''}>&#9660;</button>
+          <button class="btn-mini" onclick="ActionSender.duplicateAction(${idx})" title="Action 복사">복사</button>
           <button class="btn-mini" onclick="ActionSender.removeFromQueue(${idx})" title="Remove" style="color:#ff6b6b;">&#10005;</button>
         </span>
       </div>`;
@@ -1042,9 +1652,12 @@ const ActionSender = {
     // Set args
     const config = this.actionTypes[item.actionType];
     if (config && item.args) {
+      const formArgs = item.actionType === '0x15' && item.args.length > 3
+        ? [item.args[0], item.args[1], item.args.at(-1)]
+        : item.args;
       config.args.forEach((arg, i) => {
         const el = document.getElementById(`action-arg-${i}`);
-        if (el && item.args[i] !== undefined) el.value = item.args[i];
+        if (el && formArgs[i] !== undefined) el.value = formArgs[i];
       });
     }
 
@@ -1096,20 +1709,6 @@ const ActionSender = {
 
   async sendAction() {
     const sendButton = document.getElementById('btn-send-action');
-    if (typeof TestMode !== 'undefined' && TestMode.enabled) {
-      const actionType = document.getElementById('action-type').value;
-      const taskId = document.getElementById('action-work-id').value || 'test_task';
-      App.setButtonLoading(sendButton, true, 'Sending');
-      this.showResult('Test mode: Sending task request...');
-      const currentAction = this.readCurrentAction();
-      if (currentAction && typeof ActionHistory !== 'undefined') ActionHistory.record(currentAction);
-      setTimeout(() => {
-        this.showResult(`Success!\nTask ID: ${taskId}\n\nResponse:\n{\n  "success": true,\n  "mode": "test",\n  "action_type": "${actionType}"\n}`);
-        App.addEvent('action', `Task sent successfully (${taskId})`, 'Test mode response', 'success');
-        App.setButtonLoading(sendButton, false);
-      }, 800);
-      return;
-    }
     const slotIndex = this.getTargetSlot();
     const ros = RosManager.getRos(slotIndex);
 
@@ -1181,11 +1780,16 @@ const ActionSender = {
 
     // Test mode: intercept service call, simulate success + robot movement
     if (typeof TestMode !== 'undefined' && TestMode.enabled) {
-      this._simulateTestModeAction(actions, robotId);
-      const simResult = { success: true, message: '[TestMode] simulated', error_code: 0 };
-      this.showResult(`[TestMode] Simulated Success!\nTask ID: ${taskId} (${actions.length} action(s))\nTarget: ${robotId}\n\nResponse:\n${JSON.stringify(simResult, null, 2)}`);
-      App.addEvent('action', `Send success (${taskId}, ${actions.length} actions)`, `${serviceName} [${robotId}] [TestMode]`, 'success');
-      App.setButtonLoading(sendButton, false);
+      try {
+        const simResult = await TestMode.runTask(slotIndex, request);
+        this.showResult(`[TestMode] Simulated Success!\nTask ID: ${taskId} (${actions.length} action(s))\nTarget: ${robotId}\n\nResponse:\n${JSON.stringify(simResult, null, 2)}`);
+        App.addEvent('action', `Send success (${taskId}, ${actions.length} actions)`, `${serviceName} [${robotId}] [TestMode]`, 'success');
+      } catch (error) {
+        this.showResult(`[TestMode] 실행 실패: ${error.message || error}`, true);
+        App.addEvent('action', `Send failed (${taskId})`, String(error), 'error');
+      } finally {
+        App.setButtonLoading(sendButton, false);
+      }
       return; // skip real service call
     }
 
@@ -1229,12 +1833,9 @@ const ActionSender = {
 
     // Test mode: stop navigation + CANCEL then IDLE, skip real service call
     if (typeof TestMode !== 'undefined' && TestMode.enabled) {
-      TestMode._stopNavigation();
-      TestMode.setWorkState(4); // CANCEL
-      setTimeout(() => {
-        if (TestMode.enabled) TestMode.setWorkState(0); // IDLE
-      }, 2000);
+      await TestMode.controlTask(slotIndex, 'cancel');
       this.showResult('[TestMode] Action cancelled');
+      this._setTaskExecutionFeedback('idle', `${robotId} · Task 취소됨 · 대기`);
       App.addEvent('action', 'Cancel success', `${robotId} [TestMode]`, 'success');
       return;
     }
@@ -1242,6 +1843,7 @@ const ActionSender = {
     try {
       await this.cancelTaskOnSlot(slotIndex);
       this.showResult('Action cancelled successfully');
+      this._setTaskExecutionFeedback('idle', `${robotId} · Task 취소됨 · 대기`);
       App.addEvent('action', 'Cancel success', robotId, 'success');
     } catch (error) {
       this.showResult(`Cancel service call failed: ${error}`, true);
@@ -1269,19 +1871,38 @@ const ActionSender = {
       saved = {};
     }
 
-    if (saved[name] && name !== this._editingTaskName &&
-        !confirm(`"${name}" Task가 이미 있습니다. 덮어쓰시겠습니까?`)) {
+    const previousKey = this._editingTaskName;
+    const previousEntry = previousKey ? saved[previousKey] : null;
+    const sourceFile = previousEntry?.importedFrom
+      || (this._activeTaskSource !== this.LOCAL_TASK_SOURCE ? this._activeTaskSource : '');
+    const duplicateKey = Object.keys(saved).find(key => {
+      if (key === previousKey) return false;
+      const entry = saved[key];
+      return (entry.yamlTaskId || key) === name
+        && (entry.importedFrom || '') === sourceFile;
+    });
+    if (duplicateKey && !confirm(`"${name}" Task가 이미 있습니다. 덮어쓰시겠습니까?`)) {
       return false;
     }
-    if (this._builderMode === 'edit' &&
-        this._editingTaskName &&
-        this._editingTaskName !== name) {
-      delete saved[this._editingTaskName];
+
+    let storageKey = previousKey || duplicateKey || name;
+    if (!previousKey && !duplicateKey && Object.prototype.hasOwnProperty.call(saved, storageKey)) {
+      const sourceLabel = sourceFile || 'local';
+      storageKey = `${name} (${sourceLabel})`;
+      let suffix = 2;
+      while (Object.prototype.hasOwnProperty.call(saved, storageKey)) {
+        storageKey = `${name} (${sourceLabel} ${suffix})`;
+        suffix += 1;
+      }
     }
-    saved[name] = {
+    if (duplicateKey && duplicateKey !== storageKey) delete saved[duplicateKey];
+    saved[storageKey] = {
+      ...(previousEntry || {}),
       queue: this.actionQueue,
       savedAt: Date.now(),
-      loopFlag: Math.max(0, Math.min(9999, parseInt(document.getElementById('action-loop-count')?.value, 10) || 0))
+      loopFlag: Math.max(0, Math.min(9999, parseInt(document.getElementById('action-loop-count')?.value, 10) || 0)),
+      yamlTaskId: name,
+      ...(sourceFile ? { importedFrom: sourceFile } : {})
     };
 
     try {
@@ -1293,10 +1914,10 @@ const ActionSender = {
     }
     this.refreshSavedQueueList();
     const select = document.getElementById('action-queue-load-select');
-    if (select) select.value = name;
+    if (select) select.value = storageKey;
     const taskIdInput = document.getElementById('action-work-id');
     if (taskIdInput) taskIdInput.value = name;
-    this.renderTaskDetail(document.getElementById('action-saved-task-detail'), name);
+    this.renderTaskDetail(document.getElementById('action-saved-task-detail'), storageKey);
     this._notifyTaskStoreChanged();
     App.toast(`Task "${name}"을 저장했습니다 (${this.actionQueue.length} Actions)`, 'success');
     if (this._builderMode !== 'list') this.closeTaskBuilder();
@@ -1333,14 +1954,16 @@ const ActionSender = {
     const nameInput = document.getElementById('action-queue-save-name');
     const taskIdInput = document.getElementById('action-work-id');
     const loopInput = document.getElementById('action-loop-count');
-    if (nameInput) nameInput.value = name;
-    if (taskIdInput) taskIdInput.value = name;
+    const taskId = entry.yamlTaskId || name;
+    if (entry.importedFrom) this._activeTaskSource = entry.importedFrom;
+    if (nameInput) nameInput.value = taskId;
+    if (taskIdInput) taskIdInput.value = taskId;
     if (loopInput) loopInput.value = String(entry.loopFlag ?? 1);
     this.renderTaskDetail(document.getElementById('action-saved-task-detail'), name);
     const select = document.getElementById('action-queue-load-select');
     if (select) select.value = name;
     if (!options.silent) {
-      App.toast(`Task "${name}"을 편집기에 불러왔습니다 (${this.actionQueue.length} Actions)`, 'success');
+      App.toast(`Task "${taskId}"을 편집기에 불러왔습니다 (${this.actionQueue.length} Actions)`, 'success');
     }
   },
 
@@ -1359,13 +1982,14 @@ const ActionSender = {
       saved = {};
     }
 
+    const displayName = saved[name]?.yamlTaskId || name;
     delete saved[name];
     // B13 fix: localStorage 안전 쓰기
     try { localStorage.setItem(this.QUEUE_STORAGE_KEY, JSON.stringify(saved)); }
     catch (e) { console.warn('localStorage.setItem QUEUE_STORAGE_KEY failed:', e.message); }
     this.refreshSavedQueueList();
     this._notifyTaskStoreChanged();
-    App.toast(`Queue "${name}" deleted`, 'success');
+    App.toast(`Task "${displayName}"을 삭제했습니다`, 'success');
   },
 
   refreshSavedQueueList() {
@@ -1379,17 +2003,19 @@ const ActionSender = {
       saved = {};
     }
 
+    this._refreshTaskFileSelect(saved);
+    const visibleNames = this._getVisibleTaskKeys(saved);
     const previous = select.value;
     select.innerHTML = '<option value="">-- 저장 Task --</option>';
-    Object.keys(saved).forEach(name => {
+    visibleNames.forEach(name => {
       const entry = saved[name];
       const count = entry.queue ? entry.queue.length : 0;
       const opt = document.createElement('option');
       opt.value = name;
-      opt.textContent = `${name} (${count})`;
+      opt.textContent = `${entry.yamlTaskId || name} (${count})`;
       select.appendChild(opt);
     });
-    if (Object.prototype.hasOwnProperty.call(saved, previous)) select.value = previous;
+    if (visibleNames.includes(previous)) select.value = previous;
     this.renderTaskDetail(document.getElementById('action-saved-task-detail'), select.value);
     if (typeof JogControl !== 'undefined' && JogControl.refreshQuickTaskOptions) {
       JogControl.refreshQuickTaskOptions();
@@ -1409,6 +2035,58 @@ const ActionSender = {
 
   getSavedQueueNames() {
     return Object.keys(this.getSavedQueues()).sort((a, b) => a.localeCompare(b));
+  },
+
+  _getTaskSources(saved = this.getSavedQueues()) {
+    return Array.from(new Set(
+      Object.values(saved)
+        .map(entry => entry?.importedFrom)
+        .filter(Boolean)
+    )).sort((a, b) => a.localeCompare(b));
+  },
+
+  _getVisibleTaskKeys(saved = this.getSavedQueues()) {
+    const source = this._activeTaskSource || this.LOCAL_TASK_SOURCE;
+    return Object.keys(saved)
+      .filter(key => source === this.LOCAL_TASK_SOURCE
+        ? !saved[key]?.importedFrom
+        : saved[key]?.importedFrom === source)
+      .sort((a, b) => {
+        const aName = saved[a]?.yamlTaskId || a;
+        const bName = saved[b]?.yamlTaskId || b;
+        return aName.localeCompare(bName);
+      });
+  },
+
+  _refreshTaskFileSelect(saved = this.getSavedQueues()) {
+    const fileSelect = document.getElementById('task-yaml-file-select');
+    if (!fileSelect) return;
+    const sources = this._getTaskSources(saved);
+    if (this._activeTaskSource !== this.LOCAL_TASK_SOURCE
+        && !sources.includes(this._activeTaskSource)) {
+      this._activeTaskSource = this.LOCAL_TASK_SOURCE;
+    }
+    fileSelect.innerHTML = '<option value="__local__">로컬 Task</option>';
+    sources.forEach(source => {
+      const option = document.createElement('option');
+      option.value = source;
+      option.textContent = source;
+      fileSelect.appendChild(option);
+    });
+    fileSelect.value = this._activeTaskSource;
+
+    const visible = this._getVisibleTaskKeys(saved);
+    const summary = document.getElementById('task-yaml-file-summary');
+    if (summary) {
+      summary.textContent = this._activeTaskSource === this.LOCAL_TASK_SOURCE
+        ? `브라우저 저장 Task ${visible.length}개`
+        : `${this._activeTaskSource} · Task ${visible.length}개`;
+    }
+    const exportButton = document.getElementById('btn-export-mission');
+    if (exportButton) {
+      const exportableCount = visible.filter(key => !saved[key]?.builtin).length;
+      exportButton.disabled = exportableCount === 0;
+    }
   },
 
   _notifyTaskStoreChanged() {
@@ -1432,12 +2110,19 @@ const ActionSender = {
     const entry = this.getSavedQueues()[taskName];
     if (!entry || !Array.isArray(entry.queue)) return null;
     return {
-      name: taskName,
+      name: entry.yamlTaskId || taskName,
       loopFlag: entry.loopFlag ?? 1,
+      missionCount: this._queueToMissionGroups(entry.queue).length,
       actions: entry.queue.map((item, index) => {
         const typeKey = this._actionTypeKey(item);
         const config = this.actionTypes[typeKey];
         const args = Array.from(item.args || item.action_args || []);
+        const argFields = typeKey === '0x15' && args.length >= 3
+          ? args.slice(0, -1).map((_, argIndex) => ({
+            name: `${argIndex % 2 === 0 ? 'x' : 'y'}${Math.floor(argIndex / 2)}`,
+            label: `Trajectory ${Math.floor(argIndex / 2) + 1} · ${argIndex % 2 === 0 ? 'X' : 'Y'}`
+          })).concat([{ name: 'theta', label: '최종 방향' }])
+          : config?.args || [];
         const params = Array.from(item.params || item.action_params || []).map(param => ({
           name: param?.param_name ?? param?.name ?? '',
           label: this.fieldLabels[param?.param_name ?? param?.name ?? ''] || param?.param_name || param?.name || '',
@@ -1446,12 +2131,13 @@ const ActionSender = {
         }));
         return {
           id: item.name || item.action_id || `action_${index + 1}`,
+          missionId: item.missionId ?? 1,
           type: Number.parseInt(typeKey, 16),
           typeKey,
           typeName: config?.name || `Unknown (${typeKey || 'type'})`,
           args: args.map((value, argIndex) => ({
-            name: config?.args?.[argIndex]?.name || `arg${argIndex + 1}`,
-            label: this._fieldLabel(config?.args?.[argIndex] || {
+            name: argFields[argIndex]?.name || `arg${argIndex + 1}`,
+            label: argFields[argIndex]?.label || this._fieldLabel(argFields[argIndex] || {
               name: `arg${argIndex + 1}`
             }),
             value
@@ -1476,7 +2162,7 @@ const ActionSender = {
     const title = document.createElement('strong');
     title.textContent = model.name;
     const meta = document.createElement('span');
-    meta.textContent = `${model.actions.length} Actions · 반복 ${model.loopFlag}`;
+    meta.textContent = `${model.missionCount} Missions · ${model.actions.length} Actions · 반복 ${model.loopFlag}`;
     header.appendChild(title);
     header.appendChild(meta);
     container.appendChild(header);
@@ -1489,7 +2175,7 @@ const ActionSender = {
       const actionTitle = document.createElement('strong');
       actionTitle.textContent = `${index + 1}. ${action.id}`;
       const type = document.createElement('span');
-      type.textContent = `${action.typeKey} · ${action.typeName}`;
+      type.textContent = `Mission ${action.missionId} · ${action.typeKey} · ${action.typeName}`;
       actionHeader.appendChild(actionTitle);
       actionHeader.appendChild(type);
       card.appendChild(actionHeader);
@@ -1530,8 +2216,8 @@ const ActionSender = {
     if (!grid) return;
     const saved = this.getSavedQueues();
     const filter = String(filterText || '').trim().toLocaleLowerCase();
-    const names = this.getSavedQueueNames().filter(name =>
-      !filter || name.toLocaleLowerCase().includes(filter)
+    const names = this._getVisibleTaskKeys(saved).filter(name =>
+      !filter || (saved[name]?.yamlTaskId || name).toLocaleLowerCase().includes(filter)
     );
     grid.innerHTML = '';
 
@@ -1561,7 +2247,7 @@ const ActionSender = {
       arrow.className = 'task-library-card-arrow';
       arrow.textContent = expanded ? '▼' : '▶';
       const title = document.createElement('strong');
-      title.textContent = name;
+      title.textContent = entry.yamlTaskId || name;
       titleRow.appendChild(arrow);
       titleRow.appendChild(title);
       if (entry.builtin) {
@@ -1571,7 +2257,7 @@ const ActionSender = {
       }
       const meta = document.createElement('span');
       meta.className = 'task-library-card-meta';
-      meta.textContent = `${model.actions.length} Actions · 반복 ${model.loopFlag}`;
+      meta.textContent = `${model.missionCount} Missions · ${model.actions.length} Actions · 반복 ${model.loopFlag}`;
       head.appendChild(titleRow);
       head.appendChild(meta);
       head.addEventListener('click', () => {
@@ -1603,6 +2289,12 @@ const ActionSender = {
       editButton.className = 'btn btn-small';
       editButton.textContent = '수정';
       editButton.addEventListener('click', () => this.openTaskBuilder(name));
+      const copyButton = document.createElement('button');
+      copyButton.type = 'button';
+      copyButton.className = 'btn btn-small';
+      copyButton.textContent = '복사';
+      copyButton.title = '이 Task와 모든 Action을 현재 YAML 파일 안에 복사합니다.';
+      copyButton.addEventListener('click', () => this.duplicateSavedQueue(name));
       const deleteButton = document.createElement('button');
       deleteButton.type = 'button';
       deleteButton.className = 'btn btn-small btn-danger';
@@ -1613,9 +2305,10 @@ const ActionSender = {
       runButton.className = 'btn btn-small btn-primary task-library-run';
       runButton.textContent = '실행';
       const activeSlot = App.robotSlots?.[this.getTargetSlot()];
-      runButton.disabled = !activeSlot?.connected || !activeSlot.ros;
+      runButton.disabled = !activeSlot?.connected || !activeSlot.ros || model.actions.length === 0;
       runButton.addEventListener('click', () => this.runSavedTask(name, runButton));
       controls.appendChild(editButton);
+      controls.appendChild(copyButton);
       controls.appendChild(deleteButton);
       controls.appendChild(runButton);
       card.appendChild(controls);
@@ -1623,10 +2316,59 @@ const ActionSender = {
     });
   },
 
+  duplicateSavedQueue(name) {
+    const saved = this.getSavedQueues();
+    const source = saved[name];
+    if (!source) return '';
+    const originalName = source.yamlTaskId || name;
+    const sourceFile = source.importedFrom || '';
+    const displayNames = new Set(
+      Object.entries(saved)
+        .filter(([, entry]) => (entry.importedFrom || '') === sourceFile)
+        .map(([key, entry]) => entry.yamlTaskId || key)
+    );
+    let copyName = `${originalName}_copy`;
+    let suffix = 2;
+    while (displayNames.has(copyName)) {
+      copyName = `${originalName}_copy${suffix}`;
+      suffix += 1;
+    }
+
+    let storageKey = copyName;
+    if (Object.prototype.hasOwnProperty.call(saved, storageKey)) {
+      storageKey = `${copyName} (${sourceFile || 'local'})`;
+      let storageSuffix = 2;
+      while (Object.prototype.hasOwnProperty.call(saved, storageKey)) {
+        storageKey = `${copyName} (${sourceFile || 'local'} ${storageSuffix})`;
+        storageSuffix += 1;
+      }
+    }
+
+    const copied = JSON.parse(JSON.stringify(source));
+    copied.yamlTaskId = copyName;
+    copied.queue = Array.from(copied.queue || []).map(item => ({ ...item }));
+    copied.savedAt = Date.now();
+    copied.builtin = false;
+    delete copied.builtinVersion;
+    saved[storageKey] = copied;
+    try {
+      localStorage.setItem(this.QUEUE_STORAGE_KEY, JSON.stringify(saved));
+    } catch (error) {
+      App.toast(`Task 복사 실패: ${error.message}`, 'error');
+      return '';
+    }
+    this._expandedTaskNames.add(storageKey);
+    this.refreshSavedQueueList();
+    this._notifyTaskStoreChanged();
+    App.toast(`Task "${originalName}"을 "${copyName}"으로 복사했습니다.`, 'success');
+    return storageKey;
+  },
+
   deleteSavedQueueByName(name) {
     const saved = this.getSavedQueues();
     if (!saved[name]) return;
-    if (!confirm(`"${name}" Task를 삭제하시겠습니까?`)) return;
+    const displayName = saved[name].yamlTaskId || name;
+    if (!confirm(`"${displayName}" Task를 삭제하시겠습니까?`)) return;
     delete saved[name];
     try {
       localStorage.setItem(this.QUEUE_STORAGE_KEY, JSON.stringify(saved));
@@ -1637,7 +2379,7 @@ const ActionSender = {
     this._expandedTaskNames.delete(name);
     this.refreshSavedQueueList();
     this._notifyTaskStoreChanged();
-    App.toast(`Task "${name}"을 삭제했습니다`, 'success');
+    App.toast(`Task "${displayName}"을 삭제했습니다`, 'success');
   },
 
   async runSavedTask(name, button) {
@@ -1652,16 +2394,17 @@ const ActionSender = {
       App.toast(`Task "${name}"을 찾을 수 없습니다.`, 'error');
       return;
     }
-    if (!confirm(`${slot.robotId}에서 "${name}" Task를 실행하시겠습니까?`)) return;
+    const displayName = entry.yamlTaskId || name;
+    if (!confirm(`${slot.robotId}에서 "${displayName}" Task를 실행하시겠습니까?`)) return;
     App.setButtonLoading(button, true, '전송 중');
-    this._setTaskExecutionFeedback('work', `${slot.robotId} · ${name} 전송 중...`);
+    this._setTaskExecutionFeedback('work', `${slot.robotId} · ${displayName} 전송 중...`);
     try {
-      const sent = await this.sendSavedQueueToSlot(name, slotIndex, entry.loopFlag ?? 1, name);
+      const sent = await this.sendSavedQueueToSlot(name, slotIndex, entry.loopFlag ?? 1, displayName);
       this._setTaskExecutionFeedback(
         'work',
-        `${sent.robotId} · ${name} 실행 요청 완료 · ${sent.actionCount} Actions`
+        `${sent.robotId} · ${displayName} 실행 요청 완료 · ${sent.actionCount} Actions`
       );
-      App.toast(`${sent.robotId}: "${name}" Task 실행 요청 완료`, 'success');
+      App.toast(`${sent.robotId}: "${displayName}" Task 실행 요청 완료`, 'success');
     } catch (error) {
       this._setTaskExecutionFeedback('error', `실행 실패 · ${error.message || error}`);
       App.toast(`Task 실행 실패: ${error.message || error}`, 'error');
@@ -1679,26 +2422,54 @@ const ActionSender = {
     const slot = App.robotSlots[slotIndex];
     if (!slot?.connected || !slot.ros) throw new Error('선택한 로봇이 연결되어 있지 않습니다');
     const robotId = slot.robotId;
-    let actions = entry.queue.map((item, index) => {
-      const rawType = item.actionType !== undefined ? item.actionType : item.action_type;
-      const normalized = this.normalizeActionForSend({
-        action_type: parseInt(rawType),
-        action_args: item.args || item.action_args || [],
-        action_params: item.params || item.action_params || [],
-        conveyorFloor: item.conveyorFloor
-      });
-      normalized.action_id = item.name || `a${index + 1}`;
-      return normalized;
-    });
-    actions = await this._prepareActionsForSlot(actions, slot);
+    const missionGroups = this._queueToMissionGroups(entry.queue);
+    const normalizedGroups = missionGroups.map(group => ({
+      mission_id: group.missionId,
+      actions: group.actions.map((item, index) => {
+        const rawType = item.actionType !== undefined ? item.actionType : item.action_type;
+        const normalized = this.normalizeActionForSend({
+          action_type: parseInt(rawType),
+          action_args: item.args || item.action_args || [],
+          action_params: item.params || item.action_params || [],
+          conveyorFloor: item.conveyorFloor
+        });
+        normalized.action_id = item.name || `a${index + 1}`;
+        return normalized;
+      })
+    }));
+    const preparedActions = await this._prepareActionsForSlot(
+      normalizedGroups.flatMap(group => group.actions),
+      slot
+    );
+    let preparedIndex = 0;
+    const missions = normalizedGroups.map(group => ({
+      mission_id: group.mission_id,
+      actions: group.actions.map(() => preparedActions[preparedIndex++])
+    }));
     const request = {
       task_id: taskId || queueName,
       loop_flag: Number.isFinite(Number(loopCount)) ? Number(loopCount) : 1,
-      missions: [{
-        mission_id: `${taskId || queueName}_mission`,
-        actions
-      }]
+      missions
     };
+    if (typeof TestMode !== 'undefined' && TestMode.enabled && slot.virtualTestRobot) {
+      const result = await TestMode.runTask(slotIndex, request);
+      if (typeof App.logAudit === 'function') {
+        App.logAudit('fleet_task_send', {
+          taskId: taskId || queueName,
+          sourceQueue: queueName,
+          robotId,
+          actionCount: preparedActions.length,
+          loopCount: request.loop_flag,
+          mode: 'test'
+        });
+      }
+      return {
+        result,
+        robotId,
+        actionCount: preparedActions.length,
+        serviceName: '[TestMode virtual task]'
+      };
+    }
     const taskInterface = await this._resolveTaskInterface(slot);
     const result = await this._callTaskService(slot.ros, taskInterface.goalName, taskInterface.goalType, request);
     if (result && result.success === false) {
@@ -1709,11 +2480,11 @@ const ActionSender = {
         taskId: taskId || queueName,
         sourceQueue: queueName,
         robotId,
-        actionCount: actions.length,
+        actionCount: preparedActions.length,
         loopCount: request.loop_flag
       });
     }
-    return { result, robotId, actionCount: actions.length, serviceName: taskInterface.goalName };
+    return { result, robotId, actionCount: preparedActions.length, serviceName: taskInterface.goalName };
   },
 
   async _prepareActionsForSlot(actions, slot) {
@@ -2160,21 +2931,31 @@ const ActionSender = {
   async _controlTaskOnSlot(slotIndex, kind) {
     const slot = App.robotSlots[slotIndex];
     if (!slot?.connected || !slot.ros) throw new Error('선택한 로봇이 연결되어 있지 않습니다');
+    if (typeof TestMode !== 'undefined' && TestMode.enabled && slot.virtualTestRobot) {
+      if (kind === 'cancel') this._taskCancelRequests.set(slot.robotId, Date.now());
+      return TestMode.controlTask(slotIndex, kind);
+    }
     const taskInterface = await this._resolveTaskInterface(slot);
     const serviceName = taskInterface[`${kind}Name`];
     const serviceType = taskInterface[`${kind}Type`];
     const serviceArgs = taskInterface[`${kind}Args`];
     if (!serviceName || !serviceType) throw new Error(`${kind} 서비스 정보를 확인할 수 없습니다`);
-    const result = await this._callTaskService(
-      slot.ros,
-      serviceName,
-      serviceType,
-      serviceArgs
-    );
-    if (result && result.success === false) {
-      throw new Error(result.message || `Task ${kind} 요청이 거부되었습니다`);
+    if (kind === 'cancel') this._taskCancelRequests.set(slot.robotId, Date.now());
+    try {
+      const result = await this._callTaskService(
+        slot.ros,
+        serviceName,
+        serviceType,
+        serviceArgs
+      );
+      if (result && result.success === false) {
+        throw new Error(result.message || `Task ${kind} 요청이 거부되었습니다`);
+      }
+      return result;
+    } catch (error) {
+      if (kind === 'cancel') this._taskCancelRequests.delete(slot.robotId);
+      throw error;
     }
-    return result;
   },
 
   pauseTaskOnSlot(slotIndex) {
@@ -2202,8 +2983,11 @@ const ActionSender = {
     if (!keepCancelEnabled) App.setButtonLoading(button, true, '요청 중');
     try {
       await this._controlTaskOnSlot(slotIndex, kind);
-      const state = kind === 'pause' ? 'pause' : kind === 'resume' ? 'work' : 'cancel';
-      this._setTaskExecutionFeedback(state, `${slot.robotId} · Task ${labels[kind]} 요청 완료`);
+      const state = kind === 'pause' ? 'pause' : kind === 'resume' ? 'work' : 'idle';
+      const statusText = kind === 'cancel'
+        ? `${slot.robotId} · Task 취소됨 · 대기`
+        : `${slot.robotId} · Task ${labels[kind]} 요청 완료`;
+      this._setTaskExecutionFeedback(state, statusText);
       App.toast(`${slot.robotId}: Task ${labels[kind]} 요청 완료`, 'success');
     } catch (error) {
       this._setTaskExecutionFeedback('error', `${labels[kind]} 실패 · ${error.message || error}`);
@@ -2231,6 +3015,7 @@ const ActionSender = {
     const messageEl = container.querySelector('.task-feedback-message');
     if (badge) badge.textContent = labels[state] || String(state || 'IDLE').toUpperCase();
     if (messageEl) messageEl.textContent = [message, detail].filter(Boolean).join(' · ');
+    this._updateTaskControlsAvailability();
   },
 
   _unsubscribeTaskTelemetry() {
@@ -2249,6 +3034,16 @@ const ActionSender = {
         typeof ROSLIB === 'undefined' || typeof ROSLIB.Topic !== 'function') {
       this._updateTaskControlsAvailability();
       this._setTaskExecutionFeedback('idle', '실행 중인 Task 정보가 없습니다.');
+      return;
+    }
+    if (typeof TestMode !== 'undefined' && TestMode.enabled && slot.virtualTestRobot) {
+      const robot = TestMode.virtualRobots.get(slotIndex);
+      this._updateTaskControlsAvailability();
+      if (robot?.task) {
+        TestMode._syncActiveVirtualRobot();
+      } else {
+        this._setTaskExecutionFeedback('idle', `${slot.robotId} · Test Mode Task 대기`);
+      }
       return;
     }
     try {
@@ -2282,6 +3077,11 @@ const ActionSender = {
     const states = ['idle', 'work', 'complete', 'pause', 'cancel', 'abort', 'recovery'];
     const state = states[rawState] || 'work';
     const taskId = message.task_id || 'Task';
+    if (rawState === 4) {
+      this._taskCancelRequests.set(robotId, Date.now());
+      this._setTaskExecutionFeedback('idle', `${robotId} · ${taskId} · 취소됨`);
+      return;
+    }
     const mission = Number(message.mission_idx ?? 0);
     const action = Number(message.action_idx ?? 0);
     const loop = Number(message.loop_count ?? 0);
@@ -2295,6 +3095,18 @@ const ActionSender = {
 
   _handleTaskResult(robotId, message = {}, variant = 'spx') {
     const success = Boolean(message.success);
+    const cancelRequestedAt = this._taskCancelRequests.get(robotId) || 0;
+    const cancelRequested = Date.now() - cancelRequestedAt < 60000;
+    const cancelMessage = /cancel|취소/i.test(String(message.message || ''));
+    if (!success && (cancelRequested || cancelMessage)) {
+      this._taskCancelRequests.delete(robotId);
+      this._setTaskExecutionFeedback(
+        'idle',
+        `${robotId} · ${message.task_id || 'Task'} · 취소됨`
+      );
+      return;
+    }
+    this._taskCancelRequests.delete(robotId);
     const elapsed = Number(
       variant === 'sp_task' ? message.elapsed_time : message.total_elapsed_time
     ) || 0;
@@ -2398,34 +3210,34 @@ const ActionSender = {
     App.toast(message.split('\n')[0], isError ? 'error' : 'success');
   },
 
-  // Export current Task using the ROS_DB/sp_task/rviz YAML structure.
+  // Export every Task in the selected ROS_DB/sp_task/rviz-style YAML file.
   exportMission() {
-    const selectedName = document.getElementById('action-queue-load-select')?.value || '';
-    const taskName = document.getElementById('action-queue-save-name')?.value.trim()
-      || selectedName
-      || 'task';
-    const savedEntry = selectedName ? this.getSavedQueues()[selectedName] : null;
-    const useSavedEntry = Boolean(savedEntry && taskName === selectedName);
-    const queue = useSavedEntry ? savedEntry.queue : this.actionQueue;
-    const loopFlag = !useSavedEntry
-      ? Math.max(0, Math.min(9999, parseInt(document.getElementById('action-loop-count')?.value, 10) || 0))
-      : (savedEntry?.loopFlag ?? 1);
+    const saved = this.getSavedQueues();
+    const taskKeys = this._getVisibleTaskKeys(saved).filter(key => !saved[key]?.builtin);
+    const tasks = taskKeys.map(key => ({
+      taskId: saved[key].yamlTaskId || key,
+      loopFlag: saved[key].loopFlag ?? 1,
+      queue: saved[key].queue || [],
+      missionsEmpty: Boolean(saved[key].missionsEmpty)
+    }));
 
-    if (queue.length === 0) {
-      App.toast('YAML로 저장할 Action이 없습니다', 'error');
+    if (tasks.length === 0) {
+      App.toast('YAML로 저장할 Task가 없습니다', 'error');
       return;
     }
 
-    const yaml = this.serializeTaskYaml([{ taskId: taskName, loopFlag, queue }]);
+    const yaml = this.serializeTaskYaml(tasks);
     const blob = new Blob([yaml], { type: 'text/yaml;charset=utf-8' });
     const link = document.createElement('a');
-    const safeName = taskName.replace(/[\\/:*?"<>|]/g, '_') || 'task';
-    link.download = `${safeName}.yaml`;
+    const selectedSource = this._activeTaskSource || this.LOCAL_TASK_SOURCE;
+    const requestedName = selectedSource === this.LOCAL_TASK_SOURCE ? 'task.yaml' : selectedSource;
+    const safeName = requestedName.replace(/[\\/:*?"<>|]/g, '_') || 'task.yaml';
+    link.download = /\.ya?ml$/i.test(safeName) ? safeName : `${safeName}.yaml`;
     link.href = URL.createObjectURL(blob);
     link.click();
     URL.revokeObjectURL(link.href);
 
-    App.toast(`"${taskName}" YAML 저장 완료 (${queue.length} Actions)`, 'success');
+    App.toast(`"${link.download}" 저장 완료 (${tasks.length} Tasks)`, 'success');
   },
 
   serializeTaskYaml(tasks) {
@@ -2435,30 +3247,58 @@ const ActionSender = {
       lines.push(`- task_id: ${this._yamlString(task.taskId || 'task')}`);
       lines.push(`  loop_flag: ${Math.max(0, parseInt(task.loopFlag, 10) || 0)}`);
       lines.push('  missions:');
-      lines.push('    - mission_id: 1');
-      lines.push('      actions:');
-      queue.forEach((item, index) => {
-        const typeKey = this._actionTypeKey(item);
-        const actionType = Number.parseInt(typeKey, 16);
-        const args = Array.from(item.args || item.action_args || []);
-        const params = Array.from(item.params || item.action_params || []);
-        lines.push(`        - action_id: ${this._yamlString(item.name || item.action_id || `action_${index + 1}`)}`);
-        lines.push(`          action_type: ${Number.isFinite(actionType) ? actionType : 0}`);
-        lines.push(`          action_args: [${args.map(value => this._yamlScalar(value)).join(', ')}]`);
-        lines.push('          action_params:');
-        if (params.length === 0) {
-          lines.push('            []');
-        } else {
-          params.forEach(param => {
-            const name = param?.param_name ?? param?.name ?? '';
-            const type = param?.type || 'string';
-            const value = this._yamlParamValue(param?.value, type);
-            lines.push(`            - [${this._yamlString(name)}, ${this._yamlString(type)}, ${value}]`);
-          });
-        }
+      if (task.missionsEmpty && queue.length === 0) {
+        lines.push('    []');
+        return;
+      }
+      this._queueToMissionGroups(queue).forEach(group => {
+        lines.push(`    - mission_id: ${this._yamlScalar(group.missionId)}`);
+        lines.push('      actions:');
+        group.actions.forEach((item, index) => {
+          const typeKey = this._actionTypeKey(item);
+          const actionType = Number.parseInt(typeKey, 16);
+          const args = Array.from(item.args || item.action_args || []);
+          const params = Array.from(item.params || item.action_params || []);
+          lines.push(`        - action_id: ${this._yamlString(item.name || item.action_id || `action_${index + 1}`)}`);
+          lines.push(`          action_type: ${Number.isFinite(actionType) ? actionType : 0}`);
+          lines.push(`          action_args: [${args.map(value => this._yamlScalar(value)).join(', ')}]`);
+          lines.push('          action_params:');
+          if (params.length === 0) {
+            lines.push('            []');
+          } else {
+            params.forEach(param => {
+              const name = param?.param_name ?? param?.name ?? '';
+              const type = param?.type || 'string';
+              const value = this._yamlParamValue(param?.value, type);
+              lines.push(`            - [${this._yamlString(name)}, ${this._yamlString(type)}, ${value}]`);
+            });
+          }
+        });
       });
     });
     return `${lines.join('\n')}\n`;
+  },
+
+  _queueToMissionGroups(queue) {
+    const groups = [];
+    let fallbackGroup = null;
+    Array.from(queue || []).forEach(item => {
+      const hasMissionIndex = Number.isInteger(item?.missionIndex);
+      let group = hasMissionIndex
+        ? groups.find(entry => entry.missionIndex === item.missionIndex)
+        : fallbackGroup;
+      if (!group) {
+        group = {
+          missionId: item?.missionId ?? 1,
+          missionIndex: hasMissionIndex ? item.missionIndex : null,
+          actions: []
+        };
+        groups.push(group);
+        if (!hasMissionIndex) fallbackGroup = group;
+      }
+      group.actions.push(item);
+    });
+    return groups.length > 0 ? groups : [{ missionId: 1, missionIndex: null, actions: [] }];
   },
 
   _yamlString(value) {
@@ -2489,19 +3329,40 @@ const ActionSender = {
     const tasks = [];
     let task = null;
     let action = null;
+    let missionId = 1;
+    let missionIndex = -1;
     String(text || '').split(/\r?\n/).forEach(rawLine => {
       const line = rawLine.replace(/\s+$/, '');
       let match = line.match(/^- task_id:\s*(.*)$/);
       if (match) {
-        task = { taskId: String(this._parseYamlScalar(match[1])), loopFlag: 1, queue: [] };
+        const parsedTaskId = String(this._parseYamlScalar(match[1]));
+        task = {
+          taskId: parsedTaskId || `(이름 없는 Task ${tasks.length + 1})`,
+          loopFlag: 1,
+          queue: [],
+          missionsEmpty: false
+        };
         tasks.push(task);
         action = null;
+        missionId = 1;
+        missionIndex = -1;
         return;
       }
       if (!task) return;
+      if (/^\s{4}\[\]\s*$/.test(line)) {
+        task.missionsEmpty = true;
+        return;
+      }
       match = line.match(/^\s+loop_flag:\s*(.*)$/);
       if (match) {
         task.loopFlag = Math.max(0, parseInt(this._parseYamlScalar(match[1]), 10) || 0);
+        return;
+      }
+      match = line.match(/^\s{4}- mission_id:\s*(.*)$/);
+      if (match) {
+        missionId = this._parseYamlScalar(match[1]);
+        missionIndex += 1;
+        action = null;
         return;
       }
       match = line.match(/^\s{8}- action_id:\s*(.*)$/);
@@ -2510,7 +3371,9 @@ const ActionSender = {
           name: String(this._parseYamlScalar(match[1])),
           actionType: '',
           args: [],
-          params: []
+          params: [],
+          missionId,
+          missionIndex: Math.max(0, missionIndex)
         };
         task.queue.push(action);
         return;
@@ -2548,7 +3411,7 @@ const ActionSender = {
         item.summary = `${item.name}: ${config?.name || item.actionType} (${argText})`;
       });
     });
-    return tasks.filter(parsedTask => parsedTask.taskId && parsedTask.queue.length > 0);
+    return tasks;
   },
 
   _parseYamlInlineArray(source) {
@@ -2616,23 +3479,34 @@ const ActionSender = {
         const tasks = this.parseTaskYaml(source);
         if (tasks.length === 0) throw new Error('task_id와 actions를 찾을 수 없습니다');
         const saved = this.getSavedQueues();
+        const sourceFile = file.name || 'task.yaml';
+        const existingKeys = Object.keys(saved).filter(key => saved[key]?.importedFrom === sourceFile);
+        if (existingKeys.length > 0 &&
+            !confirm(`"${sourceFile}"에서 불러온 Task ${existingKeys.length}개를 새 내용으로 교체하시겠습니까?`)) {
+          return;
+        }
+        existingKeys.forEach(key => delete saved[key]);
         const importedNames = [];
         tasks.forEach(task => {
           let name = task.taskId;
           let suffix = 2;
           while (Object.prototype.hasOwnProperty.call(saved, name)) {
-            name = `${task.taskId} (${suffix})`;
+            name = `${task.taskId} (${sourceFile} ${suffix})`;
             suffix += 1;
           }
           saved[name] = {
             queue: task.queue,
             loopFlag: task.loopFlag,
             savedAt: Date.now(),
-            importedFrom: file.name || 'task.yaml'
+            importedFrom: sourceFile,
+            yamlTaskId: task.taskId,
+            missionsEmpty: Boolean(task.missionsEmpty)
           };
           importedNames.push(name);
         });
         localStorage.setItem(this.QUEUE_STORAGE_KEY, JSON.stringify(saved));
+        this._activeTaskSource = sourceFile;
+        localStorage.setItem(this.TASK_FILE_SELECTION_KEY, sourceFile);
         const first = saved[importedNames[0]];
         this._saveSnapshot();
         this.actionQueue = JSON.parse(JSON.stringify(first.queue));
@@ -2640,15 +3514,15 @@ const ActionSender = {
         const nameInput = document.getElementById('action-queue-save-name');
         const taskIdInput = document.getElementById('action-work-id');
         const loopInput = document.getElementById('action-loop-count');
-        if (nameInput) nameInput.value = importedNames[0];
-        if (taskIdInput) taskIdInput.value = importedNames[0];
+        if (nameInput) nameInput.value = first.yamlTaskId || importedNames[0];
+        if (taskIdInput) taskIdInput.value = first.yamlTaskId || importedNames[0];
         if (loopInput) loopInput.value = String(first.loopFlag ?? 1);
         this.refreshSavedQueueList();
         const select = document.getElementById('action-queue-load-select');
         if (select) select.value = importedNames[0];
         this.renderTaskDetail(document.getElementById('action-saved-task-detail'), importedNames[0]);
         this._notifyTaskStoreChanged();
-        App.toast(`YAML에서 Task ${importedNames.length}개를 불러왔습니다`, 'success');
+        App.toast(`"${sourceFile}"에서 Task ${importedNames.length}개를 불러왔습니다`, 'success');
       } catch (err) {
         App.toast('Task 파일 오류: ' + err.message, 'error');
       }
@@ -2834,6 +3708,22 @@ const ActionSender = {
           y: parseFloat(args[1]) || 0,
           theta: parseFloat(args[2]) || 0
         });
+      } else if (at === 0x15) {
+        // TrajectoryFollowing: args = [x0, y0, x1, y1, ..., final_theta]
+        const args = act.action_args || act.args || [];
+        const finalTheta = parseFloat(args.at(-1)) || 0;
+        for (let index = 0; index + 1 < args.length - 1; index += 2) {
+          const nextX = parseFloat(args[index + 2]);
+          const nextY = parseFloat(args[index + 3]);
+          const segmentTheta = Number.isFinite(nextX) && Number.isFinite(nextY)
+            ? Math.atan2(nextY - Number(args[index + 1]), nextX - Number(args[index]))
+            : finalTheta;
+          waypoints.push({
+            x: parseFloat(args[index]) || 0,
+            y: parseFloat(args[index + 1]) || 0,
+            theta: index + 2 < args.length - 1 ? segmentTheta : finalTheta
+          });
+        }
       } else if (at === 0x02) {
         // Basic_Move: args = [move_type, amount]
         const args = act.action_args || act.args || [];
@@ -2901,219 +3791,7 @@ const ActionSender = {
   }
 };
 
-// Favorite Actions
-const ActionFavorites = {
-  STORAGE_KEY: 'actionFavorites',
-
-  init() {
-    const btnSave = document.getElementById('btn-save-favorite');
-    if (btnSave) {
-      btnSave.addEventListener('click', () => this.saveCurrent());
-    }
-    this.render();
-  },
-
-  getAll() {
-    try {
-      return JSON.parse(localStorage.getItem(this.STORAGE_KEY)) || [];
-    } catch (e) { return []; }
-  },
-
-  saveAll(favs) {
-    // B13 fix: localStorage 안전 쓰기
-    try { localStorage.setItem(this.STORAGE_KEY, JSON.stringify(favs)); }
-    catch (e) { console.warn('localStorage.setItem ActionFavorites failed:', e.message); }
-  },
-
-  saveCurrent() {
-    const actionType = document.getElementById('action-type').value;
-    const config = ActionSender.actionTypes[actionType];
-    if (!config) return;
-
-    const args = [];
-    config.args.forEach((a, i) => {
-      const el = document.getElementById(`action-arg-${i}`);
-      args.push(el ? parseFloat(el.value) || 0 : a.default);
-    });
-
-    const params = {};
-    config.params.forEach((p, i) => {
-      const el = document.getElementById(`action-param-${i}`);
-      if (el) params[p.name] = el.value;
-    });
-
-    const name = prompt('Favorite name:', `${config.name} (${args.map(a => a.toFixed(1)).join(', ')})`);
-    if (!name) return;
-
-    const favs = this.getAll();
-    favs.push({ name, actionType, args, params, createdAt: Date.now() });
-    this.saveAll(favs);
-    this.render();
-    App.toast(`Favorite saved: ${name}`, 'success');
-  },
-
-  apply(index) {
-    const favs = this.getAll();
-    const fav = favs[index];
-    if (!fav) return;
-
-    // Set action type
-    const typeSelect = document.getElementById('action-type');
-    typeSelect.value = fav.actionType;
-    ActionSender.updateActionForm(fav.actionType);
-
-    // Set args
-    const config = ActionSender.actionTypes[fav.actionType];
-    if (config) {
-      config.args.forEach((a, i) => {
-        const el = document.getElementById(`action-arg-${i}`);
-        if (el && fav.args[i] !== undefined) el.value = fav.args[i];
-      });
-      config.params.forEach((p, i) => {
-        const el = document.getElementById(`action-param-${i}`);
-        if (el && fav.params[p.name] !== undefined) el.value = fav.params[p.name];
-      });
-    }
-    App.toast(`Favorite applied: ${fav.name}`, 'info');
-  },
-
-  remove(index) {
-    const favs = this.getAll();
-    favs.splice(index, 1);
-    this.saveAll(favs);
-    this.render();
-  },
-
-  render() {
-    const list = document.getElementById('action-favorites-list');
-    if (!list) return;
-    const favs = this.getAll();
-
-    if (favs.length === 0) {
-      list.innerHTML = '<span class="action-favorites-empty">No saved favorites</span>';
-      return;
-    }
-
-    list.innerHTML = favs.map((f, i) => {
-      const config = ActionSender.actionTypes[f.actionType];
-      const typeName = config ? config.name : f.actionType;
-      return `<div class="action-fav-item">
-        <button class="action-fav-btn" data-fav-apply="${i}" title="${typeName}: ${f.args.join(', ')}">${f.name}</button>
-        <button class="action-fav-remove" data-fav-remove="${i}" title="Delete">x</button>
-      </div>`;
-    }).join('');
-
-    list.querySelectorAll('[data-fav-apply]').forEach(btn => {
-      btn.addEventListener('click', () => this.apply(parseInt(btn.dataset.favApply)));
-    });
-    list.querySelectorAll('[data-fav-remove]').forEach(btn => {
-      btn.addEventListener('click', () => this.remove(parseInt(btn.dataset.favRemove)));
-    });
-  }
-};
-
-const ParamPresets = {
-  STORAGE_KEY: 'paramPresets',
-
-  init() {
-    const applyBtn = document.getElementById('btn-preset-apply');
-    const saveBtn = document.getElementById('btn-preset-save');
-    const deleteBtn = document.getElementById('btn-preset-delete');
-    if (applyBtn) applyBtn.addEventListener('click', () => this.applyCurrent());
-    if (saveBtn) saveBtn.addEventListener('click', () => this.saveCurrent());
-    if (deleteBtn) deleteBtn.addEventListener('click', () => this.deleteCurrent());
-    this.renderSelect();
-  },
-
-  getAll() {
-    try { return JSON.parse(localStorage.getItem(this.STORAGE_KEY)) || {}; }
-    catch (e) { return {}; }
-  },
-
-  saveAll(presets) {
-    // B13 fix: localStorage 안전 쓰기
-    try { localStorage.setItem(this.STORAGE_KEY, JSON.stringify(presets)); }
-    catch (e) { console.warn('localStorage.setItem ActionPresets failed:', e.message); }
-  },
-
-  saveCurrent() {
-    const actionType = document.getElementById('action-type').value;
-    const config = ActionSender.actionTypes[actionType];
-    if (!config || config.params.length === 0) {
-      App.toast('No parameters to save', 'info');
-      return;
-    }
-
-    const name = prompt('Preset name:', `${config.name}_preset`);
-    if (!name) return;
-
-    const params = {};
-    config.params.forEach((p, i) => {
-      const el = document.getElementById(`action-param-${i}`);
-      if (el) params[p.name] = el.value;
-    });
-
-    const presets = this.getAll();
-    presets[name] = { actionType, params, createdAt: Date.now() };
-    this.saveAll(presets);
-    this.renderSelect();
-    App.toast(`Preset saved: ${name}`, 'success');
-  },
-
-  applyCurrent() {
-    const select = document.getElementById('param-preset-select');
-    const name = select.value;
-    if (!name) { App.toast('Please select a preset', 'info'); return; }
-
-    const presets = this.getAll();
-    const preset = presets[name];
-    if (!preset) return;
-
-    // Set action type first
-    const typeSelect = document.getElementById('action-type');
-    typeSelect.value = preset.actionType;
-    ActionSender.updateActionForm(preset.actionType);
-
-    // Apply params
-    const config = ActionSender.actionTypes[preset.actionType];
-    if (config) {
-      config.params.forEach((p, i) => {
-        const el = document.getElementById(`action-param-${i}`);
-        if (el && preset.params[p.name] !== undefined) el.value = preset.params[p.name];
-      });
-    }
-    App.toast(`Preset applied: ${name}`, 'info');
-  },
-
-  deleteCurrent() {
-    const select = document.getElementById('param-preset-select');
-    const name = select.value;
-    if (!name) { App.toast('Please select a preset', 'info'); return; }
-
-    const presets = this.getAll();
-    delete presets[name];
-    this.saveAll(presets);
-    this.renderSelect();
-    App.toast(`Preset deleted: ${name}`, 'success');
-  },
-
-  renderSelect() {
-    const select = document.getElementById('param-preset-select');
-    if (!select) return;
-    const presets = this.getAll();
-    select.innerHTML = '<option value="">-- Select Preset --</option>';
-    Object.keys(presets).forEach(name => {
-      const opt = document.createElement('option');
-      opt.value = name;
-      opt.textContent = name;
-      select.appendChild(opt);
-    });
-  }
-};
-
 // Initialize when DOM is loaded
 document.addEventListener('DOMContentLoaded', () => {
   ActionSender.init();
-  ActionFavorites.init();
-  ParamPresets.init();
 });

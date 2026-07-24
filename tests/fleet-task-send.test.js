@@ -76,7 +76,16 @@ function loadActionSender() {
   };
   vm.createContext(context);
   vm.runInContext(`${source}\nglobalThis.__ActionSender = ActionSender;`, context);
-  return { manager: context.__ActionSender, calls, slot, App: context.App, confirm: context.confirm };
+  return {
+    manager: context.__ActionSender,
+    context,
+    calls,
+    saved,
+    slot,
+    App: context.App,
+    confirm: context.confirm,
+    document: context.document
+  };
 }
 
 describe('fleet saved task sending', () => {
@@ -96,6 +105,54 @@ describe('fleet saved task sending', () => {
       taskId: '현장 순찰',
       sourceQueue: 'patrol'
     }));
+  });
+
+  test('preserves imported mission boundaries when sending a saved Task', async () => {
+    const { manager, calls, saved } = loadActionSender();
+    saved.multi = {
+      queue: [
+        {
+          name: 'go',
+          actionType: '0x01',
+          args: [1, 2, 0],
+          params: [],
+          missionId: 'navigation',
+          missionIndex: 0
+        },
+        {
+          name: 'wait',
+          actionType: '0x07',
+          args: [5],
+          params: [],
+          missionId: 'work',
+          missionIndex: 1
+        }
+      ]
+    };
+
+    await manager.sendSavedQueueToSlot('multi', 0, 1, 'multi');
+
+    expect(calls[0].request.missions).toHaveLength(2);
+    expect(calls[0].request.missions[0].mission_id).toBe('navigation');
+    expect(calls[0].request.missions[0].actions[0].action_id).toBe('go');
+    expect(calls[0].request.missions[1].mission_id).toBe('work');
+    expect(calls[0].request.missions[1].actions[0].action_id).toBe('wait');
+  });
+
+  test('runs a saved task through the virtual robot engine in Test Mode', async () => {
+    const { manager, context, calls, slot } = loadActionSender();
+    const runTask = jest.fn().mockResolvedValue({ success: true });
+    slot.virtualTestRobot = true;
+    context.TestMode = { enabled: true, runTask };
+
+    const sent = await manager.sendSavedQueueToSlot('patrol', 0, 3, '가상 순찰');
+
+    expect(runTask).toHaveBeenCalledWith(0, expect.objectContaining({
+      task_id: '가상 순찰',
+      loop_flag: 3
+    }));
+    expect(calls).toHaveLength(0);
+    expect(sent.serviceName).toBe('[TestMode virtual task]');
   });
 
   test('uses the detected legacy services for pause, resume, and cancel', async () => {
@@ -139,5 +196,82 @@ describe('fleet saved task sending', () => {
     expect(confirm).toHaveBeenCalled();
     expect(cancelButton.disabled).toBe(false);
     expect(calls.at(-1).options.name).toBe('/R_002/TARU/cancel');
+  });
+
+  test('shows completed task results and re-enables task controls from live telemetry', () => {
+    const { manager, document } = loadActionSender();
+    manager.getTargetSlot = jest.fn(() => 0);
+    const badge = { textContent: '' };
+    const message = { textContent: '' };
+    const feedback = {
+      dataset: {},
+      querySelector: jest.fn(selector =>
+        selector === '.task-state-badge' ? badge : message
+      )
+    };
+    const controls = ['btn-pause-task', 'btn-resume-task', 'btn-cancel-task']
+      .reduce((result, id) => {
+        result[id] = {
+          disabled: true,
+          classList: { contains: jest.fn(() => false) }
+        };
+        return result;
+      }, {});
+    document.getElementById.mockImplementation(id =>
+      id === 'task-execution-feedback' ? feedback : controls[id] || null
+    );
+
+    manager._handleTaskResult('R_002', {
+      task_id: '기본 - 도킹',
+      success: true,
+      total_elapsed_time: 4.2
+    }, 'spx');
+
+    expect(feedback.dataset.state).toBe('complete');
+    expect(badge.textContent).toBe('COMPLETE');
+    expect(message.textContent).toContain('완료');
+    expect(message.textContent).toContain('4.2s');
+    expect(controls['btn-cancel-task'].disabled).toBe(false);
+  });
+
+  test('shows user-cancelled tasks as IDLE instead of ABORT', () => {
+    const { manager, document } = loadActionSender();
+    manager.getTargetSlot = jest.fn(() => 0);
+    const badge = { textContent: '' };
+    const message = { textContent: '' };
+    const feedback = {
+      dataset: {},
+      querySelector: jest.fn(selector =>
+        selector === '.task-state-badge' ? badge : message
+      )
+    };
+    const control = {
+      disabled: false,
+      classList: { contains: jest.fn(() => false) }
+    };
+    document.getElementById.mockImplementation(id =>
+      id === 'task-execution-feedback' ? feedback : control
+    );
+    manager._taskCancelRequests.set('R_002', Date.now());
+
+    manager._handleTaskResult('R_002', {
+      task_id: '기본 - 도킹',
+      success: false,
+      error_code: 1,
+      message: ''
+    }, 'spx');
+
+    expect(feedback.dataset.state).toBe('idle');
+    expect(badge.textContent).toBe('IDLE');
+    expect(message.textContent).toContain('취소됨');
+    expect(message.textContent).not.toContain('실패');
+
+    manager._handleTaskFeedback('R_002', {
+      task_id: '기본 - 도킹',
+      state: 4
+    }, 'spx');
+
+    expect(feedback.dataset.state).toBe('idle');
+    expect(badge.textContent).toBe('IDLE');
   });
 });

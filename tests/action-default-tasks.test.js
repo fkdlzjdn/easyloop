@@ -102,6 +102,76 @@ describe('built-in single-action tasks', () => {
     expect(html).toContain('<option value="0x18">0x18 · 컨베이어 구동</option>');
   });
 
+  test('removes the redundant parameter preset feature from the Task tab', () => {
+    const html = fs.readFileSync(
+      path.join(__dirname, '..', 'public', 'index.html'),
+      'utf8'
+    );
+    const source = fs.readFileSync(
+      path.join(__dirname, '..', 'public', 'js', 'action-sender.js'),
+      'utf8'
+    );
+
+    expect(html).not.toContain('param-preset-section');
+    expect(html).not.toContain('btn-preset-save');
+    expect(source).not.toContain('const ParamPresets');
+    expect(source).not.toContain('ParamPresets.init()');
+  });
+
+  test('removes Action favorites and exposes YAML file-level controls', () => {
+    const html = fs.readFileSync(
+      path.join(__dirname, '..', 'public', 'index.html'),
+      'utf8'
+    );
+    const source = fs.readFileSync(
+      path.join(__dirname, '..', 'public', 'js', 'action-sender.js'),
+      'utf8'
+    );
+
+    expect(html).not.toContain('Action 즐겨찾기');
+    expect(html).not.toContain('btn-save-favorite');
+    expect(source).not.toContain('const ActionFavorites');
+    expect(source).not.toContain('ActionFavorites.init()');
+    expect(html).toContain('id="task-yaml-file-select"');
+    expect(html).toContain('YAML 전체 저장');
+  });
+
+  test('exposes Task copy, Action copy, and map-based Quick Task controls', () => {
+    const html = fs.readFileSync(
+      path.join(__dirname, '..', 'public', 'index.html'),
+      'utf8'
+    );
+    const source = fs.readFileSync(
+      path.join(__dirname, '..', 'public', 'js', 'action-sender.js'),
+      'utf8'
+    );
+
+    expect(html).toContain('id="btn-quick-task"');
+    expect(html).toContain('id="btn-quick-waypoint"');
+    expect(html).toContain('id="btn-quick-trajectory"');
+    expect(html).toContain('id="btn-quick-docking"');
+    expect(html).toContain('id="btn-quick-standby"');
+    expect(html).toContain('id="quick-task-map-hud"');
+    expect(html).toContain('id="btn-run-quick-task"');
+    expect(source).toContain('duplicateSavedQueue(name)');
+    expect(source).toContain('duplicateAction(index)');
+  });
+
+  test('refreshes Task telemetry and controls when the active ROS slot connects', () => {
+    const { manager, context } = loadActionSender();
+    const slot = { connected: true, ros: {}, taskInterface: { variant: 'stale' } };
+    context.App.robotSlots = [slot];
+    manager.getTargetSlot = jest.fn(() => 0);
+    manager.updateTargetStatus = jest.fn();
+    manager._subscribeTaskTelemetry = jest.fn();
+
+    manager.onSlotConnectionChanged(0, true);
+
+    expect(slot.taskInterface).toBeUndefined();
+    expect(manager.updateTargetStatus).toHaveBeenCalled();
+    expect(manager._subscribeTaskTelemetry).toHaveBeenCalled();
+  });
+
   test('conveyor floor selection supports only floors 1 and 2 and defaults to floor 1', () => {
     const { manager } = loadActionSender();
     const floorArg = manager.actionTypes['0x18'].args[1];
@@ -235,6 +305,26 @@ describe('built-in single-action tasks', () => {
     expect(yaml).toContain('            - [dock_dist_flag, bool, false]');
   });
 
+  test('serializes several Tasks into one YAML document', () => {
+    const { manager } = loadActionSender();
+    const yaml = manager.serializeTaskYaml([
+      {
+        taskId: 'move',
+        loopFlag: 1,
+        queue: [{ name: 'wp', actionType: '0x01', args: [1, 2, 3], params: [] }]
+      },
+      {
+        taskId: 'wait',
+        loopFlag: 2,
+        queue: [{ name: 'standby', actionType: '0x07', args: [5], params: [] }]
+      }
+    ]);
+
+    expect(yaml.match(/^- task_id:/gm)).toHaveLength(2);
+    expect(yaml).toContain('- task_id: move');
+    expect(yaml).toContain('- task_id: wait');
+  });
+
   test('imports multiple missions from an rviz YAML task as one ordered task queue', () => {
     const { manager } = loadActionSender();
     const yaml = `
@@ -264,12 +354,232 @@ describe('built-in single-action tasks', () => {
     expect(tasks[0].loopFlag).toBe(3);
     expect(tasks[0].queue).toHaveLength(2);
     expect(tasks[0].queue[0].actionType).toBe('0x01');
+    expect(tasks[0].queue[0].missionId).toBe('first');
+    expect(tasks[0].queue[0].missionIndex).toBe(0);
     expect(tasks[0].queue[0].params[0]).toEqual({
       param_name: 'max_trans_vel',
       type: 'float',
       value: '0.7'
     });
     expect(tasks[0].queue[1].args).toEqual([5]);
+    expect(tasks[0].queue[1].missionId).toBe('second');
+    expect(tasks[0].queue[1].missionIndex).toBe(1);
+
+    const roundTrip = manager.serializeTaskYaml(tasks);
+    expect(roundTrip).toContain('    - mission_id: first');
+    expect(roundTrip).toContain('    - mission_id: second');
+  });
+
+  test('groups imported Tasks by YAML filename without mixing local Tasks', () => {
+    const { manager } = loadActionSender({
+      local_task: { queue: [{ actionType: '0x07', args: [1] }] },
+      first: {
+        yamlTaskId: 'move_a',
+        importedFrom: 'factory.yaml',
+        queue: [{ actionType: '0x01', args: [1, 2, 3] }]
+      },
+      second: {
+        yamlTaskId: 'move_b',
+        importedFrom: 'factory.yaml',
+        queue: [{ actionType: '0x01', args: [4, 5, 6] }]
+      },
+      other: {
+        yamlTaskId: 'dock',
+        importedFrom: 'dock.yaml',
+        queue: [{ actionType: '0x08', args: [0, 1, 7, 1] }]
+      }
+    });
+
+    manager._activeTaskSource = 'factory.yaml';
+    expect(Array.from(manager._getVisibleTaskKeys())).toEqual(['first', 'second']);
+
+    manager._activeTaskSource = manager.LOCAL_TASK_SOURCE;
+    expect(Array.from(manager._getVisibleTaskKeys())).toEqual(['local_task']);
+  });
+
+  test('copies a Task inside the same YAML file with an independent Action queue', () => {
+    const { manager, storage } = loadActionSender({
+      original: {
+        yamlTaskId: 'move',
+        importedFrom: 'factory.yaml',
+        queue: [{ name: 'wp', actionType: '0x01', args: [1, 2, 3], params: [] }],
+        loopFlag: 2,
+        builtin: true,
+        builtinVersion: 3
+      }
+    });
+
+    const copiedKey = manager.duplicateSavedQueue('original');
+    const saved = JSON.parse(storage.get(manager.QUEUE_STORAGE_KEY));
+
+    expect(copiedKey).toBe('move_copy');
+    expect(saved[copiedKey].yamlTaskId).toBe('move_copy');
+    expect(saved[copiedKey].importedFrom).toBe('factory.yaml');
+    expect(saved[copiedKey].loopFlag).toBe(2);
+    expect(saved[copiedKey].builtin).toBe(false);
+    expect(saved[copiedKey].builtinVersion).toBeUndefined();
+    expect(saved[copiedKey].queue).toEqual(saved.original.queue);
+    expect(saved[copiedKey].queue).not.toBe(saved.original.queue);
+  });
+
+  test('copies an Action directly after its source and gives it a unique action_id', () => {
+    const { manager } = loadActionSender();
+    manager.actionQueue = [
+      { name: 'move', actionType: '0x01', args: [1, 2, 3], params: [] },
+      { name: 'move_copy', actionType: '0x07', args: [5], params: [] }
+    ];
+    manager.renderQueue = jest.fn();
+
+    manager.duplicateAction(0);
+
+    expect(manager.actionQueue).toHaveLength(3);
+    expect(manager.actionQueue[1].name).toBe('move_copy2');
+    expect(manager.actionQueue[1].args).toEqual([1, 2, 3]);
+    expect(manager.actionQueue[1]).not.toBe(manager.actionQueue[0]);
+    expect(manager.renderQueue).toHaveBeenCalled();
+  });
+
+  test('compiles a Quick Task with WayPoint, Trajectory, Standby, and docking start', () => {
+    const { manager } = loadActionSender();
+    const actions = manager.compileQuickTaskItems([
+      { kind: 'waypoint', pose: { x: 1, y: 2, theta: 0.1 } },
+      {
+        kind: 'trajectory',
+        points: [
+          { x: 2, y: 3, theta: 0 },
+          { x: 4, y: 5, theta: 1.57 }
+        ],
+        trajectory: {
+          laneName: 'quick_lane',
+          maxTransVel: 0.8,
+          laneType: 1,
+          laneDirection: 3
+        }
+      },
+      { kind: 'standby', duration: 4.5 },
+      {
+        kind: 'docking',
+        pose: { x: 6, y: 7, theta: 3.14 },
+        docking: { isCharge: 1, direction: -1, scanType: 2, endCondition: 3 }
+      }
+    ]);
+
+    expect(actions.map(action => action.actionType)).toEqual([
+      '0x01', '0x15', '0x07', '0x01', '0x08'
+    ]);
+    expect(actions[1].args).toEqual([2, 3, 4, 5, 1.57]);
+    expect(actions[1].params.find(param => param.param_name === 'lane_name').value)
+      .toBe('quick_lane');
+    expect(actions[1].params.find(param => param.param_name === 'backward_driving').value)
+      .toBe('true');
+    expect(actions[2].args).toEqual([4.5]);
+    expect(actions[3].name).toBe('Dock_Start_1');
+    expect(actions[3].args).toEqual([6, 7, 3.14]);
+    expect(actions[4].args).toEqual([1, -1, 2, 3]);
+    expect(actions.every(action => action.missionId === 'quick_mission')).toBe(true);
+
+    const yaml = manager.serializeTaskYaml([{
+      taskId: 'quick_route',
+      loopFlag: 1,
+      queue: actions
+    }]);
+    expect(yaml).toContain('          action_type: 21');
+    expect(yaml).toContain('          action_args: [2, 3, 4, 5, 1.57]');
+  });
+
+  test('labels every Trajectory coordinate pair and the final theta in Task details', () => {
+    const { manager } = loadActionSender({
+      trajectory: {
+        queue: [{
+          name: 'route',
+          actionType: '0x15',
+          args: [1, 2, 3, 4, 1.57],
+          params: []
+        }]
+      }
+    });
+
+    const args = manager.getTaskDetailModel('trajectory').actions[0].args;
+
+    expect(args.map(arg => arg.name)).toEqual(['x0', 'y0', 'x1', 'y1', 'theta']);
+    expect(args.at(-1)).toEqual({
+      name: 'theta',
+      label: '최종 방향',
+      value: 1.57
+    });
+  });
+
+  test('saves and immediately runs a Quick Task on the active connected robot', async () => {
+    const { manager, context } = loadActionSender();
+    context.App.robotSlots = [{ robotId: 'R_051', connected: true, ros: {} }];
+    manager.getTargetSlot = jest.fn(() => 0);
+    manager.finishQuickTask = jest.fn(() => true);
+    manager.runSavedTask = jest.fn().mockResolvedValue();
+    context.document.getElementById.mockImplementation(id =>
+      id === 'action-queue-load-select' ? { value: 'quick_route' } : null
+    );
+    const button = {};
+
+    await manager.saveAndRunQuickTask(button);
+
+    expect(manager.finishQuickTask).toHaveBeenCalledWith(true);
+    expect(manager.runSavedTask).toHaveBeenCalledWith('quick_route', button);
+  });
+
+  test('imports every Task from one YAML file as one selectable file collection', () => {
+    const { manager, storage, context } = loadActionSender();
+    const elements = {
+      'action-queue-save-name': { value: '' },
+      'action-work-id': { value: '' },
+      'action-loop-count': { value: '' },
+      'action-queue-load-select': { value: '' }
+    };
+    context.document.getElementById.mockImplementation(id => elements[id] || null);
+    context.confirm = jest.fn(() => true);
+    context.FileReader = class {
+      readAsText(file) {
+        this.onload({ target: { result: file.contents } });
+      }
+    };
+    manager._saveSnapshot = jest.fn();
+    manager.renderQueue = jest.fn();
+    manager.refreshSavedQueueList = jest.fn();
+    manager.renderTaskDetail = jest.fn();
+    manager._notifyTaskStoreChanged = jest.fn();
+
+    manager.importMission({
+      name: 'factory.yaml',
+      contents: `
+- task_id: move
+  loop_flag: 1
+  missions:
+    - mission_id: nav
+      actions:
+        - action_id: wp
+          action_type: 1
+          action_args: [1, 2, 3]
+          action_params:
+            []
+- task_id: wait
+  loop_flag: 2
+  missions:
+    - mission_id: work
+      actions:
+        - action_id: standby
+          action_type: 7
+          action_args: [5]
+          action_params:
+            []
+`
+    });
+
+    const saved = JSON.parse(storage.get(manager.QUEUE_STORAGE_KEY));
+    const imported = Object.values(saved).filter(entry => entry.importedFrom === 'factory.yaml');
+    expect(imported).toHaveLength(2);
+    expect(imported.map(entry => entry.yamlTaskId)).toEqual(['move', 'wait']);
+    expect(imported[0].queue[0].missionId).toBe('nav');
+    expect(manager._activeTaskSource).toBe('factory.yaml');
+    expect(storage.get(manager.TASK_FILE_SELECTION_KEY)).toBe('factory.yaml');
   });
 
   test('resolves docking cfg model from the active robot ROS namespace', async () => {

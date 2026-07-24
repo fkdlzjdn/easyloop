@@ -7,6 +7,13 @@ const TestMode = {
   dockTimers: [],
   createdSlotIndex: null,
   originalSlot: null,
+  MAX_VIRTUAL_ROBOTS: 3,
+  virtualRobots: new Map(),
+  publisherSets: new Map(),
+  originalFleet: null,
+  originalActiveSlotIndex: -1,
+  _fleetSimulationTimer: null,
+  _fleetRenderTick: 0,
   _publishRos: null, // Separate ROS connection for publishing
   _workState: 0, // Current simulated work state (0=IDLE by default)
   // Robot pose state
@@ -121,9 +128,10 @@ const TestMode = {
       this.setProgress(5, 'Requesting rosbridge server start...');
       await this.startRosBridgeOnly(password);
 
-      // Step 2: Prepare local slot
-      this.setProgress(60, 'Preparing robot slot (127.0.0.1 / R_TEST)...');
-      this.prepareLocalSlot();
+      // Step 2: Prepare temporary virtual fleet
+      const robotCount = this._requestedRobotCount();
+      this.setProgress(60, `Preparing ${robotCount} temporary virtual robots...`);
+      this.prepareVirtualFleet(robotCount);
 
       // Step 3: Connect ROS
       this.setProgress(70, 'Connecting to ROS...');
@@ -139,10 +147,15 @@ const TestMode = {
       this.setProgress(85, 'Creating publisher ROS connection...');
       await this._openPublishConnection();
 
-      // Step 5: Create publishers (sends advertise) and wait for ROS discovery
-      this.setProgress(90, 'Registering topics (advertise)...');
+      // Step 5: Attach every temporary robot to the local bridge and advertise topics.
+      this.setProgress(90, 'Registering virtual fleet topics...');
       this.tick = 0;
-      this.publishers = this.createPublishers(this._publishRos);
+      this._attachVirtualFleetConnection(ros);
+      this.publisherSets.clear();
+      this.virtualRobots.forEach(robot => {
+        this.publisherSets.set(robot.robotId, this.createPublishers(this._publishRos, robot.robotId));
+      });
+      this.publishers = this.publisherSets.get(App.robotSlots[App.activeSlotIndex]?.robotId) || {};
 
       // ROS needs time to discover publisher↔subscriber connections
       this.setProgress(93, 'Waiting for ROS topic connections...');
@@ -166,13 +179,25 @@ const TestMode = {
       this._startJogSubscription();
       this._startSlamSubscription();
       this.updateUi();
+      this._refreshFleetUi();
 
       this.setProgress(100, 'Test mode activated');
       await this._delay(400);
       this.showLoading(false);
-      App.addEvent('notification', 'Test mode started', 'Publishing simulation data from UI', 'info');
+      App.addEvent(
+        'notification',
+        'Test mode started',
+        `${this.virtualRobots.size} virtual robots · Task movement simulation`,
+        'info'
+      );
     } catch (err) {
       this._starting = false;
+      this.enabled = false;
+      this.clearTimers();
+      this._closePublishConnection();
+      if (this.originalFleet) this.restoreVirtualFleet();
+      this.requestStopRosBridge();
+      this.updateUi();
       this.showLoading(false);
       App.toast(err.message || 'Test mode start failed', 'error');
     }
@@ -195,7 +220,170 @@ const TestMode = {
     this.updateUi();
     App.addEvent('notification', 'Test mode stopped', null, 'info');
     this.requestStopRosBridge();
-    this.restoreLocalSlot();
+    this.restoreVirtualFleet();
+  },
+
+  _requestedRobotCount() {
+    const requested = Number(document.getElementById('test-mode-robot-count')?.value) || 3;
+    return Math.max(1, Math.min(this.MAX_VIRTUAL_ROBOTS, Math.floor(requested)));
+  },
+
+  prepareVirtualFleet(count = 3) {
+    if (!App?.robotSlots) return;
+    const robotCount = Math.max(1, Math.min(this.MAX_VIRTUAL_ROBOTS, Number(count) || 1));
+    this.originalFleet = App.robotSlots.map(slot => ({
+      ip: slot.ip,
+      robotId: slot.robotId,
+      sshPort: slot.sshPort,
+      tunnelMode: slot.tunnelMode,
+      sshPassword: slot.sshPassword,
+      robotNumber: slot.robotNumber
+    }));
+    this.originalActiveSlotIndex = App.activeSlotIndex;
+
+    App.robotSlots.forEach((slot, index) => {
+      if (slot.ros || slot.connected) RosManager.disconnectSlot(index);
+    });
+    App.robotSlots.length = 0;
+    App.activeSlotIndex = -1;
+    this.virtualRobots.clear();
+
+    const startPoses = [
+      { x: -2.5, y: -2.0, yaw: 0 },
+      { x: 0.0, y: -2.5, yaw: Math.PI / 2 },
+      { x: 2.5, y: -2.0, yaw: Math.PI }
+    ];
+    for (let index = 0; index < robotCount; index += 1) {
+      const robotId = `R_TEST_${index + 1}`;
+      App.addRobotSlot(
+        '127.0.0.1',
+        robotId,
+        22,
+        false,
+        '',
+        901 + index,
+        null,
+        { silent: true, deferRender: true, activateFirst: index === 0 }
+      );
+      const slot = App.robotSlots[index];
+      slot.virtualTestRobot = true;
+      slot.robotModel = 'Test AMR';
+      slot.conveyorCount = 2;
+      const pose = { ...startPoses[index] };
+      slot.pose = { ...pose };
+      slot.workState = 0;
+      slot.bms = { voltage: 52.5, current: -0.3, soc: 80 - index * 5, charging: false };
+      this.virtualRobots.set(index, this._createVirtualRobotState(index, robotId, pose, slot.bms.soc));
+    }
+    App.activeSlotIndex = 0;
+    App.renderActiveRobotSelector();
+    App.renderRobotManagerList();
+    App.renderMonitoringCards();
+    App.updateActiveRobotStatus();
+    App.updateMultiRobotButtons();
+  },
+
+  _createVirtualRobotState(slotIndex, robotId, pose, soc = 75) {
+    return {
+      slotIndex,
+      robotId,
+      pose: { ...pose },
+      poseEstOffset: { x: 0, y: 0, yaw: 0 },
+      workState: 0,
+      soc,
+      charging: false,
+      task: null,
+      paused: false,
+      currentAction: null,
+      actionStartedAt: 0,
+      navTarget: null,
+      navQueue: [],
+      taskLabel: '',
+      completedLoops: 0
+    };
+  },
+
+  _attachVirtualFleetConnection(ros) {
+    App.robotSlots.forEach((slot, index) => {
+      if (!slot.virtualTestRobot) return;
+      slot.ros = ros;
+      slot.connected = true;
+      slot.connectedAt = Date.now();
+      if (index !== App.activeSlotIndex) {
+        slot.subscriptions = {};
+        slot.dataSubscribed = false;
+      }
+      if (typeof FleetControl !== 'undefined') FleetControl.onSlotConnected(index);
+    });
+    RosManager.ros = ros;
+    App.renderActiveRobotSelector();
+    App.renderRobotManagerList();
+    App.renderMonitoringCards();
+    App.updateActiveRobotStatus();
+    App.updateMultiRobotButtons();
+  },
+
+  restoreVirtualFleet() {
+    if (!App?.robotSlots) return;
+    const sharedConnections = new Set();
+    App.robotSlots.forEach(slot => {
+      if (slot.virtualTestRobot && slot.ros) sharedConnections.add(slot.ros);
+      Object.values(slot.subscriptions || {}).forEach(sub => {
+        try { sub?.unsubscribe?.(); } catch (e) { /* ignore */ }
+      });
+      slot.subscriptions = {};
+      slot.ros = null;
+      slot.connected = false;
+    });
+    sharedConnections.forEach(ros => {
+      try { ros.close(); } catch (e) { /* ignore */ }
+    });
+
+    App.robotSlots.length = 0;
+    App.activeSlotIndex = -1;
+    (this.originalFleet || []).forEach((slot, index) => {
+      App.addRobotSlot(
+        slot.ip,
+        slot.robotId,
+        slot.sshPort,
+        slot.tunnelMode,
+        slot.sshPassword,
+        slot.robotNumber,
+        null,
+        { silent: true, deferRender: true, activateFirst: false }
+      );
+      App.robotSlots[index].connected = false;
+      App.robotSlots[index].ros = null;
+    });
+    if (App.robotSlots.length > 0) {
+      App.activeSlotIndex = Math.max(
+        0,
+        Math.min(this.originalActiveSlotIndex, App.robotSlots.length - 1)
+      );
+    }
+    this.originalFleet = null;
+    this.originalActiveSlotIndex = -1;
+    this.virtualRobots.clear();
+    this.publisherSets.clear();
+    RosManager.ros = null;
+    RosManager.robotPose = null;
+    App.renderActiveRobotSelector();
+    App.renderRobotManagerList();
+    App.renderMonitoringCards();
+    App.updateActiveRobotStatus();
+    App.updateMultiRobotButtons();
+  },
+
+  _refreshFleetUi() {
+    App.renderActiveRobotSelector();
+    App.renderRobotManagerList();
+    App.renderMonitoringCards();
+    App.updateActiveRobotStatus();
+    if (typeof FleetControl !== 'undefined' && FleetControl._active) {
+      FleetControl.deactivate();
+      FleetControl.activate();
+      this._publishVirtualMaps();
+    }
   },
 
   prepareLocalSlot() {
@@ -363,9 +551,11 @@ const TestMode = {
   updateUi() {
     const status = document.getElementById('test-mode-status');
     const chip = document.getElementById('test-mode-chip');
+    const robotCount = document.getElementById('test-mode-robot-count');
     if (!status) return;
-    status.textContent = this.enabled ? 'ON' : 'OFF';
+    status.textContent = this.enabled ? `ON · ${this.virtualRobots.size}` : 'OFF';
     status.classList.toggle('on', this.enabled);
+    if (robotCount) robotCount.disabled = this.enabled || this._starting;
     if (chip) {
       chip.classList.toggle('enabled', this.enabled);
     }
@@ -426,8 +616,8 @@ const TestMode = {
   },
 
   // ── Publishers ──────────────────────────────────────────────
-  createPublishers(ros) {
-    const rid = this.getRobotId();
+  createPublishers(ros, robotId = null) {
+    const rid = robotId || this.getRobotId();
     return {
       bms: new ROSLIB.Topic({ ros, name: `/${rid}/bms`, messageType: 'std_msgs/Float32MultiArray' }),
       // workState: injected directly (syscon_msgs/RobotState not available in test rosbridge)
@@ -447,6 +637,16 @@ const TestMode = {
   },
 
   startPublishLoops() {
+    if (this.virtualRobots.size > 0) {
+      this._publishVirtualMaps();
+      this._syncActiveVirtualRobot(true);
+      this.timers.push(setInterval(() => this._tickVirtualFleet(0.05), 50));
+      this.timers.push(setInterval(() => this._publishVirtualFleetTelemetry(), 200));
+      this.timers.push(setInterval(() => this._publishVirtualBms(), 1000));
+      this.timers.push(setInterval(() => this._publishVirtualMaps(), 10000));
+      this.timers.push(setInterval(() => this._publishVirtualCameras(), 1000));
+      return;
+    }
     this.timers.push(setInterval(() => this.publishBms(), 1000));
     this.timers.push(setInterval(() => this.publishWorkState(), 2000));
     this.timers.push(setInterval(() => this.publishPose(), 200));
@@ -455,6 +655,446 @@ const TestMode = {
     // Publish map once immediately, then every 10s
     this.publishMap();
     this.timers.push(setInterval(() => this.publishMap(), 10000));
+  },
+
+  _mapMessage() {
+    if (!this._mapInfo || !this._mapData) return null;
+    const { width, height, resolution, originX, originY } = this._mapInfo;
+    return {
+      header: { stamp: { secs: Math.floor(Date.now() / 1000), nsecs: 0 }, frame_id: 'map' },
+      info: {
+        map_load_time: { secs: 0, nsecs: 0 },
+        resolution,
+        width,
+        height,
+        origin: {
+          position: { x: originX, y: originY, z: 0 },
+          orientation: { x: 0, y: 0, z: 0, w: 1 }
+        }
+      },
+      data: Array.from(this._mapData)
+    };
+  },
+
+  _publishVirtualMaps() {
+    if (!this.enabled && !this._starting) return;
+    const message = this._mapMessage();
+    if (!message) return;
+    this.publisherSets.forEach(publishers => {
+      publishers.map?.publish(new ROSLIB.Message(message));
+    });
+    RosManager.lastMapMsg = message;
+    RosManager.requestRender();
+  },
+
+  _poseMessage(robot) {
+    const pose = robot.pose;
+    const qw = Math.cos(pose.yaw / 2);
+    const qz = Math.sin(pose.yaw / 2);
+    const covariance = Array(36).fill(0);
+    covariance[0] = 0.00015;
+    covariance[7] = 0.00015;
+    covariance[35] = 0.00005;
+    return {
+      header: { stamp: { secs: Math.floor(Date.now() / 1000), nsecs: 0 }, frame_id: 'map' },
+      pose: {
+        pose: {
+          position: { x: pose.x, y: pose.y, z: 0 },
+          orientation: { x: 0, y: 0, z: qz, w: qw }
+        },
+        covariance
+      }
+    };
+  },
+
+  _publishVirtualFleetTelemetry() {
+    if (!this.enabled) return;
+    this.virtualRobots.forEach(robot => {
+      const publishers = this.publisherSets.get(robot.robotId);
+      publishers?.pose?.publish(new ROSLIB.Message(this._poseMessage(robot)));
+      const slot = App.robotSlots[robot.slotIndex];
+      if (slot) {
+        slot.pose = { ...robot.pose };
+        slot.workState = robot.workState;
+      }
+    });
+    this._syncActiveVirtualRobot();
+    this._fleetRenderTick += 1;
+    if (this._fleetRenderTick % 3 === 0) {
+      App.renderMonitoringCards();
+      if (typeof FleetControl !== 'undefined' && FleetControl._active) {
+        this.virtualRobots.forEach(robot => {
+          FleetControl._updatePose(robot.slotIndex, robot.pose, 'test_mode');
+        });
+      }
+    }
+  },
+
+  _publishVirtualBms() {
+    if (!this.enabled) return;
+    this.virtualRobots.forEach(robot => {
+      if (robot.charging) robot.soc = Math.min(100, robot.soc + 0.08);
+      else if (robot.workState === 1) robot.soc = Math.max(5, robot.soc - 0.025);
+      else robot.soc = Math.max(5, robot.soc - 0.004);
+      const voltage = 48 + robot.soc * 0.06;
+      const current = robot.charging ? 2.5 : robot.workState === 1 ? -1.8 : -0.3;
+      const data = [
+        voltage, current, robot.soc, 95, 32,
+        0, 0, voltage - 0.5, robot.soc * 5.12,
+        0, 0, 0, 0, 0, 0, 0
+      ];
+      this.publisherSets.get(robot.robotId)?.bms?.publish(new ROSLIB.Message({ data }));
+      const slot = App.robotSlots[robot.slotIndex];
+      if (slot) {
+        slot.bms = {
+          voltage,
+          current,
+          soc: robot.soc,
+          charging: robot.charging
+        };
+      }
+    });
+    App.refreshActiveBmsDisplay();
+  },
+
+  _publishVirtualCameras() {
+    if (!this.enabled) return;
+    const message = new ROSLIB.Message({ format: 'jpeg', data: this.TEST_IMAGE_JPEG });
+    this.publisherSets.forEach(publishers => {
+      publishers.cam1Depth?.publish(message);
+      publishers.cam1Color?.publish(message);
+      publishers.cam2Depth?.publish(message);
+      publishers.cam2Color?.publish(message);
+    });
+  },
+
+  _syncActiveVirtualRobot(forceMap = false) {
+    const robot = this.virtualRobots.get(App.activeSlotIndex);
+    if (!robot) return;
+    this._pose = robot.pose;
+    this._workState = robot.workState;
+    this._bmsSOC = robot.soc;
+    this._bmsCharging = robot.charging;
+    this.publishers = this.publisherSets.get(robot.robotId) || {};
+    RosManager.robotPose = { ...robot.pose };
+    RosManager.displayPose(robot.pose);
+    RosManager.displayWorkState(robot.workState);
+    if (forceMap) {
+      const message = this._mapMessage();
+      if (message) RosManager.lastMapMsg = message;
+    }
+    RosManager.requestRender();
+    App.refreshActiveBmsDisplay();
+    if (typeof ActionSender !== 'undefined' && robot.task) {
+      const actionCount = robot.task.actions.length;
+      ActionSender._setTaskExecutionFeedback(
+        robot.paused ? 'pause' : 'work',
+        `${robot.robotId} · ${robot.task.taskId}`,
+        `${robot.task.actionIndex + 1}/${actionCount} Actions · loop ${robot.completedLoops + 1}`
+      );
+    } else if (typeof ActionSender !== 'undefined') {
+      ActionSender._setTaskExecutionFeedback('idle', `${robot.robotId} · Test Mode Task 대기`);
+    }
+  },
+
+  runTask(slotIndex, request) {
+    const robot = this.virtualRobots.get(slotIndex);
+    if (!this.enabled || !robot) {
+      return Promise.reject(new Error('Test Mode 가상 로봇을 찾을 수 없습니다'));
+    }
+    const actions = (request?.missions || []).flatMap(mission =>
+      Array.from(mission?.actions || []).map(action => ({
+        ...action,
+        action_args: Array.from(action.action_args || []),
+        action_params: Array.from(action.action_params || [])
+      }))
+    );
+    if (actions.length === 0) {
+      return Promise.reject(new Error('시뮬레이션할 Action이 없습니다'));
+    }
+
+    this._resetVirtualRobotTask(robot, false);
+    if (slotIndex === App.activeSlotIndex) this._stopNavigation();
+    robot.task = {
+      taskId: request.task_id || 'test_task',
+      actions,
+      actionIndex: 0,
+      loopFlag: Number.isFinite(Number(request.loop_flag)) ? Number(request.loop_flag) : 1
+    };
+    robot.taskLabel = robot.task.taskId;
+    robot.completedLoops = 0;
+    robot.workState = 1;
+    this._notifyVirtualTaskFeedback(robot, 'work', 'Task 시작');
+    App.addEvent(
+      'action',
+      `[TestMode] ${robot.robotId} Task 시작`,
+      `${robot.task.taskId} · ${actions.length} actions`,
+      'info'
+    );
+    return Promise.resolve({
+      success: true,
+      message: '[TestMode] virtual task accepted',
+      error_code: 0
+    });
+  },
+
+  controlTask(slotIndex, kind) {
+    const robot = this.virtualRobots.get(slotIndex);
+    if (!this.enabled || !robot) {
+      return Promise.reject(new Error('Test Mode 가상 로봇을 찾을 수 없습니다'));
+    }
+    if (kind === 'pause') {
+      if (!robot.task) return Promise.reject(new Error('실행 중인 Task가 없습니다'));
+      robot.paused = true;
+      robot.workState = 3;
+      this._notifyVirtualTaskFeedback(robot, 'pause', 'Task 일시정지');
+    } else if (kind === 'resume') {
+      if (!robot.task) return Promise.reject(new Error('재개할 Task가 없습니다'));
+      robot.paused = false;
+      robot.workState = robot.currentAction?.state || 1;
+      this._notifyVirtualTaskFeedback(robot, 'work', 'Task 재개');
+    } else if (kind === 'cancel') {
+      if (slotIndex === App.activeSlotIndex) this._stopNavigation();
+      robot.workState = 4;
+      this._notifyVirtualTaskFeedback(robot, 'cancel', 'Task 취소');
+      this._resetVirtualRobotTask(robot, false);
+      robot.workState = 0;
+    }
+    this._publishVirtualFleetTelemetry();
+    return Promise.resolve({ success: true, message: `[TestMode] ${kind}` });
+  },
+
+  onActiveRobotChanged(index) {
+    if (!this.enabled || !this.virtualRobots.has(index)) return;
+    const robot = this.virtualRobots.get(index);
+    this.publishers = this.publisherSets.get(robot.robotId) || {};
+    this._stopJogSubscription();
+    this._stopSlamSubscription();
+    this._jogVel = { lx: 0, az: 0 };
+    this._startJogSubscription();
+    this._startSlamSubscription();
+    this._syncActiveVirtualRobot(true);
+    this._refreshFleetUi();
+  },
+
+  _tickVirtualFleet(dt) {
+    if (!this.enabled) return;
+    this.virtualRobots.forEach(robot => {
+      if (!robot.task || robot.paused) return;
+      if (!robot.currentAction) this._startVirtualAction(robot);
+      if (!robot.currentAction) return;
+      if (this._tickVirtualAction(robot, dt)) this._completeVirtualAction(robot);
+    });
+  },
+
+  _startVirtualAction(robot) {
+    const task = robot.task;
+    if (!task) return;
+    const action = task.actions[task.actionIndex];
+    if (!action) {
+      this._completeVirtualTaskLoop(robot);
+      return;
+    }
+    const type = Number(action.action_type);
+    const args = Array.from(action.action_args || []);
+    const current = {
+      action,
+      type,
+      state: 1,
+      elapsed: 0,
+      duration: 0.8,
+      navQueue: []
+    };
+
+    if (type === 0x01) {
+      current.navQueue = [{
+        x: Number(args[0]) || 0,
+        y: Number(args[1]) || 0,
+        theta: Number(args[2]) || 0
+      }];
+    } else if (type === 0x15) {
+      const finalTheta = Number(args.at(-1)) || 0;
+      for (let index = 0; index + 1 < args.length - 1; index += 2) {
+        const x = Number(args[index]) || 0;
+        const y = Number(args[index + 1]) || 0;
+        const nextX = Number(args[index + 2]);
+        const nextY = Number(args[index + 3]);
+        current.navQueue.push({
+          x,
+          y,
+          theta: Number.isFinite(nextX) && Number.isFinite(nextY)
+            ? Math.atan2(nextY - y, nextX - x)
+            : finalTheta
+        });
+      }
+    } else if (type === 0x02) {
+      const moveType = Number(args[0]) || 0;
+      const amount = Number(args[1]) || 0;
+      if (moveType === 0) {
+        current.navQueue = [{
+          x: robot.pose.x + Math.cos(robot.pose.yaw) * amount,
+          y: robot.pose.y + Math.sin(robot.pose.yaw) * amount,
+          theta: robot.pose.yaw
+        }];
+      } else {
+        current.navQueue = [{
+          x: robot.pose.x,
+          y: robot.pose.y,
+          theta: robot.pose.yaw + amount * Math.PI / 180
+        }];
+      }
+    } else if (type === 0x19) {
+      const localX = Number(args[0]) || 0;
+      const localY = Number(args[1]) || 0;
+      current.navQueue = [{
+        x: robot.pose.x + Math.cos(robot.pose.yaw) * localX - Math.sin(robot.pose.yaw) * localY,
+        y: robot.pose.y + Math.sin(robot.pose.yaw) * localX + Math.cos(robot.pose.yaw) * localY,
+        theta: robot.pose.yaw
+      }];
+    } else if (type === 0x07) {
+      current.state = 7;
+      current.duration = Math.max(0, Number(args[0]) || 0);
+    } else if (type === 0x08) {
+      current.state = 2;
+      current.duration = 1.5;
+    } else if (type === 0x10 || type === 0x12) {
+      current.state = 8;
+      const distance = Number(args[0]) || -0.5;
+      current.navQueue = [{
+        x: robot.pose.x + Math.cos(robot.pose.yaw) * distance,
+        y: robot.pose.y + Math.sin(robot.pose.yaw) * distance,
+        theta: robot.pose.yaw
+      }];
+    } else if (type === 0x17) {
+      current.navQueue = [{
+        x: Number(args[0]) || 0,
+        y: Number(args[1]) || 0,
+        theta: Number(args[2]) || 0
+      }];
+    }
+
+    current.navTarget = current.navQueue.shift() || null;
+    robot.currentAction = current;
+    robot.workState = current.state;
+    this._notifyVirtualTaskFeedback(
+      robot,
+      current.state === 7 ? 'pause' : 'work',
+      `${action.action_id || `Action_${task.actionIndex + 1}`} 실행`
+    );
+  },
+
+  _tickVirtualAction(robot, dt) {
+    const current = robot.currentAction;
+    if (!current) return false;
+    current.elapsed += dt;
+    if (current.navTarget) {
+      if (this._moveVirtualRobot(robot, current.navTarget, dt)) {
+        current.navTarget = current.navQueue.shift() || null;
+        if (!current.navTarget) return true;
+      }
+      return false;
+    }
+    if (current.type === 0x07 && current.duration === 0) return false;
+    return current.elapsed >= current.duration;
+  },
+
+  _moveVirtualRobot(robot, target, dt) {
+    const speed = 1.0;
+    const rotationSpeed = 2.2;
+    const dx = target.x - robot.pose.x;
+    const dy = target.y - robot.pose.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance > 0.03) {
+      const pathYaw = Math.atan2(dy, dx);
+      const yawError = this._normalizeAngle(pathYaw - robot.pose.yaw);
+      if (Math.abs(yawError) > 0.12) {
+        robot.pose.yaw += Math.sign(yawError) * Math.min(Math.abs(yawError), rotationSpeed * dt);
+      } else {
+        const step = Math.min(distance, speed * dt);
+        robot.pose.yaw = pathYaw;
+        robot.pose.x += Math.cos(pathYaw) * step;
+        robot.pose.y += Math.sin(pathYaw) * step;
+      }
+      robot.pose.yaw = this._normalizeAngle(robot.pose.yaw);
+      return false;
+    }
+
+    robot.pose.x = target.x;
+    robot.pose.y = target.y;
+    const finalError = this._normalizeAngle(target.theta - robot.pose.yaw);
+    if (Math.abs(finalError) > 0.035) {
+      robot.pose.yaw = this._normalizeAngle(
+        robot.pose.yaw + Math.sign(finalError) * Math.min(Math.abs(finalError), rotationSpeed * dt)
+      );
+      return false;
+    }
+    robot.pose.yaw = this._normalizeAngle(target.theta);
+    return true;
+  },
+
+  _normalizeAngle(value) {
+    let angle = Number(value) || 0;
+    while (angle > Math.PI) angle -= Math.PI * 2;
+    while (angle < -Math.PI) angle += Math.PI * 2;
+    return angle;
+  },
+
+  _completeVirtualAction(robot) {
+    const current = robot.currentAction;
+    if (!current || !robot.task) return;
+    if (current.type === 0x08) {
+      robot.charging = Number(current.action.action_args?.[0]) === 1;
+    } else if (current.type === 0x10 || current.type === 0x12) {
+      robot.charging = false;
+    }
+    robot.task.actionIndex += 1;
+    robot.currentAction = null;
+    robot.workState = 1;
+    if (robot.task.actionIndex >= robot.task.actions.length) {
+      this._completeVirtualTaskLoop(robot);
+    }
+  },
+
+  _completeVirtualTaskLoop(robot) {
+    const task = robot.task;
+    if (!task) return;
+    robot.completedLoops += 1;
+    const repeat = task.loopFlag === 0 || robot.completedLoops < Math.max(1, task.loopFlag);
+    if (repeat) {
+      task.actionIndex = 0;
+      robot.currentAction = null;
+      robot.workState = 1;
+      this._notifyVirtualTaskFeedback(robot, 'work', `반복 ${robot.completedLoops + 1}회차`);
+      return;
+    }
+    const taskId = task.taskId;
+    this._resetVirtualRobotTask(robot, false);
+    robot.workState = 0;
+    this._notifyVirtualTaskFeedback(robot, 'complete', 'Task 완료', taskId);
+    App.addEvent('action', `[TestMode] ${robot.robotId} Task 완료`, taskId, 'success');
+  },
+
+  _resetVirtualRobotTask(robot, setIdle = true) {
+    robot.task = null;
+    robot.currentAction = null;
+    robot.navTarget = null;
+    robot.navQueue = [];
+    robot.paused = false;
+    robot.taskLabel = '';
+    robot.completedLoops = 0;
+    if (setIdle) robot.workState = 0;
+  },
+
+  _notifyVirtualTaskFeedback(robot, state, message, taskId = '') {
+    if (robot.slotIndex !== App.activeSlotIndex || typeof ActionSender === 'undefined') return;
+    const detail = taskId || (robot.task
+      ? `${robot.task.actionIndex + 1}/${robot.task.actions.length} Actions`
+      : '');
+    ActionSender._setTaskExecutionFeedback(
+      state,
+      `${robot.robotId} · ${message}`,
+      detail
+    );
   },
 
   // ── BMS (16-element realistic format) ──────────────────────
@@ -512,9 +1152,34 @@ const TestMode = {
     if (this.enabled) {
       const idx = App.activeSlotIndex;
       if (idx >= 0) {
+        const robot = this.virtualRobots.get(idx);
+        if (robot) {
+          robot.workState = state;
+          if (!this._bmsChargingManual) robot.charging = this._bmsCharging;
+        }
         RosManager._handleSlotWorkState(idx, { workstate: state });
       }
     }
+  },
+
+  toggleActiveCharging() {
+    const robot = this.virtualRobots.get(App.activeSlotIndex);
+    if (robot) {
+      return this.setActiveCharging(!robot.charging);
+    }
+    this._bmsCharging = !this._bmsCharging;
+    this._bmsChargingManual = true;
+    return this._bmsCharging;
+  },
+
+  setActiveCharging(enabled) {
+    const charging = Boolean(enabled);
+    const robot = this.virtualRobots.get(App.activeSlotIndex);
+    if (robot) robot.charging = charging;
+    this._bmsCharging = charging;
+    this._bmsChargingManual = true;
+    if (this.enabled) this._publishVirtualBms();
+    return charging;
   },
 
   // ── Robot Pose ──────────────────────────────────────────────

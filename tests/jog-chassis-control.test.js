@@ -25,6 +25,7 @@ function makeElement(extra = {}) {
     dataset: {},
     style: {},
     classList: makeClassList(),
+    addEventListener: jest.fn(),
     setAttribute: jest.fn(),
     ...extra
   };
@@ -44,11 +45,21 @@ function loadJogControl(robotId = 'R_051') {
     makeElement({ dataset: { modelId: 'default_lift_dd' } }),
     makeElement({ dataset: { modelId: 'sr3_ls_1st' } })
   ];
-  const commandButtons = Array.from({ length: 6 }, () => makeElement());
+  const commandButtons = [
+    'frontDoorOpen',
+    'frontDoorClose',
+    'rearDoorOpen',
+    'rearDoorClose',
+    'frontIntake',
+    'rearDischarge',
+    'conveyorStop'
+  ].map(command => makeElement({ dataset: { chassisCommand: command } }));
+  const commandPreview = makeElement();
   const elements = {
     'jog-drive-type': driveType,
     'jog-model-io-control': modelIoControl,
     'jog-model-io-status': modelIoStatus,
+    'jog-model-io-command-preview': commandPreview,
     'jog-chassis-current': chassisCurrent
   };
   const calls = [];
@@ -119,6 +130,8 @@ function loadJogControl(robotId = 'R_051') {
     liftControl,
     modelIoControl,
     modelIoStatus,
+    commandButtons,
+    commandPreview,
     chassisCurrent
   };
 }
@@ -170,21 +183,61 @@ describe('Jog chassis model control', () => {
     expect(commands.frontDoorClose.cmdType).toBe(145);
     expect(commands.rearDoorOpen.cmdType).toBe(146);
     expect(commands.rearDoorClose.cmdType).toBe(147);
-    expect(commands.frontDischarge.cmdType).toBe(3);
-    expect(commands.rearDischarge.cmdType).toBe(6);
-    Object.values(commands).forEach(command => expect(command.count).toBe(1));
+    expect(commands.frontIntake).toMatchObject({ cmdType: 3, count: 0 });
+    expect(commands.rearDischarge).toMatchObject({ cmdType: 6, count: 0 });
+    expect(commands.conveyorStop).toMatchObject({ cmdType: 2, count: 0 });
+    [
+      commands.frontDoorOpen,
+      commands.frontDoorClose,
+      commands.rearDoorOpen,
+      commands.rearDoorClose
+    ].forEach(command => expect(command.count).toBe(1));
   });
 
-  test('builds Conv/cmd from the active RID instead of hardcoding R_014', async () => {
+  test.each([
+    ['frontIntake', 3, 0],
+    ['rearDischarge', 6, 0],
+    ['conveyorStop', 2, 0]
+  ])('sends %s through the active RID Conv/cmd service', async (commandKey, cmdType, count) => {
     const { manager, calls, modelIoStatus } = loadJogControl('R_051');
     manager._chassisSelections = { R_051: 'sr3_ls_1st' };
 
-    await manager._callChassisCommand('frontDoorOpen');
+    await manager._callChassisCommand(commandKey);
 
     expect(calls).toHaveLength(1);
     expect(calls[0].options.name).toBe('/R_051/Conv/cmd');
     expect(calls[0].options.serviceType).toBe('syscon_msgs/conv_cmd');
-    expect(calls[0].request.cmds).toEqual([{ cmd_type: 144, count: 1 }]);
+    expect(calls[0].request.cmds).toEqual([{ cmd_type: cmdType, count }]);
     expect(modelIoStatus.className).toContain('success');
+  });
+
+  test('simulates chassis service commands without a real ROS service in Test Mode', async () => {
+    const { manager, context, calls, modelIoStatus } = loadJogControl('R_TEST_1');
+    context.App.robotSlots[0].virtualTestRobot = true;
+    context.TestMode = { enabled: true };
+    manager._chassisSelections = { R_TEST_1: 'sr3_ls_1st' };
+
+    await manager._callChassisCommand('frontIntake');
+
+    expect(calls).toHaveLength(0);
+    expect(modelIoStatus.className).toContain('success');
+    expect(modelIoStatus.textContent).toContain('Test Mode 실행 완료');
+  });
+
+  test('shows the description, service, type, and request on hover help', () => {
+    const { manager, commandButtons, commandPreview } = loadJogControl('R_051');
+    manager._chassisSelections = { R_051: 'sr3_ls_1st' };
+
+    manager._refreshChassisCommandHelp();
+    manager._showChassisCommandHelp('conveyorStop');
+
+    const stopButton = commandButtons.find(button =>
+      button.dataset.chassisCommand === 'conveyorStop'
+    );
+    expect(stopButton.title).toContain('현재 컨베이어 동작을 정지합니다.');
+    expect(stopButton.title).toContain('Service: /R_051/Conv/cmd');
+    expect(stopButton.title).toContain('Type: syscon_msgs/conv_cmd');
+    expect(stopButton.title).toContain('"cmd_type":2,"count":0');
+    expect(commandPreview.textContent).toBe(stopButton.title);
   });
 });

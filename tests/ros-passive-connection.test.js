@@ -50,9 +50,13 @@ function loadRosManager(activeSlotIndex = -1) {
     refreshActivePoseDisplay: jest.fn(),
     toast: jest.fn()
   };
+  const ActionSender = {
+    onSlotConnectionChanged: jest.fn()
+  };
 
   const context = {
     App,
+    ActionSender,
     ROSLIB: { Ros: FakeRos },
     location: { protocol: 'http:', host: 'localhost:3000' },
     document: {
@@ -69,7 +73,7 @@ function loadRosManager(activeSlotIndex = -1) {
   vm.createContext(context);
   vm.runInContext(`${source}\nglobalThis.__RosManager = RosManager;`, context);
 
-  return { manager: context.__RosManager, App, slot, rosInstances, elements };
+  return { manager: context.__RosManager, App, slot, rosInstances, elements, ActionSender };
 }
 
 function makeElement() {
@@ -113,7 +117,7 @@ describe('ROS passive fleet connections', () => {
   });
 
   test('the active connected robot starts monitoring and UI subscriptions', () => {
-    const { manager, slot, rosInstances } = loadRosManager(0);
+    const { manager, slot, rosInstances, ActionSender } = loadRosManager(0);
     manager.subscribeSlotMonitoring = jest.fn();
     manager.subscribeActiveSlotUI = jest.fn();
     manager.startLatencyMonitor = jest.fn();
@@ -125,6 +129,7 @@ describe('ROS passive fleet connections', () => {
     expect(manager.subscribeSlotMonitoring).toHaveBeenCalledWith(0);
     expect(manager.subscribeActiveSlotUI).toHaveBeenCalledWith(0);
     expect(manager.startLatencyMonitor).toHaveBeenCalledWith(0);
+    expect(ActionSender.onSlotConnectionChanged).toHaveBeenCalledWith(0, true);
   });
 
   test('switching active robots removes all data subscriptions from the previous robot', () => {
