@@ -137,6 +137,9 @@ describe('fleet saved task sending', () => {
     expect(calls[0].request.missions[0].actions[0].action_id).toBe('go');
     expect(calls[0].request.missions[1].mission_id).toBe('work');
     expect(calls[0].request.missions[1].actions[0].action_id).toBe('wait');
+    const running = manager._runningTasks.get('R_002');
+    expect(running.queue.map(action => action.missionId)).toEqual(['navigation', 'work']);
+    expect(manager._flattenTaskActionIndex(running, 1, 0)).toBe(1);
   });
 
   test('runs a saved task through the virtual robot engine in Test Mode', async () => {

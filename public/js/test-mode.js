@@ -1086,7 +1086,16 @@ const TestMode = {
   },
 
   _notifyVirtualTaskFeedback(robot, state, message, taskId = '') {
-    if (robot.slotIndex !== App.activeSlotIndex || typeof ActionSender === 'undefined') return;
+    if (typeof ActionSender === 'undefined') return;
+    const running = ActionSender._runningTasks?.get(robot.robotId);
+    if (running) {
+      running.state = state;
+      running.actionIndex = robot.task?.actionIndex
+        ?? (state === 'complete' ? Math.max(0, running.queue.length - 1) : running.actionIndex);
+      running.loopCount = robot.completedLoops;
+      ActionSender._syncActiveRunningTask?.();
+    }
+    if (robot.slotIndex !== App.activeSlotIndex) return;
     const detail = taskId || (robot.task
       ? `${robot.task.actionIndex + 1}/${robot.task.actions.length} Actions`
       : '');

@@ -64,6 +64,13 @@ function loadRosManager(activeSlotIndex = -1) {
       getElementById: jest.fn(id => elements[id] || null),
       querySelectorAll: jest.fn(() => [])
     },
+    window: {
+      listeners: {},
+      addEventListener(event, callback) {
+        if (!this.listeners[event]) this.listeners[event] = [];
+        this.listeners[event].push(callback);
+      }
+    },
     console,
     setTimeout,
     clearTimeout,
@@ -73,7 +80,15 @@ function loadRosManager(activeSlotIndex = -1) {
   vm.createContext(context);
   vm.runInContext(`${source}\nglobalThis.__RosManager = RosManager;`, context);
 
-  return { manager: context.__RosManager, App, slot, rosInstances, elements, ActionSender };
+  return {
+    manager: context.__RosManager,
+    App,
+    slot,
+    rosInstances,
+    elements,
+    ActionSender,
+    window: context.window
+  };
 }
 
 function makeElement() {
@@ -130,6 +145,174 @@ describe('ROS passive fleet connections', () => {
     expect(manager.subscribeActiveSlotUI).toHaveBeenCalledWith(0);
     expect(manager.startLatencyMonitor).toHaveBeenCalledWith(0);
     expect(ActionSender.onSlotConnectionChanged).toHaveBeenCalledWith(0, true);
+  });
+
+  test('Quick Task waypoint selection uses the first click for position and the second for direction', () => {
+    const { manager } = loadRosManager(0);
+    const callback = jest.fn();
+    const onPhaseChange = jest.fn();
+    manager.requestRender = jest.fn();
+    manager._canvasToWorld = jest.fn(() => ({ x: 1.25, y: -2.5 }));
+    manager._waypointSelectCallback = callback;
+    manager._waypointSelectionOptions = { twoClick: true, onPhaseChange };
+    manager._waypointStartX = 10;
+    manager._waypointStartY = 10;
+    manager._waypointCurrentX = 10;
+    manager._waypointCurrentY = 10;
+
+    manager._commitWaypointSelect({});
+
+    expect(manager._waypointDirectionPending).toBe(true);
+    expect(onPhaseChange).toHaveBeenCalledWith('direction', { x: 1.25, y: -2.5 });
+    expect(callback).not.toHaveBeenCalled();
+
+    manager._waypointCurrentX = 10;
+    manager._waypointCurrentY = 0;
+    manager._commitWaypointSelect({});
+
+    expect(callback).toHaveBeenCalledWith(1.25, -2.5, Math.PI / 2);
+    expect(manager._waypointDirectionPending).toBe(false);
+  });
+
+  test('continuous WayPoint capture re-arms at the next clicked position', () => {
+    const { manager } = loadRosManager(0);
+    const callback = jest.fn();
+    manager.requestRender = jest.fn();
+    manager._waypointSelectMode = true;
+    manager._waypointSelectCallback = callback;
+    manager._waypointSelectionOptions = { twoClick: true };
+    manager._canvasToWorld = jest.fn((x, y) => ({ x: x / 10, y: y / 10 }));
+
+    manager._waypointStartX = 10;
+    manager._waypointStartY = 20;
+    manager._waypointCurrentX = 10;
+    manager._waypointCurrentY = 20;
+    manager._commitWaypointSelect({});
+    manager._waypointCurrentX = 20;
+    manager._waypointCurrentY = 20;
+    manager._commitWaypointSelect({});
+
+    expect(callback.mock.calls[0].slice(0, 2)).toEqual([1, 2]);
+    expect(callback.mock.calls[0][2]).toBeCloseTo(0);
+    expect(manager._waypointDirectionPending).toBe(false);
+
+    manager._waypointStartX = 50;
+    manager._waypointStartY = 60;
+    manager._waypointCurrentX = 50;
+    manager._waypointCurrentY = 60;
+    manager._commitWaypointSelect({});
+    manager._waypointCurrentX = 50;
+    manager._waypointCurrentY = 50;
+    manager._commitWaypointSelect({});
+
+    expect(callback).toHaveBeenNthCalledWith(2, 5, 6, Math.PI / 2);
+    expect(manager._waypointDirectionPending).toBe(false);
+  });
+
+  test('real map mouse events move the next WayPoint start to a different location', () => {
+    const { manager, elements, window } = loadRosManager(0);
+    const canvasListeners = {};
+    const callback = jest.fn();
+    const canvas = {
+      style: {},
+      addEventListener(event, listener) {
+        if (!canvasListeners[event]) canvasListeners[event] = [];
+        canvasListeners[event].push(listener);
+      },
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 600, height: 600 })
+    };
+    elements['map-canvas'] = canvas;
+    manager.startHzMonitor = jest.fn();
+    manager.setupPOIControls = jest.fn();
+    manager.requestRender = jest.fn();
+    manager._canvasToWorld = jest.fn((x, y) => ({ x, y }));
+    manager.setupMapInteraction();
+    manager._enterWaypointSelectMode(callback, { twoClick: true });
+
+    const click = (x, y) => {
+      canvasListeners.mousedown[0]({ clientX: x, clientY: y, button: 0 });
+      window.listeners.mouseup[0]({ clientX: x, clientY: y, button: 0 });
+    };
+
+    click(100, 120);
+    click(130, 120);
+    expect(callback).toHaveBeenNthCalledWith(1, 100, 120, expect.any(Number));
+
+    window.listeners.mousemove[0]({ clientX: 320, clientY: 340 });
+    expect(manager._waypointHoverActive).toBe(true);
+    expect(manager._waypointCurrentX).toBe(320);
+    expect(manager._waypointCurrentY).toBe(340);
+
+    click(350, 380);
+    expect(manager._waypointStartX).toBe(350);
+    expect(manager._waypointStartY).toBe(380);
+    expect(manager._waypointDirectionPending).toBe(true);
+    expect(manager._waypointHoverActive).toBe(false);
+
+    click(350, 330);
+    expect(callback).toHaveBeenNthCalledWith(2, 350, 380, expect.any(Number));
+  });
+
+  test('next WayPoint candidate visibly follows the mouse before its position click', () => {
+    const { manager } = loadRosManager(0);
+    const ctx = {
+      save: jest.fn(),
+      restore: jest.fn(),
+      beginPath: jest.fn(),
+      arc: jest.fn(),
+      fill: jest.fn(),
+      stroke: jest.fn(),
+      setLineDash: jest.fn(),
+      moveTo: jest.fn(),
+      lineTo: jest.fn()
+    };
+    manager._waypointHoverActive = true;
+    manager._waypointDragging = false;
+    manager._waypointDirectionPending = false;
+    manager._waypointCurrentX = 275;
+    manager._waypointCurrentY = 315;
+
+    manager._drawWaypointSelectPreview(ctx);
+
+    expect(ctx.arc).toHaveBeenCalledWith(275, 315, 10, 0, Math.PI * 2);
+    expect(ctx.moveTo).toHaveBeenCalledWith(261, 315);
+    expect(ctx.moveTo).toHaveBeenCalledWith(275, 301);
+  });
+
+  test('selected Quick Action point receives a visible map highlight', () => {
+    const { manager } = loadRosManager(0);
+    const ctx = {
+      save: jest.fn(),
+      restore: jest.fn(),
+      beginPath: jest.fn(),
+      setLineDash: jest.fn(),
+      moveTo: jest.fn(),
+      lineTo: jest.fn(),
+      stroke: jest.fn(),
+      arc: jest.fn(),
+      fill: jest.fn(),
+      translate: jest.fn(),
+      rotate: jest.fn(),
+      closePath: jest.fn(),
+      fillText: jest.fn()
+    };
+    manager.mapZoom = 1;
+    manager._quickTaskOverlay = [{
+      x: 1,
+      y: 2,
+      theta: 0,
+      kind: 'waypoint',
+      label: '1',
+      group: 'item-0',
+      selected: true
+    }];
+
+    manager._drawQuickTaskOverlay(ctx, 100, 100, 0.1, {
+      position: { x: 0, y: 0 }
+    });
+
+    expect(ctx.arc).toHaveBeenCalledWith(0, 0, 15, 0, Math.PI * 2);
+    expect(ctx.arc).toHaveBeenCalledWith(0, 0, 8, 0, Math.PI * 2);
   });
 
   test('switching active robots removes all data subscriptions from the previous robot', () => {

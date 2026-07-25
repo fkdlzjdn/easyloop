@@ -17,6 +17,12 @@ const RosManager = {
   mapRotateStartRot: 0,
   robotPose: null,
   lastScanMsg: null,
+  _scanMessages: { merged: null, front: null, rear: null },
+  _localCostmapMsg: null,
+  _localCostmapCanvas: null,
+  _navigationPath: [],
+  _navigationGoal: null,
+  _mappingTopicPath: [],
   mapCorrection: null,
   _followRobot: false,
   // Pose-set mode state
@@ -41,7 +47,11 @@ const RosManager = {
   _waypointStartY: 0,
   _waypointCurrentX: 0,
   _waypointCurrentY: 0,
+  _waypointDirectionPending: false,
+  _waypointHoverActive: false,
+  _waypointSelectionOptions: {},
   _quickTaskOverlay: [],
+  _activeTaskOverlay: null,
   // Topic Hz monitoring
   _hzCounters: { bms: 0, workstate: 0, pose: 0, map: 0, lidar: 0 },
   _hzValues: { bms: 0, workstate: 0, pose: 0, map: 0, lidar: 0 },
@@ -82,6 +92,13 @@ const RosManager = {
   _slamStartPose: null,       // starting pose for loop closure detection
   _slamLoopClosureRadius: 2.0,// meters — distance to start pose to suggest loop closure
   _slamTrailTimer: null,      // interval timer for trail recording
+  _slamGraphNodes: [],
+  _slamGraphEdges: [],
+  _slamLoopEdges: [],
+  _loopClosureCount: 0,
+  _loopClosureSuccessAt: null,
+  _loopClosureNoticeTimer: null,
+  _loopClosureNoticeDurationMs: 10000,
   // Render throttle for sync
   _renderPending: false,
   _renderThrottleMs: 50,
@@ -307,6 +324,9 @@ const RosManager = {
 
     // TF for pose (like RViz) - primary source for robot position
     this._subscribeSlotTf(index);
+    this._subscribeSlotTopic(index, 'tf-static', '/tf_static', 'tf2_msgs/TFMessage', (msg) => {
+      this._handleSlotTfStatic(index, msg);
+    });
 
     // Pose from amcl (fallback if TF not available)
     this._subscribeSlotTopic(index, 'robot-pose', `/${rid}/amcl_pose`, 'geometry_msgs/PoseWithCovarianceStamped', (msg) => {
@@ -322,6 +342,25 @@ const RosManager = {
     this._subscribeSlotTopic(index, 'routine-status', `/${rid}/sp_routine_status`, 'std_msgs/String', (msg) => {
       this._handleRoutineStatus(index, msg);
     });
+
+    // Operation mode topics differ by software generation. Subscribe to both;
+    // whichever is published keeps the Mapping/Lifelong UI and path recording in sync.
+    this._subscribeSlotTopic(index, 'operation-mode', `/${rid}/spx/operation_mode`, 'std_msgs/String', (msg) => {
+      this._handleRoutineStatus(index, msg);
+    });
+    this._subscribeSlotTopic(index, 'legacy-operation-mode', `/${rid}/spcore/MODE`, 'std_msgs/String', (msg) => {
+      this._handleRoutineStatus(index, msg);
+    });
+
+    // slam_toolbox pose graph. A new loop_slam_edges pair is the authoritative
+    // signal that Loop Closure has actually been accepted by the mapper.
+    this._subscribeSlotTopic(
+      index,
+      'slam-graph',
+      `/${rid}/slam_toolbox/karto_graph_visualization`,
+      'visualization_msgs/MarkerArray',
+      (msg) => this._handleSlamGraph(index, msg)
+    );
 
     // Dock pose (docking target detection result)
     this._subscribeSlotTopic(index, 'dock-pose', `/${rid}/dock_pose`, 'geometry_msgs/PoseStamped', (msg) => {
@@ -354,29 +393,6 @@ const RosManager = {
     });
     this._subscribeSlotTopic(index, 'spx-io-charge-relay-state', `/${rid}/io/do/charge_relay`, 'std_msgs/Bool', (msg) => {
       this._handleChargeRelayState(index, msg);
-    });
-
-    // Robot footprint (from move_base costmap — points are in map frame)
-    // Convert to base_link-relative by subtracting current robot pose
-    this._subscribeSlotTopic(index, 'footprint', `/${rid}/move_base/local_costmap/footprint`, 'geometry_msgs/PolygonStamped', (msg) => {
-      if (index !== App.activeSlotIndex) return;
-      const slot = App.robotSlots[index];
-      if (!msg.polygon || !msg.polygon.points || !slot) return;
-
-      const rp = slot.pose || this.robotPose;
-      if (rp) {
-        // Transform map-frame points to base_link-relative
-        const cosY = Math.cos(-rp.yaw);
-        const sinY = Math.sin(-rp.yaw);
-        this._footprintPoints = msg.polygon.points.map(p => {
-          const dx = p.x - rp.x;
-          const dy = p.y - rp.y;
-          return { x: cosY * dx - sinY * dy, y: sinY * dx + cosY * dy };
-        });
-      } else {
-        // No pose yet — assume footprint is already base_link relative (first polygon)
-        this._footprintPoints = msg.polygon.points.map(p => ({ x: p.x, y: p.y }));
-      }
     });
 
     // Also read footprint from ROS parameter as fallback
@@ -438,6 +454,51 @@ const RosManager = {
     });
 
     console.log(`[TF] Slot ${index}: Subscribed to /tf`);
+  },
+
+  _frameKey(frame) {
+    const parts = String(frame || '').split('/').filter(Boolean);
+    return parts[parts.length - 1] || '';
+  },
+
+  _handleSlotTfStatic(index, msg) {
+    const slot = App.robotSlots[index];
+    if (!slot) return;
+    const identity = { x: 0, y: 0, r00: 1, r01: 0, r10: 0, r11: 1 };
+    const result = { base_link: identity, base_footprint: identity };
+    const remaining = Array.from(msg?.transforms || []);
+
+    for (let pass = 0; pass < 10 && remaining.length > 0; pass++) {
+      let changed = false;
+      for (let i = remaining.length - 1; i >= 0; i--) {
+        const transform = remaining[i];
+        const parent = this._frameKey(transform?.header?.frame_id);
+        const child = this._frameKey(transform?.child_frame_id);
+        if (!parent || !child) {
+          remaining.splice(i, 1);
+          continue;
+        }
+        const parentTf = result[parent];
+        if (!parentTf) continue;
+        const localYaw = this._quaternionYaw(transform?.transform?.rotation);
+        const cosYaw = Math.cos(localYaw);
+        const sinYaw = Math.sin(localYaw);
+        const tx = Number(transform?.transform?.translation?.x) || 0;
+        const ty = Number(transform?.transform?.translation?.y) || 0;
+        result[child] = {
+          x: parentTf.x + parentTf.r00 * tx + parentTf.r01 * ty,
+          y: parentTf.y + parentTf.r10 * tx + parentTf.r11 * ty,
+          r00: parentTf.r00 * cosYaw + parentTf.r01 * sinYaw,
+          r01: -parentTf.r00 * sinYaw + parentTf.r01 * cosYaw,
+          r10: parentTf.r10 * cosYaw + parentTf.r11 * sinYaw,
+          r11: -parentTf.r10 * sinYaw + parentTf.r11 * cosYaw
+        };
+        remaining.splice(i, 1);
+        changed = true;
+      }
+      if (!changed) break;
+    }
+    slot.tfStaticMap = result;
   },
 
   // Handle TF message for a slot
@@ -574,15 +635,13 @@ const RosManager = {
         });
     }
 
-    // Map subscription - capture index to verify active slot on callback
-    if (document.getElementById('chk-map').checked) {
-      const mapIndex = index;
-      this._subscribeSlotTopic(index, 'map', `/${rid}/map`, 'nav_msgs/OccupancyGrid', (msg) => {
-        // Only process if this slot is still the active one (prevents race condition)
-        if (mapIndex !== App.activeSlotIndex) return;
-        this.renderMap(msg);
-      });
-    }
+    // Map geometry is required to place every overlay. Keep receiving it even when
+    // the user hides the Map layer; the checkbox controls drawing, not map data.
+    const mapIndex = index;
+    this._subscribeSlotTopic(index, 'map', `/${rid}/map`, 'nav_msgs/OccupancyGrid', (msg) => {
+      if (mapIndex !== App.activeSlotIndex) return;
+      this.renderMap(msg);
+    });
 
     // LiDAR subscription - capture index to verify active slot on callback
     if (document.getElementById('chk-lidar').checked) {
@@ -592,12 +651,42 @@ const RosManager = {
         if (lidarIndex !== App.activeSlotIndex) return;
         this._hzCounters.lidar++;
         this.lastScanMsg = msg;
+        this._scanMessages.merged = msg;
         this.requestRender();
       });
     }
 
+    if (document.getElementById('chk-lidar-front')?.checked) {
+      this._subscribeMapScan(index, 'lidar-front', `/${rid}/scan_1`, 'front');
+    }
+    if (document.getElementById('chk-lidar-rear')?.checked) {
+      this._subscribeMapScan(index, 'lidar-rear', `/${rid}/scan_2`, 'rear');
+    }
+    if (document.getElementById('chk-footprint')?.checked) {
+      this._subscribeSlotTopic(
+        index,
+        'footprint',
+        `/${rid}/move_base/local_costmap/footprint`,
+        'geometry_msgs/PolygonStamped',
+        (msg) => this._handleFootprintMessage(index, msg)
+      );
+    }
+    if (document.getElementById('chk-local-costmap')?.checked) {
+      this._subscribeLocalCostmap(index, rid);
+    }
+    if (document.getElementById('chk-nav-path')?.checked) {
+      this._subscribePathLayer(index, 'navigation-path', `/${rid}/best_local_trajectories_nav`, '_navigationPath');
+    }
+    if (document.getElementById('chk-nav-goal')?.checked) {
+      this._subscribeNavigationGoal(index, rid);
+    }
+    if (document.getElementById('chk-mapping-path')?.checked) {
+      this._subscribePathLayer(index, 'mapping-path', `/${rid}/lio_sam/mapping/path`, '_mappingTopicPath');
+    }
+
     // Setup checkbox handlers for the active slot
     this.setupCheckboxHandlers();
+    this._updateMapLayerSummary();
   },
 
   // Switch active slot: previous robot becomes connection-only, new robot receives data.
@@ -608,11 +697,18 @@ const RosManager = {
 
     // Unsubscribe SLAM pose from previous slot
     this._unsubscribeSlamPose();
+    this._stopSlamTrail();
     this.stopLatencyMonitor();
 
     // Clear map, lidar, and footprint
     this.lastMapMsg = null;
     this.lastScanMsg = null;
+    this._scanMessages = { merged: null, front: null, rear: null };
+    this._localCostmapMsg = null;
+    this._localCostmapCanvas = null;
+    this._navigationPath = [];
+    this._navigationGoal = null;
+    this._mappingTopicPath = [];
     this.robotPose = null;
     this.mapCorrection = null;
     this._footprintPoints = null;
@@ -661,6 +757,7 @@ const RosManager = {
     this._slamRunning = false;
     this._lifelongRunning = false;
     this._modeManualSet = false;
+    this._resetLoopClosureSession();
     this._updateSlamButtons();
     this._updateLifelongButtons();
   },
@@ -716,6 +813,118 @@ const RosManager = {
 
     topic.subscribe(callback);
     slot.subscriptions[key] = topic;
+  },
+
+  _subscribeMapScan(index, key, topicName, target) {
+    this._subscribeSlotTopic(index, key, topicName, 'sensor_msgs/LaserScan', (msg) => {
+      if (index !== App.activeSlotIndex) return;
+      this._scanMessages[target] = msg;
+      this.requestRender();
+    });
+  },
+
+  _handleFootprintMessage(index, msg) {
+    if (index !== App.activeSlotIndex) return;
+    const slot = App.robotSlots[index];
+    const points = msg?.polygon?.points;
+    if (!slot || !Array.isArray(points)) return;
+    const pose = slot.pose || this.robotPose;
+    if (!pose) {
+      this._footprintPoints = points.map(point => ({ x: point.x, y: point.y }));
+      this.requestRender();
+      return;
+    }
+
+    const cosYaw = Math.cos(-pose.yaw);
+    const sinYaw = Math.sin(-pose.yaw);
+    this._footprintPoints = points.map(point => {
+      const dx = point.x - pose.x;
+      const dy = point.y - pose.y;
+      return {
+        x: cosYaw * dx - sinYaw * dy,
+        y: sinYaw * dx + cosYaw * dy
+      };
+    });
+    this.requestRender();
+  },
+
+  _subscribeLocalCostmap(index, rid) {
+    this._subscribeSlotTopic(
+      index,
+      'local-costmap',
+      `/${rid}/move_base/local_costmap/costmap`,
+      'nav_msgs/OccupancyGrid',
+      (msg) => {
+        if (index !== App.activeSlotIndex) return;
+        this._localCostmapMsg = msg;
+        this._localCostmapCanvas = null;
+        this.requestRender();
+      }
+    );
+  },
+
+  _subscribeNavigationGoal(index, rid) {
+    this._subscribeSlotTopic(
+      index,
+      'navigation-goal',
+      `/${rid}/move_base/WaypointsGlobalPlanner/current_goal`,
+      'geometry_msgs/PoseStamped',
+      (msg) => {
+        if (index !== App.activeSlotIndex) return;
+        const position = msg?.pose?.position;
+        const orientation = msg?.pose?.orientation;
+        if (!position || !orientation) return;
+        this._navigationGoal = {
+          x: Number(position.x) || 0,
+          y: Number(position.y) || 0,
+          yaw: this._quaternionYaw(orientation)
+        };
+        this.requestRender();
+      }
+    );
+  },
+
+  _subscribePathLayer(index, key, topicName, targetProperty) {
+    this._subscribeSlotTopic(index, key, topicName, 'nav_msgs/Path', (msg) => {
+      if (index !== App.activeSlotIndex) return;
+      this[targetProperty] = this._pathToMapPoints(msg, index);
+      this.requestRender();
+    });
+  },
+
+  _quaternionYaw(orientation) {
+    if (!orientation) return 0;
+    const x = Number(orientation.x) || 0;
+    const y = Number(orientation.y) || 0;
+    const z = Number(orientation.z) || 0;
+    const w = Number(orientation.w);
+    return Math.atan2(
+      2 * ((Number.isFinite(w) ? w : 1) * z + x * y),
+      1 - 2 * (y * y + z * z)
+    );
+  },
+
+  _pathToMapPoints(msg, index) {
+    const poses = Array.isArray(msg?.poses) ? msg.poses : [];
+    const frame = String(msg?.header?.frame_id || poses[0]?.header?.frame_id || '');
+    const slot = App.robotSlots[index];
+    const tf = /(^|\/)odom$/.test(frame) ? slot?.tfMapToOdom : null;
+    const tfYaw = tf ? this._quaternionYaw(tf.rotation) : 0;
+    const cosYaw = Math.cos(tfYaw);
+    const sinYaw = Math.sin(tfYaw);
+    const tx = Number(tf?.translation?.x) || 0;
+    const ty = Number(tf?.translation?.y) || 0;
+
+    return poses
+      .map(item => item?.pose?.position)
+      .filter(Boolean)
+      .map(position => {
+        const x = Number(position.x) || 0;
+        const y = Number(position.y) || 0;
+        return tf
+          ? { x: tx + cosYaw * x - sinYaw * y, y: ty + sinYaw * x + cosYaw * y }
+          : { x, y };
+      });
   },
 
   // BMS trend data
@@ -868,9 +1077,184 @@ const RosManager = {
     const slot = App.robotSlots[index];
     if (!slot) return;
 
-    const mode = msg.data || 'NAV';
+    const rawMode = String(msg?.data || msg?.mode || 'NAV').trim().toUpperCase();
+    const aliases = {
+      MAPPING: 'SLAM',
+      PARTIAL_MAPPING: 'LIFELONG',
+      PARTIALMAP: 'LIFELONG'
+    };
+    const mode = aliases[rawMode] || rawMode;
+    if (!['NAV', 'SLAM', 'LIFELONG'].includes(mode)) return;
     slot.routineMode = mode;
-    // Mode detection is now handled by _handleSlotWorkState
+    if (index !== App.activeSlotIndex || mode === this._currentRoutineMode) return;
+
+    const wasMapping = this._slamRunning || this._lifelongRunning;
+    this._currentRoutineMode = mode;
+    this._slamRunning = mode === 'SLAM';
+    this._lifelongRunning = mode === 'LIFELONG';
+    this._updateSlamButtons();
+    this._updateLifelongButtons();
+
+    if (this._slamRunning || this._lifelongRunning) {
+      this._enableMappingPathLayer();
+      if (!wasMapping || !this._slamTrailTimer) this._startSlamTrail();
+    } else if (wasMapping) {
+      this._modeManualSet = false;
+      this._stopSlamTrail();
+      this._updateLoopClosureStatus();
+    }
+  },
+
+  _enableMappingPathLayer() {
+    const checkbox = document.getElementById('chk-mapping-path');
+    if (!checkbox || checkbox.checked) return;
+    checkbox.checked = true;
+    if (typeof checkbox.onchange === 'function') {
+      checkbox.onchange();
+    } else {
+      try { localStorage.setItem('amrChk_chk-mapping-path', 'true'); }
+      catch (e) { /* ignore */ }
+      this._updateMapLayerSummary();
+    }
+  },
+
+  _handleSlamGraph(index, msg) {
+    if (index !== App.activeSlotIndex) return;
+    const nodes = [];
+    const edges = [];
+    const loopEdges = [];
+    const addEdgePairs = (points, target) => {
+      const list = Array.from(points || []);
+      for (let i = 0; i + 1 < list.length; i += 2) {
+        target.push({
+          x1: Number(list[i]?.x) || 0,
+          y1: Number(list[i]?.y) || 0,
+          x2: Number(list[i + 1]?.x) || 0,
+          y2: Number(list[i + 1]?.y) || 0
+        });
+      }
+    };
+
+    for (const marker of Array.from(msg?.markers || [])) {
+      // visualization_msgs/Marker: DELETE=2, DELETEALL=3
+      if (marker?.action === 2 || marker?.action === 3) continue;
+      const namespace = String(marker?.ns || '');
+      if (namespace === 'slam_nodes') {
+        const position = marker?.pose?.position;
+        if (position) {
+          nodes.push({
+            x: Number(position.x) || 0,
+            y: Number(position.y) || 0,
+            id: Number(marker.id) || 0
+          });
+        }
+      } else if (namespace === 'loop_slam_edges') {
+        addEdgePairs(marker?.points, loopEdges);
+      } else if (
+        namespace === 'intra_slam_edges'
+        || namespace === 'inter_slam_edges'
+        || namespace === 'lifelong_slam_edges'
+      ) {
+        addEdgePairs(marker?.points, edges);
+      }
+    }
+
+    const previousCount = this._loopClosureCount;
+    this._slamGraphNodes = nodes;
+    this._slamGraphEdges = edges;
+    this._slamLoopEdges = loopEdges;
+    this._loopClosureCount = Math.max(previousCount, loopEdges.length);
+    this._updateLoopClosureStatus();
+    this.requestRender();
+
+    const addedCount = loopEdges.length - previousCount;
+    if (addedCount > 0 && (this._slamRunning || this._lifelongRunning)) {
+      this._announceLoopClosure(addedCount);
+    }
+  },
+
+  _resetLoopClosureSession() {
+    this._slamGraphNodes = [];
+    this._slamGraphEdges = [];
+    this._slamLoopEdges = [];
+    this._loopClosureCount = 0;
+    this._loopClosureSuccessAt = null;
+    if (this._loopClosureNoticeTimer) {
+      clearTimeout(this._loopClosureNoticeTimer);
+      this._loopClosureNoticeTimer = null;
+    }
+    this._dismissLoopClosureNotice();
+    this._updateLoopClosureStatus();
+  },
+
+  _announceLoopClosure(addedCount = 1) {
+    this._loopClosureSuccessAt = Date.now();
+    this._updateLoopClosureStatus();
+
+    const notice = document.getElementById('loop-closure-notice');
+    const countEl = document.getElementById('loop-closure-notice-count');
+    if (countEl) {
+      countEl.textContent = `이번 맵핑에서 총 ${this._loopClosureCount}회 연결 보정`;
+    }
+    if (notice) {
+      notice.hidden = false;
+      notice.classList.remove('show');
+      requestAnimationFrame(() => notice.classList.add('show'));
+    }
+
+    if (this._loopClosureNoticeTimer) clearTimeout(this._loopClosureNoticeTimer);
+    this._loopClosureNoticeTimer = setTimeout(
+      () => this._dismissLoopClosureNotice(),
+      this._loopClosureNoticeDurationMs
+    );
+
+    const additional = addedCount > 1 ? ` (${addedCount}개 동시 감지)` : '';
+    if (typeof App !== 'undefined' && App.toast) {
+      App.toast(`Loop Closure 성사! 맵 연결 보정 완료${additional}`, 'success', 8000);
+    }
+    if (typeof App !== 'undefined' && App.eventLog?.add) {
+      App.eventLog.add(
+        'success',
+        `Loop Closure 성사 · 누적 ${this._loopClosureCount}회${additional}`,
+        'mapping'
+      );
+    }
+  },
+
+  _dismissLoopClosureNotice() {
+    const notice = document.getElementById('loop-closure-notice');
+    if (!notice) return;
+    notice.classList.remove('show');
+    notice.hidden = true;
+  },
+
+  _updateLoopClosureStatus() {
+    const status = document.getElementById('loop-closure-status');
+    if (!status) return;
+    const mapping = this._slamRunning || this._lifelongRunning;
+    status.hidden = !mapping;
+    if (!mapping) return;
+
+    const title = document.getElementById('loop-closure-status-title');
+    const detail = document.getElementById('loop-closure-status-detail');
+    const count = document.getElementById('loop-closure-status-count');
+    const success = this._loopClosureCount > 0;
+    status.classList.toggle('waiting', !success);
+    status.classList.toggle('success', success);
+
+    if (title) {
+      title.textContent = success ? 'Loop Closure 성사됨' : 'Loop Closure 대기 중';
+    }
+    if (detail) {
+      detail.textContent = success
+        ? '맵 연결 보정 완료 · 계속 주행하거나 맵을 저장하세요'
+        : '이전에 지나간 장소를 같은 방향으로 천천히 다시 주행하세요';
+    }
+    if (count) {
+      count.textContent = success
+        ? `${this._loopClosureCount}회 성사`
+        : `그래프 노드 ${this._slamGraphNodes.length}개`;
+    }
   },
 
   // Handle pose for a slot (from amcl_pose - fallback when TF not available)
@@ -1153,7 +1537,19 @@ const RosManager = {
   },
 
   // Checkbox IDs that are persisted to localStorage
-  _checkboxIds: ['chk-cam1-depth', 'chk-cam1-color', 'chk-cam2-depth', 'chk-cam2-color', 'chk-bms', 'chk-map', 'chk-robot-pose', 'chk-lidar'],
+  _mapLayerCheckboxIds: [
+    'chk-map', 'chk-robot-pose', 'chk-lidar', 'chk-lidar-front',
+    'chk-lidar-rear', 'chk-footprint', 'chk-local-costmap',
+    'chk-nav-path', 'chk-nav-goal', 'chk-dock-pose',
+    'chk-mapping-path', 'chk-map-correction'
+  ],
+  _checkboxIds: [
+    'chk-cam1-depth', 'chk-cam1-color', 'chk-cam2-depth', 'chk-cam2-color',
+    'chk-bms', 'chk-map', 'chk-robot-pose', 'chk-lidar', 'chk-lidar-front',
+    'chk-lidar-rear', 'chk-footprint', 'chk-local-costmap',
+    'chk-nav-path', 'chk-nav-goal', 'chk-dock-pose',
+    'chk-mapping-path', 'chk-map-correction'
+  ],
   _checkboxRestored: false,
 
   // Restore checkbox states from localStorage (runs once)
@@ -1194,6 +1590,8 @@ const RosManager = {
 
     // Update camera panes to reflect restored state
     this.updateCameraPanes();
+    this._updateMapLayerSummary();
+    this._setMapCorrectionVisibility();
   },
 
   setupCheckboxHandlers() {
@@ -1205,13 +1603,103 @@ const RosManager = {
       { id: 'chk-cam2-depth', key: 'cam2-depth', topicTemplate: '/{rid}/cam_2/depth/image_raw', type: 'sensor_msgs/Image', handlerFn: (msg, idx) => { if (idx !== App.activeSlotIndex) return; this.renderDepthImage('cam2-depth', msg); } },
       { id: 'chk-cam2-color', key: 'cam2-color', topicTemplate: '/{rid}/cam_2/color/image_raw/compressed', type: 'sensor_msgs/CompressedImage', handlerFn: (msg, idx) => { if (idx !== App.activeSlotIndex) return; this.renderCamera('cam2-color', msg); } },
       { id: 'chk-bms', key: 'bms', topicTemplate: '/{rid}/bms', type: 'std_msgs/Float32MultiArray', handlerFn: (msg, idx) => this._handleSlotBmsData(idx, msg) },
-      { id: 'chk-map', key: 'map', topicTemplate: '/{rid}/map', type: 'nav_msgs/OccupancyGrid', handlerFn: (msg, idx) => { if (idx !== App.activeSlotIndex) return; this.renderMap(msg); } },
-      { id: 'chk-robot-pose', key: 'robot-pose', topicTemplate: '/{rid}/amcl_pose', type: 'geometry_msgs/PoseWithCovarianceStamped', handlerFn: (msg, idx) => this._handleSlotPose(idx, msg) },
-      { id: 'chk-lidar', key: 'lidar', topicTemplate: '/{rid}/scan', type: 'sensor_msgs/LaserScan', handlerFn: (msg, idx) => { if (idx !== App.activeSlotIndex) return; this.lastScanMsg = msg; this.requestRender(); } }
+      { id: 'chk-map', key: 'map', displayOnly: true },
+      { id: 'chk-robot-pose', key: 'robot-pose', displayOnly: true },
+      {
+        id: 'chk-lidar', key: 'lidar', topicTemplate: '/{rid}/scan', type: 'sensor_msgs/LaserScan',
+        handlerFn: (msg, idx) => {
+          if (idx !== App.activeSlotIndex) return;
+          this._hzCounters.lidar++;
+          this.lastScanMsg = msg;
+          this._scanMessages.merged = msg;
+          this.requestRender();
+        },
+        clearFn: () => {
+          this.lastScanMsg = null;
+          this._scanMessages.merged = null;
+        }
+      },
+      {
+        id: 'chk-lidar-front', key: 'lidar-front', topicTemplate: '/{rid}/scan_1', type: 'sensor_msgs/LaserScan',
+        handlerFn: (msg, idx) => {
+          if (idx !== App.activeSlotIndex) return;
+          this._scanMessages.front = msg;
+          this.requestRender();
+        },
+        clearFn: () => { this._scanMessages.front = null; }
+      },
+      {
+        id: 'chk-lidar-rear', key: 'lidar-rear', topicTemplate: '/{rid}/scan_2', type: 'sensor_msgs/LaserScan',
+        handlerFn: (msg, idx) => {
+          if (idx !== App.activeSlotIndex) return;
+          this._scanMessages.rear = msg;
+          this.requestRender();
+        },
+        clearFn: () => { this._scanMessages.rear = null; }
+      },
+      {
+        id: 'chk-footprint', key: 'footprint',
+        topicTemplate: '/{rid}/move_base/local_costmap/footprint', type: 'geometry_msgs/PolygonStamped',
+        handlerFn: (msg, idx) => this._handleFootprintMessage(idx, msg)
+      },
+      {
+        id: 'chk-local-costmap', key: 'local-costmap',
+        topicTemplate: '/{rid}/move_base/local_costmap/costmap', type: 'nav_msgs/OccupancyGrid',
+        handlerFn: (msg, idx) => {
+          if (idx !== App.activeSlotIndex) return;
+          this._localCostmapMsg = msg;
+          this._localCostmapCanvas = null;
+          this.requestRender();
+        },
+        clearFn: () => {
+          this._localCostmapMsg = null;
+          this._localCostmapCanvas = null;
+        }
+      },
+      {
+        id: 'chk-nav-path', key: 'navigation-path',
+        topicTemplate: '/{rid}/best_local_trajectories_nav', type: 'nav_msgs/Path',
+        handlerFn: (msg, idx) => {
+          if (idx !== App.activeSlotIndex) return;
+          this._navigationPath = this._pathToMapPoints(msg, idx);
+          this.requestRender();
+        },
+        clearFn: () => { this._navigationPath = []; }
+      },
+      {
+        id: 'chk-nav-goal', key: 'navigation-goal',
+        topicTemplate: '/{rid}/move_base/WaypointsGlobalPlanner/current_goal', type: 'geometry_msgs/PoseStamped',
+        handlerFn: (msg, idx) => {
+          if (idx !== App.activeSlotIndex) return;
+          const position = msg?.pose?.position;
+          const orientation = msg?.pose?.orientation;
+          if (!position || !orientation) return;
+          this._navigationGoal = {
+            x: Number(position.x) || 0,
+            y: Number(position.y) || 0,
+            yaw: this._quaternionYaw(orientation)
+          };
+          this.requestRender();
+        },
+        clearFn: () => { this._navigationGoal = null; }
+      },
+      { id: 'chk-dock-pose', key: 'dock-pose', displayOnly: true },
+      {
+        id: 'chk-mapping-path', key: 'mapping-path',
+        topicTemplate: '/{rid}/lio_sam/mapping/path', type: 'nav_msgs/Path',
+        handlerFn: (msg, idx) => {
+          if (idx !== App.activeSlotIndex) return;
+          this._mappingTopicPath = this._pathToMapPoints(msg, idx);
+          this.requestRender();
+        },
+        clearFn: () => { this._mappingTopicPath = []; }
+      },
+      { id: 'chk-map-correction', key: 'map-correction', displayOnly: true }
     ];
 
     checkboxConfigs.forEach(cfg => {
       const checkbox = document.getElementById(cfg.id);
+      if (!checkbox) return;
       checkbox.onchange = () => {
         // Persist checkbox state
         try { localStorage.setItem('amrChk_' + cfg.id, checkbox.checked); }
@@ -1225,26 +1713,43 @@ const RosManager = {
         // Always use current active slot (not captured values)
         const currentIndex = App.activeSlotIndex;
         const currentSlot = App.robotSlots[currentIndex];
-        if (checkbox.checked && currentSlot && currentSlot.ros) {
+        if (!cfg.displayOnly && checkbox.checked && currentSlot && currentSlot.ros) {
           // Build topic name dynamically with current robot ID
           const currentRid = currentSlot.robotId;
           const topic = cfg.topicTemplate.replace('{rid}', currentRid);
           // Create handler that passes current index
           const handler = (msg) => cfg.handlerFn(msg, currentIndex);
           this._subscribeSlotTopic(currentIndex, cfg.key, topic, cfg.type, handler);
-        } else if (currentSlot) {
+        } else if (!cfg.displayOnly && currentSlot) {
           if (currentSlot.subscriptions[cfg.key]) {
             currentSlot.subscriptions[cfg.key].unsubscribe();
             delete currentSlot.subscriptions[cfg.key];
           }
-          // Clear cached data when unchecked
-          if (cfg.key === 'lidar') {
-            this.lastScanMsg = null;
-            this.requestRender();
-          }
+          if (cfg.clearFn) cfg.clearFn();
         }
+        this._updateMapLayerSummary();
+        this._setMapCorrectionVisibility();
+        this.requestRender();
       };
     });
+  },
+
+  _isLayerEnabled(id) {
+    return Boolean(document.getElementById(id)?.checked);
+  },
+
+  _updateMapLayerSummary() {
+    const count = this._mapLayerCheckboxIds.reduce(
+      (total, id) => total + (this._isLayerEnabled(id) ? 1 : 0),
+      0
+    );
+    const countEl = document.getElementById('map-layer-count');
+    if (countEl) countEl.textContent = String(count);
+  },
+
+  _setMapCorrectionVisibility() {
+    const badge = document.getElementById('map-correction-badge');
+    if (badge) badge.hidden = !this._isLayerEnabled('chk-map-correction');
   },
 
   // Camera pane assignments (up to 4 panes)
@@ -1655,7 +2160,8 @@ const RosManager = {
     const origin = msg.info.origin;
     const rotation = this.mapRotation;
 
-    const mapImg = this._buildMapImage(msg);
+    const showMap = this._isLayerEnabled('chk-map');
+    const mapImg = showMap ? this._buildMapImage(msg) : null;
 
     const containerRect = container.getBoundingClientRect();
     const newW = containerRect.width || 600;
@@ -1669,7 +2175,7 @@ const RosManager = {
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    ctx.fillStyle = '#808080';
+    ctx.fillStyle = showMap ? '#808080' : '#0a0a15';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     // Follow robot: compute pan so robot is centered
@@ -1690,19 +2196,46 @@ const RosManager = {
     ctx.translate(canvas.width / 2 + this.mapPanX, canvas.height / 2 + this.mapPanY);
     ctx.scale(this.mapZoom, this.mapZoom);
     ctx.rotate(rotation * Math.PI / 180);
-    ctx.drawImage(mapImg, -width / 2, -height / 2);
-
-    // Render LiDAR scan points
-    if (this.lastScanMsg && this.robotPose && document.getElementById('chk-lidar').checked) {
-      this._renderLidarOnMap(ctx, width, height, resolution, origin);
+    if (mapImg) {
+      ctx.drawImage(mapImg, -width / 2, -height / 2);
     }
 
-    // Render SLAM trail (before robot icon so robot draws on top)
-    if (this._breadcrumbTrail.length > 1) {
-      this._renderSlamTrail(ctx, width, height, resolution, origin);
+    if (this._isLayerEnabled('chk-local-costmap') && this._localCostmapMsg) {
+      this._renderLocalCostmap(ctx, width, height, resolution, origin);
     }
 
-    if (this.robotPose && document.getElementById('chk-robot-pose').checked) {
+    if (this._isLayerEnabled('chk-nav-path') && this._navigationPath.length > 1) {
+      this._renderPathLayer(ctx, this._navigationPath, width, height, resolution, origin, '#38bdf8', 3);
+    }
+
+    if (this._isLayerEnabled('chk-mapping-path')) {
+      if (this._mappingTopicPath.length > 1) {
+        this._renderPathLayer(ctx, this._mappingTopicPath, width, height, resolution, origin, '#19ff00', 3.5);
+      } else if (this._breadcrumbTrail.length > 1) {
+        this._renderSlamTrail(ctx, width, height, resolution, origin);
+      }
+      if (this._slamLoopEdges.length > 0) {
+        this._renderLoopClosureEdges(ctx, width, height, resolution, origin);
+      }
+    }
+
+    // Render selected LiDAR sources. Colors distinguish combined/front/rear scans.
+    const mergedScan = this._scanMessages.merged || this.lastScanMsg;
+    if (this.robotPose && this._isLayerEnabled('chk-lidar') && mergedScan) {
+      this._renderLidarOnMap(ctx, width, height, resolution, origin, mergedScan);
+    }
+    if (this.robotPose && this._isLayerEnabled('chk-lidar-front') && this._scanMessages.front) {
+      this._renderLidarOnMap(ctx, width, height, resolution, origin, this._scanMessages.front, '#ff9f1c');
+    }
+    if (this.robotPose && this._isLayerEnabled('chk-lidar-rear') && this._scanMessages.rear) {
+      this._renderLidarOnMap(ctx, width, height, resolution, origin, this._scanMessages.rear, '#22d3ee');
+    }
+
+    if (this.robotPose && this._isLayerEnabled('chk-footprint')) {
+      this._renderFootprintLayer(ctx, width, height, resolution, origin);
+    }
+
+    if (this.robotPose && this._isLayerEnabled('chk-robot-pose')) {
       const robotMapX = (this.robotPose.x - origin.position.x) / resolution;
       const robotMapY = height - (this.robotPose.y - origin.position.y) / resolution;
       const rx = robotMapX - width / 2;
@@ -1734,8 +2267,17 @@ const RosManager = {
       ctx.restore();
     }
 
+    if (this._isLayerEnabled('chk-nav-goal') && this._navigationGoal) {
+      this._renderPoseArrow(ctx, this._navigationGoal, width, height, resolution, origin, '#facc15');
+    }
+
     // Draw dock pose markers (inside map transform)
-    this._drawDockPoseMarkers(ctx, width, height, resolution, origin);
+    if (this._isLayerEnabled('chk-dock-pose')) {
+      this._drawDockPoseMarkers(ctx, width, height, resolution, origin);
+    }
+
+    // Draw the route of the Task currently assigned to the active robot.
+    this._drawActiveTaskOverlay(ctx, width, height, resolution, origin);
 
     // Draw the map points currently being composed by Quick Task.
     this._drawQuickTaskOverlay(ctx, width, height, resolution, origin);
@@ -1756,7 +2298,10 @@ const RosManager = {
     }
 
     // Draw waypoint select preview arrow (in canvas coordinates)
-    if (this._waypointSelectMode && this._waypointDragging) {
+    if (this._waypointSelectMode
+        && (this._waypointDragging
+          || this._waypointDirectionPending
+          || this._waypointHoverActive)) {
       this._drawWaypointSelectPreview(ctx);
     }
 
@@ -1768,6 +2313,163 @@ const RosManager = {
 
     const zoomPct = Math.round(this.mapZoom * 100);
     document.getElementById('map-info').textContent = `${width}x${height} | ${resolution.toFixed(3)} m/px | ${rotation}\u00B0 | ${zoomPct}%`;
+  },
+
+  _buildLocalCostmapImage(msg) {
+    const width = msg.info.width;
+    const height = msg.info.height;
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    const image = ctx.createImageData(width, height);
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const source = (height - 1 - y) * width + x;
+        const target = (y * width + x) * 4;
+        const cost = Number(msg.data[source]);
+        if (!Number.isFinite(cost) || cost <= 0) continue;
+        const normalized = Math.max(0, Math.min(1, cost / 100));
+        image.data[target] = 255;
+        image.data[target + 1] = Math.round(190 * (1 - normalized));
+        image.data[target + 2] = 32;
+        image.data[target + 3] = Math.round(45 + normalized * 145);
+      }
+    }
+    ctx.putImageData(image, 0, 0);
+    return canvas;
+  },
+
+  _renderLocalCostmap(ctx, mapWidth, mapHeight, mapResolution, mapOrigin) {
+    const msg = this._localCostmapMsg;
+    if (!msg?.info) return;
+    if (!this._localCostmapCanvas) {
+      this._localCostmapCanvas = this._buildLocalCostmapImage(msg);
+    }
+    const info = msg.info;
+    const localResolution = Number(info.resolution) || mapResolution;
+    const localOrigin = info.origin?.position || { x: 0, y: 0 };
+    const drawWidth = info.width * localResolution / mapResolution;
+    const drawHeight = info.height * localResolution / mapResolution;
+    const drawX = (localOrigin.x - mapOrigin.position.x) / mapResolution - mapWidth / 2;
+    const localTopY = localOrigin.y + info.height * localResolution;
+    const drawY = mapHeight - (localTopY - mapOrigin.position.y) / mapResolution - mapHeight / 2;
+
+    ctx.save();
+    ctx.globalAlpha = 0.78;
+    ctx.drawImage(this._localCostmapCanvas, drawX, drawY, drawWidth, drawHeight);
+    ctx.restore();
+  },
+
+  _renderPathLayer(ctx, points, mapWidth, mapHeight, resolution, origin, color, lineWidth) {
+    if (!Array.isArray(points) || points.length < 2) return;
+    const toMap = point => ({
+      x: (point.x - origin.position.x) / resolution - mapWidth / 2,
+      y: mapHeight - (point.y - origin.position.y) / resolution - mapHeight / 2
+    });
+    const width = Math.max(1, lineWidth / Math.max(this.mapZoom, 0.1));
+
+    ctx.save();
+    ctx.beginPath();
+    points.forEach((point, index) => {
+      const pixel = toMap(point);
+      if (index === 0) ctx.moveTo(pixel.x, pixel.y);
+      else ctx.lineTo(pixel.x, pixel.y);
+    });
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 4 / Math.max(this.mapZoom, 0.1);
+    ctx.stroke();
+    ctx.restore();
+  },
+
+  _renderLoopClosureEdges(ctx, mapWidth, mapHeight, resolution, origin) {
+    const toMap = (x, y) => ({
+      x: (x - origin.position.x) / resolution - mapWidth / 2,
+      y: mapHeight - (y - origin.position.y) / resolution - mapHeight / 2
+    });
+    const scale = Math.max(this.mapZoom, 0.1);
+
+    ctx.save();
+    ctx.strokeStyle = '#ff30c0';
+    ctx.fillStyle = '#ff7ad8';
+    ctx.lineWidth = 4 / scale;
+    ctx.shadowColor = '#ff30c0';
+    ctx.shadowBlur = 9 / scale;
+    for (const edge of this._slamLoopEdges) {
+      const start = toMap(edge.x1, edge.y1);
+      const end = toMap(edge.x2, edge.y2);
+      ctx.beginPath();
+      ctx.moveTo(start.x, start.y);
+      ctx.lineTo(end.x, end.y);
+      ctx.stroke();
+      for (const point of [start, end]) {
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, 5 / scale, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  },
+
+  _renderFootprintLayer(ctx, mapWidth, mapHeight, resolution, origin) {
+    const pose = this.robotPose;
+    const points = this._footprintPoints;
+    if (!pose || !Array.isArray(points) || points.length < 3) return;
+    const robotX = (pose.x - origin.position.x) / resolution - mapWidth / 2;
+    const robotY = mapHeight - (pose.y - origin.position.y) / resolution - mapHeight / 2;
+    const lineWidth = Math.max(1, 2 / Math.max(this.mapZoom, 0.1));
+
+    ctx.save();
+    ctx.translate(robotX, robotY);
+    ctx.rotate(-pose.yaw);
+    ctx.beginPath();
+    points.forEach((point, index) => {
+      const x = point.x / resolution;
+      const y = -point.y / resolution;
+      if (index === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(251, 146, 60, 0.14)';
+    ctx.strokeStyle = '#fb923c';
+    ctx.lineWidth = lineWidth;
+    ctx.setLineDash([5 / Math.max(this.mapZoom, 0.1), 3 / Math.max(this.mapZoom, 0.1)]);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  },
+
+  _renderPoseArrow(ctx, pose, mapWidth, mapHeight, resolution, origin, color) {
+    const x = (pose.x - origin.position.x) / resolution - mapWidth / 2;
+    const y = mapHeight - (pose.y - origin.position.y) / resolution - mapHeight / 2;
+    const scale = Math.max(this.mapZoom, 0.1);
+    const length = 24 / scale;
+
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(-pose.yaw);
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+    ctx.lineWidth = 3 / scale;
+    ctx.beginPath();
+    ctx.arc(0, 0, 7 / scale, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(length, 0);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(length, 0);
+    ctx.lineTo(length - 8 / scale, -5 / scale);
+    ctx.lineTo(length - 8 / scale, 5 / scale);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
   },
 
   _drawPosePreview(ctx) {
@@ -2125,8 +2827,7 @@ const RosManager = {
     ctx.fill();
   },
 
-  _renderLidarOnMap(ctx, mapWidth, mapHeight, resolution, origin) {
-    const scan = this.lastScanMsg;
+  _renderLidarOnMap(ctx, mapWidth, mapHeight, resolution, origin, scan = this.lastScanMsg, color = null) {
     const pose = this.robotPose;
     if (!scan || !pose) return;
 
@@ -2135,6 +2836,10 @@ const RosManager = {
     const ranges = scan.ranges;
     const rangeMin = scan.range_min || 0.01;
     const rangeMax = scan.range_max || 30.0;
+    const slot = App.robotSlots[App.activeSlotIndex];
+    const frame = this._frameKey(scan?.header?.frame_id);
+    const sensorTf = slot?.tfStaticMap?.[frame]
+      || { x: 0, y: 0, r00: 1, r01: 0, r10: 0, r11: 1 };
 
     // Robot position in map pixel coordinates
     const robotMapX = (pose.x - origin.position.x) / resolution;
@@ -2144,7 +2849,7 @@ const RosManager = {
     const rx = robotMapX - mapWidth / 2;
     const ry = robotMapY - mapHeight / 2;
 
-    const lidarColor = document.getElementById('lidar-color')?.value || '#ff3333';
+    const lidarColor = color || document.getElementById('lidar-color')?.value || '#ff3333';
     const userPointSize = parseFloat(document.getElementById('lidar-point-size')?.value) || 2.5;
 
     ctx.save();
@@ -2167,8 +2872,12 @@ const RosManager = {
       if (r < rangeMin || r > rangeMax || !isFinite(r)) continue;
 
       const angle = angleMin + i * angleIncrement;
-      const lx = r * Math.cos(angle) / resolution;
-      const ly = -r * Math.sin(angle) / resolution;
+      const sensorX = r * Math.cos(angle);
+      const sensorY = r * Math.sin(angle);
+      const baseX = sensorTf.x + sensorTf.r00 * sensorX + sensorTf.r01 * sensorY;
+      const baseY = sensorTf.y + sensorTf.r10 * sensorX + sensorTf.r11 * sensorY;
+      const lx = baseX / resolution;
+      const ly = -baseY / resolution;
 
       // P2 fix: 뷰포트 밖 포인트 스킵
       if (Math.abs(lx) > viewLimitPx || Math.abs(ly) > viewLimitPx) continue;
@@ -2602,8 +3311,11 @@ const RosManager = {
       }
       if (this._waypointSelectMode) {
         this._waypointDragging = true;
-        this._waypointStartX = cx;
-        this._waypointStartY = cy;
+        this._waypointHoverActive = false;
+        if (!this._waypointDirectionPending) {
+          this._waypointStartX = cx;
+          this._waypointStartY = cy;
+        }
         this._waypointCurrentX = cx;
         this._waypointCurrentY = cy;
         return;
@@ -2654,6 +3366,21 @@ const RosManager = {
         const rect = canvas.getBoundingClientRect();
         this._waypointCurrentX = e.clientX - rect.left;
         this._waypointCurrentY = e.clientY - rect.top;
+        this.requestRender();
+        return;
+      }
+      if (this._waypointDirectionPending) {
+        const rect = canvas.getBoundingClientRect();
+        this._waypointCurrentX = e.clientX - rect.left;
+        this._waypointCurrentY = e.clientY - rect.top;
+        this.requestRender();
+        return;
+      }
+      if (this._waypointSelectMode && this._waypointSelectionOptions.twoClick) {
+        const rect = canvas.getBoundingClientRect();
+        this._waypointCurrentX = e.clientX - rect.left;
+        this._waypointCurrentY = e.clientY - rect.top;
+        this._waypointHoverActive = true;
         this.requestRender();
         return;
       }
@@ -2988,6 +3715,79 @@ const RosManager = {
     this.requestRender();
   },
 
+  setActiveTaskOverlay(task) {
+    this._activeTaskOverlay = task
+      ? {
+        ...task,
+        points: Array.from(task.points || []).map(point => ({ ...point }))
+      }
+      : null;
+    this.requestRender();
+  },
+
+  _drawActiveTaskOverlay(ctx, mapWidth, mapHeight, resolution, origin) {
+    const task = this._activeTaskOverlay;
+    const points = task?.showRoute ? Array.from(task.points || []) : [];
+    if (points.length === 0) return;
+    const scale = Math.max(this.mapZoom || 1, 0.1);
+    const toMap = point => ({
+      x: (point.x - origin.position.x) / resolution - mapWidth / 2,
+      y: mapHeight - (point.y - origin.position.y) / resolution - mapHeight / 2
+    });
+
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    for (let index = 1; index < points.length; index += 1) {
+      const previous = toMap(points[index - 1]);
+      const current = toMap(points[index]);
+      const completed = Number(points[index].actionIndex) < Number(task.currentActionIndex);
+      ctx.beginPath();
+      ctx.strokeStyle = completed ? 'rgba(74, 222, 128, 0.9)' : 'rgba(56, 189, 248, 0.9)';
+      ctx.lineWidth = (completed ? 3.5 : 3) / scale;
+      ctx.setLineDash(completed ? [] : [7 / scale, 4 / scale]);
+      ctx.moveTo(previous.x, previous.y);
+      ctx.lineTo(current.x, current.y);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    points.forEach((point, index) => {
+      const mapPoint = toMap(point);
+      const active = Number(point.actionIndex) === Number(task.currentActionIndex);
+      const color = active ? '#facc15' : '#38bdf8';
+      const radius = (active ? 9 : 7) / scale;
+      ctx.save();
+      ctx.translate(mapPoint.x, mapPoint.y);
+      ctx.fillStyle = active ? 'rgba(113, 63, 18, 0.92)' : 'rgba(8, 47, 73, 0.9)';
+      ctx.strokeStyle = color;
+      ctx.lineWidth = (active ? 4 : 2.5) / scale;
+      ctx.beginPath();
+      ctx.arc(0, 0, radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.save();
+      ctx.rotate(-(Number(point.theta) || 0));
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(16 / scale, 0);
+      ctx.lineTo(5 / scale, -5 / scale);
+      ctx.lineTo(5 / scale, 5 / scale);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+
+      ctx.fillStyle = '#fff';
+      ctx.font = `700 ${8 / scale}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(point.label || index + 1), 0, 0);
+      ctx.restore();
+    });
+    ctx.restore();
+  },
+
   _drawQuickTaskOverlay(ctx, mapWidth, mapHeight, resolution, origin) {
     const points = this._quickTaskOverlay || [];
     if (points.length === 0) return;
@@ -3009,14 +3809,17 @@ const RosManager = {
     for (let index = 1; index < points.length; index += 1) {
       const previous = toMap(points[index - 1]);
       const current = toMap(points[index]);
+      const selectedSegment = points[index - 1].selected && points[index].selected;
       ctx.beginPath();
       ctx.setLineDash(points[index - 1].group === points[index].group
         ? []
         : [6 / scale, 5 / scale]);
-      ctx.strokeStyle = points[index].kind === 'trajectory-draft'
+      ctx.strokeStyle = selectedSegment
+        ? '#f472b6'
+        : points[index].kind === 'trajectory-draft'
         ? colors['trajectory-draft']
         : 'rgba(34, 211, 238, 0.72)';
-      ctx.lineWidth = 2.5 / scale;
+      ctx.lineWidth = (selectedSegment ? 5 : 2.5) / scale;
       ctx.moveTo(previous.x, previous.y);
       ctx.lineTo(current.x, current.y);
       ctx.stroke();
@@ -3029,9 +3832,18 @@ const RosManager = {
       const radius = 8 / scale;
       ctx.save();
       ctx.translate(mapPoint.x, mapPoint.y);
+      if (point.selected) {
+        ctx.fillStyle = 'rgba(244, 114, 182, 0.2)';
+        ctx.strokeStyle = '#f472b6';
+        ctx.lineWidth = 3 / scale;
+        ctx.beginPath();
+        ctx.arc(0, 0, 15 / scale, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
       ctx.fillStyle = 'rgba(15, 23, 42, 0.88)';
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 3 / scale;
+      ctx.strokeStyle = point.selected ? '#f9a8d4' : color;
+      ctx.lineWidth = (point.selected ? 4 : 3) / scale;
       ctx.beginPath();
       ctx.arc(0, 0, radius, 0, Math.PI * 2);
       ctx.fill();
@@ -3059,7 +3871,7 @@ const RosManager = {
   },
 
   // Enter waypoint select mode (called from ActionSender)
-  _enterWaypointSelectMode(callback) {
+  _enterWaypointSelectMode(callback, options = {}) {
     // Disable other modes
     this._poseMode = false;
     this._navGoalMode = false;
@@ -3070,6 +3882,9 @@ const RosManager = {
 
     this._waypointSelectMode = true;
     this._waypointSelectCallback = callback;
+    this._waypointSelectionOptions = { ...options };
+    this._waypointDirectionPending = false;
+    this._waypointHoverActive = false;
     const canvas = document.getElementById('map-canvas');
     if (canvas) canvas.style.cursor = 'crosshair';
   },
@@ -3079,16 +3894,40 @@ const RosManager = {
     this._waypointSelectMode = false;
     this._waypointSelectCallback = null;
     this._waypointDragging = false;
+    this._waypointDirectionPending = false;
+    this._waypointHoverActive = false;
+    this._waypointSelectionOptions = {};
     const canvas = document.getElementById('map-canvas');
     if (canvas) canvas.style.cursor = 'grab';
     this.requestRender();
   },
 
-  // Commit waypoint selection from click+drag
+  _prepareNextWaypointSelection() {
+    this._waypointDragging = false;
+    this._waypointDirectionPending = false;
+    this._waypointHoverActive = false;
+    const canvas = document.getElementById('map-canvas');
+    if (canvas && this._waypointSelectMode) canvas.style.cursor = 'crosshair';
+    this.requestRender();
+  },
+
+  // Commit waypoint selection from click+drag or Quick Task's two-click flow.
   _commitWaypointSelect(canvas) {
     const startWorld = this._canvasToWorld(this._waypointStartX, this._waypointStartY, canvas);
     if (!startWorld) {
       App.toast('Cannot calculate coordinates without map data', 'error');
+      return;
+    }
+
+    if (this._waypointSelectionOptions.twoClick && !this._waypointDirectionPending) {
+      this._waypointDirectionPending = true;
+      this._waypointCurrentX = this._waypointStartX;
+      this._waypointCurrentY = this._waypointStartY;
+      this._waypointSelectionOptions.onPhaseChange?.('direction', {
+        x: startWorld.x,
+        y: startWorld.y
+      });
+      this.requestRender();
       return;
     }
 
@@ -3107,10 +3946,39 @@ const RosManager = {
     if (this._waypointSelectCallback) {
       this._waypointSelectCallback(startWorld.x, startWorld.y, yawRad);
     }
+    if (this._waypointSelectMode && this._waypointSelectionOptions.twoClick) {
+      this._prepareNextWaypointSelection();
+    } else {
+      this._waypointDirectionPending = false;
+    }
   },
 
   // Draw waypoint select preview arrow
   _drawWaypointSelectPreview(ctx) {
+    if (this._waypointHoverActive
+        && !this._waypointDragging
+        && !this._waypointDirectionPending) {
+      const x = this._waypointCurrentX;
+      const y = this._waypointCurrentY;
+      ctx.save();
+      ctx.strokeStyle = '#67e8f9';
+      ctx.fillStyle = 'rgba(8, 145, 178, 0.18)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.arc(x, y, 10, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(x - 14, y);
+      ctx.lineTo(x + 14, y);
+      ctx.moveTo(x, y - 14);
+      ctx.lineTo(x, y + 14);
+      ctx.stroke();
+      ctx.restore();
+      return;
+    }
     const sx = this._waypointStartX;
     const sy = this._waypointStartY;
     const ex = this._waypointCurrentX;
@@ -3628,6 +4496,10 @@ const RosManager = {
     document.getElementById('btn-lifelong-stop').addEventListener('click', () => this._stopLifelong());
     // Save Map
     document.getElementById('btn-save-map').addEventListener('click', () => this._saveMap());
+    const confirmLoopClosure = document.getElementById('btn-loop-closure-confirm');
+    if (confirmLoopClosure) {
+      confirmLoopClosure.addEventListener('click', () => this._dismissLoopClosureNotice());
+    }
   },
 
   _callMappingService(serviceName, serviceType, args, statusEl, successMsg, errorMsg, callback) {
@@ -3692,9 +4564,12 @@ const RosManager = {
   },
 
   _updateSlamButtons() {
-    document.getElementById('btn-slam-start').disabled = this._slamRunning;
-    document.getElementById('btn-slam-stop').disabled = !this._slamRunning;
+    const start = document.getElementById('btn-slam-start');
+    const stop = document.getElementById('btn-slam-stop');
+    if (start) start.disabled = this._slamRunning;
+    if (stop) stop.disabled = !this._slamRunning;
     const status = document.getElementById('slam-status');
+    if (!status) return;
     if (this._slamRunning) {
       status.textContent = 'Running';
       status.style.color = '#4ade80';
@@ -3705,9 +4580,12 @@ const RosManager = {
   },
 
   _updateLifelongButtons() {
-    document.getElementById('btn-lifelong-start').disabled = this._lifelongRunning;
-    document.getElementById('btn-lifelong-stop').disabled = !this._lifelongRunning;
+    const start = document.getElementById('btn-lifelong-start');
+    const stop = document.getElementById('btn-lifelong-stop');
+    if (start) start.disabled = this._lifelongRunning;
+    if (stop) stop.disabled = !this._lifelongRunning;
     const status = document.getElementById('lifelong-status');
+    if (!status) return;
     if (this._lifelongRunning) {
       status.textContent = 'Running';
       status.style.color = '#4ade80';
@@ -3773,9 +4651,13 @@ const RosManager = {
     this._publishRoutineMode('SLAM', statusEl, 'Running', (ok) => {
       if (ok) {
         this._slamRunning = true;
+        this._currentRoutineMode = 'SLAM';
+        const slot = App.robotSlots[App.activeSlotIndex];
+        if (slot) slot.routineMode = 'SLAM';
         this._modeManualSet = true;  // Disable auto mode detection
         this._updateSlamButtons();
         this._subscribeSlamPose();
+        this._enableMappingPathLayer();
         // Clear map cache for fresh SLAM map
         this._mapImageCanvas = null;
         this._startSlamTrail();
@@ -3788,10 +4670,14 @@ const RosManager = {
     this._publishRoutineMode('NAV', statusEl, 'Off', (ok) => {
       if (ok) {
         this._slamRunning = false;
+        this._currentRoutineMode = 'NAV';
+        const slot = App.robotSlots[App.activeSlotIndex];
+        if (slot) slot.routineMode = 'NAV';
         this._modeManualSet = false;  // Re-enable auto mode detection
         this._updateSlamButtons();
         this._unsubscribeSlamPose();
         this._stopSlamTrail();
+        this._updateLoopClosureStatus();
         this._killSlamToolbox();
         this._restorePreMapModeBackup();
       }
@@ -3824,6 +4710,7 @@ const RosManager = {
     this._slamVertices = [];
     this._slamStartPose = this.robotPose ? { ...this.robotPose } : null;
     this._slamLastVertexDist = 0;
+    this._resetLoopClosureSession();
 
     // Record trail at 5Hz (200ms)
     if (this._slamTrailTimer) clearInterval(this._slamTrailTimer);
@@ -3998,7 +4885,8 @@ const RosManager = {
         ctx.setLineDash([]);
         ctx.restore();
 
-        // "Loop" label at midpoint
+        // This is only a geometric candidate. Actual acceptance is determined
+        // from slam_toolbox loop_slam_edges and shown by the success UI.
         const mx = (rp.x + sp.x) / 2;
         const my = (rp.y + sp.y) / 2;
         const loopFontSize = Math.max(9, 6 / this.mapZoom);
@@ -4006,8 +4894,8 @@ const RosManager = {
         ctx.fillStyle = '#00ff88';
         ctx.strokeStyle = '#000';
         ctx.lineWidth = lw;
-        ctx.strokeText('LOOP', mx, my - 4);
-        ctx.fillText('LOOP', mx, my - 4);
+        ctx.strokeText('LOOP?', mx, my - 4);
+        ctx.fillText('LOOP?', mx, my - 4);
       }
 
       // Also check proximity to ANY earlier trail segment (not just start)
@@ -4098,15 +4986,12 @@ const RosManager = {
     this._mapImageCanvas = null;
 
     // Re-subscribe — this will get the latched message from map_server
-    const chkMap = document.getElementById('chk-map');
-    if (chkMap && chkMap.checked) {
-      const capturedIndex = slotIndex;
-      this._subscribeSlotTopic(slotIndex, 'map', `/${rid}/map`, 'nav_msgs/OccupancyGrid', (msg) => {
-        if (capturedIndex !== App.activeSlotIndex) return;
-        this.renderMap(msg);
-      });
-      console.log('[Map] Re-subscribed to map topic');
-    }
+    const capturedIndex = slotIndex;
+    this._subscribeSlotTopic(slotIndex, 'map', `/${rid}/map`, 'nav_msgs/OccupancyGrid', (msg) => {
+      if (capturedIndex !== App.activeSlotIndex) return;
+      this.renderMap(msg);
+    });
+    console.log('[Map] Re-subscribed to map topic');
   },
 
   // Kill slam_toolbox node to stop it from publishing stale map data.
@@ -4171,9 +5056,13 @@ const RosManager = {
     this._publishRoutineMode('LIFELONG', statusEl, 'Running', (ok) => {
       if (ok) {
         this._lifelongRunning = true;
+        this._currentRoutineMode = 'LIFELONG';
+        const slot = App.robotSlots[App.activeSlotIndex];
+        if (slot) slot.routineMode = 'LIFELONG';
         this._modeManualSet = true;  // Disable auto mode detection
         this._updateLifelongButtons();
         this._subscribeSlamPose();
+        this._enableMappingPathLayer();
         // Clear map cache for fresh mapping
         this._mapImageCanvas = null;
         this._startSlamTrail();
@@ -4186,10 +5075,14 @@ const RosManager = {
     this._publishRoutineMode('NAV', statusEl, 'Off', (ok) => {
       if (ok) {
         this._lifelongRunning = false;
+        this._currentRoutineMode = 'NAV';
+        const slot = App.robotSlots[App.activeSlotIndex];
+        if (slot) slot.routineMode = 'NAV';
         this._modeManualSet = false;  // Re-enable auto mode detection
         this._updateLifelongButtons();
         this._unsubscribeSlamPose();
         this._stopSlamTrail();
+        this._updateLoopClosureStatus();
         this._killSlamToolbox();
         this._restorePreMapModeBackup();
       }

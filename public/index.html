@@ -7,8 +7,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/style.css?v=20260724-test-fleet-sim">
-  <link rel="stylesheet" href="css/can-diagnostics.css">
+  <link rel="stylesheet" href="css/style.css?v=20260725-loop-closure-ui">
+  <link rel="stylesheet" href="css/can-diagnostics.css?v=20260725-responsive-layout">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
 </head>
 <body>
@@ -162,18 +162,83 @@
             <button id="btn-map-panel-collapse" class="btn btn-ghost btn-small" data-i18n-title="map.collapse" title="Collapse/Expand Map Panel">◀</button>
           </div>
           <div class="map-controls">
-            <label><input type="checkbox" id="chk-map"> Map</label>
-            <label><input type="checkbox" id="chk-robot-pose"> Robot</label>
-            <select id="robot-icon-style" class="robot-icon-select" title="Robot Icon Style">
-              <option value="footprint">Simple</option>
-              <option value="amr">AMR</option>
-              <option value="turtle">Turtle</option>
-            </select>
-            <label><input type="checkbox" id="chk-lidar"> LiDAR</label>
-            <input type="color" id="lidar-color" value="#ff3333" title="LiDAR Color" class="lidar-color-picker">
-            <label class="lidar-size-label">Size:
-              <input type="range" id="lidar-point-size" min="1" max="8" step="0.5" value="2.5" class="lidar-size-slider">
-            </label>
+            <details id="map-layer-menu" class="map-layer-menu">
+              <summary>
+                <span>Layers</span>
+                <span id="map-layer-count" class="map-layer-count">2</span>
+              </summary>
+              <div class="map-layer-popover">
+                <div class="map-layer-heading">Base</div>
+                <label class="map-layer-item">
+                  <span><input type="checkbox" id="chk-map" checked> Map</span>
+                  <small>/{robotId}/map</small>
+                </label>
+                <label class="map-layer-item">
+                  <span><input type="checkbox" id="chk-robot-pose" checked> Robot</span>
+                  <small>TF / robot_state</small>
+                </label>
+
+                <div class="map-layer-heading">Sensors</div>
+                <label class="map-layer-item">
+                  <span><input type="checkbox" id="chk-lidar"> LiDAR</span>
+                  <small>/{robotId}/scan</small>
+                </label>
+                <label class="map-layer-item">
+                  <span><input type="checkbox" id="chk-lidar-front"> Front LiDAR</span>
+                  <small>/{robotId}/scan_1</small>
+                </label>
+                <label class="map-layer-item">
+                  <span><input type="checkbox" id="chk-lidar-rear"> Rear LiDAR</span>
+                  <small>/{robotId}/scan_2</small>
+                </label>
+                <label class="map-layer-item">
+                  <span><input type="checkbox" id="chk-footprint"> Footprint</span>
+                  <small>local_costmap/footprint</small>
+                </label>
+
+                <div class="map-layer-heading">Navigation / Mapping</div>
+                <label class="map-layer-item">
+                  <span><input type="checkbox" id="chk-local-costmap"> Local Costmap</span>
+                  <small>local_costmap/costmap</small>
+                </label>
+                <label class="map-layer-item">
+                  <span><input type="checkbox" id="chk-nav-path"> Navigation Path</span>
+                  <small>best_local_trajectories_nav</small>
+                </label>
+                <label class="map-layer-item">
+                  <span><input type="checkbox" id="chk-nav-goal"> Current Goal</span>
+                  <small>WaypointsGlobalPlanner/current_goal</small>
+                </label>
+                <label class="map-layer-item">
+                  <span><input type="checkbox" id="chk-dock-pose"> Dock Pose</span>
+                  <small>/{robotId}/dock_pose</small>
+                </label>
+                <label class="map-layer-item map-layer-item-accent">
+                  <span><input type="checkbox" id="chk-mapping-path"> Mapping Path</span>
+                  <small>lio_sam/mapping/path + pose trail</small>
+                </label>
+                <label class="map-layer-item">
+                  <span><input type="checkbox" id="chk-map-correction"> Map Correction</span>
+                  <small>/{robotId}/map_correction</small>
+                </label>
+
+                <div class="map-layer-settings">
+                  <label>Robot
+                    <select id="robot-icon-style" class="robot-icon-select" title="Robot Icon Style">
+                      <option value="footprint">Simple</option>
+                      <option value="amr">AMR</option>
+                      <option value="turtle">Turtle</option>
+                    </select>
+                  </label>
+                  <label>LiDAR
+                    <input type="color" id="lidar-color" value="#ff3333" title="LiDAR Color" class="lidar-color-picker">
+                  </label>
+                  <label class="lidar-size-label">Size
+                    <input type="range" id="lidar-point-size" min="1" max="8" step="0.5" value="2.5" class="lidar-size-slider">
+                  </label>
+                </div>
+              </div>
+            </details>
             <span id="map-info"></span>
           </div>
           <div class="map-controls map-controls-row2">
@@ -298,10 +363,48 @@
           </div>
           <div class="map-canvas-container">
             <canvas id="map-canvas" width="600" height="600"></canvas>
+            <div id="loop-closure-status" class="loop-closure-status waiting" role="status" aria-live="polite" hidden>
+              <span class="loop-closure-status-icon" aria-hidden="true">↻</span>
+              <span class="loop-closure-status-copy">
+                <strong id="loop-closure-status-title">Loop Closure 대기 중</strong>
+                <small id="loop-closure-status-detail">이전에 지나간 장소를 같은 방향으로 천천히 다시 주행하세요</small>
+              </span>
+              <b id="loop-closure-status-count">그래프 노드 0개</b>
+            </div>
+            <div id="loop-closure-notice" class="loop-closure-notice" role="alert" aria-live="assertive" hidden>
+              <div class="loop-closure-notice-card">
+                <div class="loop-closure-success-icon" aria-hidden="true">✓</div>
+                <div class="loop-closure-notice-copy">
+                  <strong>Loop Closure 성사!</strong>
+                  <p>이전에 지나간 위치가 인식되어 맵 연결이 정상적으로 보정되었습니다.</p>
+                  <small id="loop-closure-notice-count">이번 맵핑에서 총 1회 연결 보정</small>
+                </div>
+                <button type="button" id="btn-loop-closure-confirm" class="btn btn-primary">확인</button>
+              </div>
+            </div>
             <div id="quick-task-map-hud" class="quick-task-map-hud" hidden>
               <strong>⚡ Quick Task 포인트 입력</strong>
               <span id="quick-task-map-hud-status">오른쪽에서 입력 도구를 선택하세요.</span>
             </div>
+            <div id="quick-task-map-action-selection" class="quick-task-map-action-selection" hidden>
+              <strong id="quick-task-map-action-title">선택 Action</strong>
+              <span id="quick-task-map-action-detail">Action을 선택하세요.</span>
+            </div>
+            <aside id="active-task-map-panel" class="active-task-map-panel" hidden>
+              <div class="active-task-map-header">
+                <div>
+                  <strong id="active-task-map-title">실행 Task</strong>
+                  <small id="active-task-map-robot">--</small>
+                </div>
+                <span id="active-task-map-state" class="task-state-badge">IDLE</span>
+              </div>
+              <div class="active-task-map-options">
+                <label><input type="checkbox" id="active-task-show-route" checked> 경로 표시</label>
+                <label><input type="checkbox" id="active-task-show-summary"> 전체 정보</label>
+                <button type="button" id="btn-active-task-info" class="btn btn-small">Task Info</button>
+              </div>
+              <div id="active-task-map-summary" class="active-task-map-summary" hidden></div>
+            </aside>
             <div id="map-correction-badge" class="map-correction-badge waiting" title="실시간 /{robotId}/map_correction">
               <span id="map-correction-level">● Map correction</span>
               <span id="map-correction-value">수신 대기</span>
@@ -356,6 +459,14 @@
                 <span id="fleet-control-summary" class="fleet-control-summary">연결된 로봇을 기다리는 중...</span>
               </div>
               <div class="fleet-header-tools">
+                <label class="fleet-header-task-view">
+                  <input id="fleet-show-task-routes" type="checkbox" checked>
+                  Task 경로
+                </label>
+                <label class="fleet-header-task-view">
+                  <input id="fleet-show-task-labels" type="checkbox" checked>
+                  Task 이름
+                </label>
                 <label class="fleet-header-icon-size">
                   <span>로봇 아이콘</span>
                   <input id="fleet-icon-size" class="fleet-icon-size-slider"
@@ -410,6 +521,7 @@
                     <input id="fleet-task-loop" type="number" min="0" max="9999" value="1" title="0 = 무한 반복">
                   </label>
                   <div class="fleet-task-buttons">
+                    <button id="btn-fleet-running-task-info" class="btn btn-small" disabled>실행 Task Info</button>
                     <button id="btn-fleet-task-run" class="btn btn-small btn-primary" disabled>Task 실행</button>
                     <button id="btn-fleet-task-cancel" class="btn btn-small btn-danger" disabled>실행 취소</button>
                   </div>
@@ -751,6 +863,7 @@
                 <span class="task-feedback-message">실행 중인 Task 정보가 없습니다.</span>
               </div>
               <div class="task-control-bar">
+                <button type="button" id="btn-running-task-info" class="btn btn-small">Task Info 보기</button>
                 <button type="button" id="btn-pause-task" class="btn btn-small task-control-pause">일시정지</button>
                 <button type="button" id="btn-resume-task" class="btn btn-small task-control-resume">재개</button>
                 <button type="button" id="btn-cancel-task" class="btn btn-small btn-danger task-control-cancel">Task 즉시 취소</button>
@@ -798,6 +911,7 @@
                 </div>
                 <div class="task-builder-heading-actions">
                   <button type="button" id="btn-close-quick-task" class="btn btn-small">취소</button>
+                  <button type="button" id="btn-quick-task-info" class="btn btn-small">Task Info 보기</button>
                   <button type="button" id="btn-quick-task-edit" class="btn btn-small">상세 편집</button>
                   <button type="button" id="btn-save-quick-task" class="btn btn-small btn-primary">Task 저장</button>
                   <button type="button" id="btn-run-quick-task" class="btn btn-small quick-task-run"
@@ -820,19 +934,35 @@
 
               <div class="quick-task-guide">
                 <strong>빠른 반복시험</strong>
-                <span>① 주행 포인트 입력 → ② 필요하면 도킹 시작점/Standby 추가 → ③ 반복 횟수 설정 → ④ 저장 후 실행</span>
+                <span>① WayPoint는 다른 도구를 고를 때까지 연속 입력 → ② 도킹은 처음부터 선택 가능하며 순차 질문 입력 → ③ 반복 설정 → ④ 저장 후 실행</span>
               </div>
 
               <div class="quick-task-tools">
                 <button type="button" id="btn-quick-waypoint" class="btn btn-small"
-                        title="맵에서 한 지점을 찍어 Way_Point Action을 추가합니다">📍 WayPoint</button>
+                        title="첫 클릭으로 위치, 두 번째 클릭으로 방향을 지정해 Way_Point Action을 추가합니다">📍 WayPoint</button>
                 <button type="button" id="btn-quick-trajectory" class="btn btn-small"
-                        title="맵에서 여러 경유점을 연속으로 찍어 TrajectoryFollowing Action을 만듭니다">〰 Trajectory 시작</button>
+                        title="각 경유점의 위치와 방향을 두 번의 클릭으로 지정해 TrajectoryFollowing Action을 만듭니다">〰 Trajectory 시작</button>
                 <button type="button" id="btn-quick-trajectory-finish" class="btn btn-small btn-primary" disabled
                         title="현재 Trajectory 경유점 입력을 완료합니다">Trajectory 완료</button>
                 <button type="button" id="btn-quick-docking" class="btn btn-small"
-                        title="맵에서 도킹 진입 시작점을 찍고 WayPoint + Docking Action을 추가합니다">🔌 도킹 시작점</button>
+                        title="도킹 위치·방향 지정 후 Argument와 Parameter를 추천값과 함께 순서대로 입력합니다">🔌 도킹 시작점</button>
+                <button type="button" id="btn-quick-docking-out" class="btn btn-small"
+                        title="설정된 거리만큼 도킹 위치에서 이탈하는 DockingOut Action을 추가합니다">↩ DockingOut 추가</button>
               </div>
+              <details class="quick-task-shortcut-help">
+                <summary>⌨ 단축키 도움말</summary>
+                <div class="quick-task-shortcuts" aria-label="Quick Task 단축키">
+                  <span><kbd>W</kbd> WayPoint 연속</span>
+                  <span><kbd>T</kbd> Trajectory</span>
+                  <span><kbd>D</kbd> 도킹</span>
+                  <span><kbd>O</kbd> DockingOut</span>
+                  <span><kbd>S</kbd> Standby</span>
+                  <span><kbd>F</kbd> Trajectory 완료</span>
+                  <span><kbd>Backspace</kbd> 마지막 취소</span>
+                  <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> 저장 후 실행</span>
+                  <span><kbd>Esc</kbd> 맵 입력 중지</span>
+                </div>
+              </details>
 
               <div class="quick-task-options">
                 <details>
@@ -857,7 +987,7 @@
                 </details>
 
                 <details>
-                  <summary>도킹 설정</summary>
+                  <summary>도킹 추천 기본값 · 마법사 시작값</summary>
                   <div class="quick-task-option-grid">
                     <label>충전 여부
                       <select id="quick-dock-charge">
@@ -895,19 +1025,40 @@
                 </details>
               </div>
 
-              <div class="quick-standby-row">
-                <label for="quick-standby-duration">중간 Standby</label>
-                <input type="number" id="quick-standby-duration" min="0" step="0.1" value="5">
-                <span>초</span>
-                <button type="button" id="btn-quick-standby" class="btn btn-small">＋ Standby 추가</button>
+              <div class="quick-inline-actions">
+                <div class="quick-standby-row">
+                  <label for="quick-standby-duration">중간 Standby</label>
+                  <input type="number" id="quick-standby-duration" min="0" step="0.1" value="5">
+                  <span>초</span>
+                  <button type="button" id="btn-quick-standby" class="btn btn-small">＋ Standby 추가</button>
+                </div>
+                <div class="quick-standby-row">
+                  <label for="quick-docking-out-distance">DockingOut 거리</label>
+                  <input type="number" id="quick-docking-out-distance" step="0.1" value="-1.0">
+                  <span>m</span>
+                  <button type="button" id="btn-quick-docking-out-inline" class="btn btn-small">↩ DockingOut 추가</button>
+                </div>
               </div>
 
               <div id="quick-task-status" class="quick-task-status">
                 도구를 선택한 뒤 왼쪽 맵에서 위치를 지정하세요.
               </div>
 
+              <div class="quick-action-preview">
+                <div class="quick-action-preview-head">
+                  <strong>실시간 Action 목록</strong>
+                  <div>
+                    <span><b id="quick-task-action-count">0</b> actions</span>
+                    <button type="button" id="btn-quick-action-undo-delete" class="btn btn-mini" disabled>↶ 삭제 취소</button>
+                  </div>
+                </div>
+                <div id="quick-task-action-preview" class="quick-action-preview-list">
+                  <span class="quick-action-preview-empty">추가된 Action 없음</span>
+                </div>
+              </div>
+
               <div class="quick-task-sequence-header">
-                <strong>Task 순서 (<span id="quick-task-count">0</span>)</strong>
+                <strong>구성 항목 (<span id="quick-task-count">0</span>)</strong>
                 <div>
                   <button type="button" id="btn-quick-task-undo" class="btn btn-small" disabled>마지막 취소</button>
                   <button type="button" id="btn-quick-task-clear" class="btn btn-small">전체 비우기</button>
@@ -925,6 +1076,7 @@
                 <p>한글 설명 옆의 작은 글씨는 실제 ROS/YAML 파라미터 이름입니다.</p>
               </div>
               <div class="task-builder-heading-actions">
+                <button type="button" id="btn-builder-task-info" class="btn btn-small">Task Info 보기</button>
                 <button type="button" id="btn-close-task-builder" class="btn btn-small">취소</button>
                 <button type="button" id="btn-save-task-builder" class="btn btn-small btn-primary">Task 저장</button>
               </div>
@@ -2331,10 +2483,10 @@ free -h"></textarea>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-search@0.13.0/lib/xterm-addon-search.min.js"></script>
   <script src="js/i18n.js"></script>
-  <script src="js/app.js?v=20260724-test-fleet-sim"></script>
+  <script src="js/app.js?v=20260725-responsive-layout"></script>
   <script src="js/dashboard.js"></script>
-  <script src="js/ros-manager.js?v=20260724-quick-task-builder"></script>
-  <script src="js/test-mode.js?v=20260724-test-fleet-sim"></script>
+  <script src="js/ros-manager.js?v=20260725-loop-closure-ui"></script>
+  <script src="js/test-mode.js?v=20260724-task-info-direction"></script>
   <script src="js/ros-info.js"></script>
   <script src="js/map-context-menu.js"></script>
   <!-- Test Mode Loading Overlay -->
@@ -2346,6 +2498,49 @@ free -h"></textarea>
         <div class="testmode-progress-fill" id="testmode-progress-fill"></div>
       </div>
       <div class="testmode-loading-pct" id="testmode-loading-pct">0%</div>
+    </div>
+  </div>
+
+  <!-- Reusable Task Info Modal -->
+  <div id="task-info-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="task-info-modal-title">
+    <div class="modal-content task-info-modal-content">
+      <div class="task-info-modal-header">
+        <div>
+          <h3 id="task-info-modal-title">Task Info</h3>
+          <p id="task-info-modal-subtitle">Task 전체 정보</p>
+        </div>
+        <button type="button" id="btn-task-info-close" class="modal-close" aria-label="닫기">&times;</button>
+      </div>
+      <div id="task-info-modal-body" class="task-info-modal-body"></div>
+      <div class="modal-buttons">
+        <button type="button" id="btn-task-info-close2" class="btn">닫기</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Quick Docking sequential argument/parameter wizard -->
+  <div id="quick-dock-wizard" class="modal" role="dialog" aria-modal="true" aria-labelledby="quick-dock-wizard-title">
+    <div class="modal-content quick-dock-wizard-content">
+      <div class="quick-dock-wizard-head">
+        <div>
+          <h3 id="quick-dock-wizard-title">도킹 설정</h3>
+          <p id="quick-dock-wizard-progress">Argument 1/1</p>
+        </div>
+        <button type="button" id="btn-quick-dock-cancel-x" class="modal-close" aria-label="취소">&times;</button>
+      </div>
+      <div class="quick-dock-wizard-field">
+        <label id="quick-dock-wizard-label" for="quick-dock-wizard-input">항목</label>
+        <small id="quick-dock-wizard-key">key</small>
+        <div id="quick-dock-wizard-control"></div>
+        <p id="quick-dock-wizard-description"></p>
+        <div id="quick-dock-wizard-recommendation" class="quick-dock-wizard-recommendation"></div>
+      </div>
+      <div class="quick-dock-wizard-actions">
+        <button type="button" id="btn-quick-dock-cancel" class="btn">취소</button>
+        <button type="button" id="btn-quick-dock-back" class="btn">이전</button>
+        <button type="button" id="btn-quick-dock-defaults" class="btn btn-small">남은 추천값 적용</button>
+        <button type="button" id="btn-quick-dock-next" class="btn btn-primary">다음</button>
+      </div>
     </div>
   </div>
 
@@ -2376,7 +2571,7 @@ free -h"></textarea>
   <script src="js/ssh-terminal.js"></script>
   <script src="js/file-transfer.js?v=20260723-active-robot-session"></script>
   <script src="js/commands.js"></script>
-  <script src="js/action-sender.js?v=20260724-test-fleet-sim"></script>
+  <script src="js/action-sender.js?v=20260725-quick-action-edit-map"></script>
   <script src="js/jog-control.js?v=20260724-conveyor-commands"></script>
   <script src="js/vel-monitor.js"></script>
   <script src="js/docking-test.js"></script>
@@ -2397,7 +2592,7 @@ free -h"></textarea>
   <script src="js/no-go-zone-editor.js"></script>
   <script src="js/map-version-control.js"></script>
   <script src="js/fleet-dashboard.js"></script>
-  <script src="js/fleet-control.js?v=20260723-fleet-robot-shape"></script>
+  <script src="js/fleet-control.js?v=20260724-task-route-overlay"></script>
   <script src="js/robot-comparison.js"></script>
   <script src="js/diagnostics.js"></script>
   <script src="js/lidar-align.js"></script>

@@ -573,3 +573,77 @@
     min-width: 90vw;
   }
 }
+
+/* Resolution-adaptive integration with the EasyLoop workspace. */
+@media (max-width: 1180px) {
+  .can-diag-container {
+    height: auto;
+    min-height: 0;
+  }
+
+  .can-diag-left {
+    width: clamp(250px, 32vw, 300px);
+    min-width: 250px;
+  }
+}
+
+@media (max-width: 980px) {
+  .can-diag-container {
+    flex-direction: column;
+  }
+
+  .can-diag-left {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .can-robot-view {
+    overflow-x: auto;
+  }
+
+  .can-summary-bar {
+    align-items: flex-start;
+  }
+
+  .summary-can-status {
+    margin-left: 0;
+  }
+}
+
+@media (max-width: 620px) {
+  .can-diag-container {
+    gap: 8px;
+  }
+
+  .can-actions,
+  .can-modal .modal-actions {
+    flex-wrap: wrap;
+  }
+
+  .can-actions .btn,
+  .can-modal .modal-actions .btn {
+    flex: 1 1 120px;
+  }
+
+  .can-modal-overlay {
+    align-items: flex-start;
+    padding: 5px;
+  }
+
+  .can-modal {
+    box-sizing: border-box;
+    width: calc(100vw - 10px);
+    min-width: 0;
+    max-width: calc(100vw - 10px);
+    max-height: calc(100dvh - 10px);
+    padding: 14px;
+  }
+
+  .compare-table {
+    min-width: 520px;
+  }
+
+  .can-modal:has(.compare-table) {
+    overflow-x: auto;
+  }
+}

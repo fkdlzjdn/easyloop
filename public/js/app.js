@@ -383,7 +383,7 @@ const App = {
 
     const showMainContent = (role) => {
       overlay.style.display = 'none';
-      mainContent.style.display = 'block';
+      mainContent.style.display = 'flex';
       error.style.display = 'none';
       this._userRole = role || 'user';
       this._applyRoleRestrictions();
@@ -632,7 +632,27 @@ const App = {
   setupMobileSidebar() {
     const btn = document.getElementById('btn-mobile-sidebar');
     const sidebar = document.querySelector('.sidebar');
-    if (!btn || !sidebar) return;
+    const mapPanel = document.getElementById('panel-map');
+    const mapCollapseBtn = document.getElementById('btn-map-panel-collapse');
+    const mapExpandBtn = document.getElementById('btn-map-panel-expand');
+    if (!btn) return;
+
+    // EasyLoop has no legacy sidebar. On compact screens this button toggles
+    // the persistent map so the operator can give the active tab more room.
+    if (!sidebar) {
+      btn.textContent = '🗺';
+      btn.title = '지도 패널 표시/숨김';
+      btn.setAttribute('aria-label', '지도 패널 표시/숨김');
+      btn.addEventListener('click', () => {
+        if (!mapPanel) return;
+        if (mapPanel.classList.contains('collapsed')) {
+          mapExpandBtn?.click();
+        } else {
+          mapCollapseBtn?.click();
+        }
+      });
+      return;
+    }
 
     btn.addEventListener('click', () => {
       sidebar.classList.toggle('mobile-open');

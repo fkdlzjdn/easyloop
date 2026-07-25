@@ -487,6 +487,304 @@ describe('built-in single-action tasks', () => {
     expect(yaml).toContain('          action_args: [2, 3, 4, 5, 1.57]');
   });
 
+  test('keeps WayPoint capture active until another Quick Task tool is selected', () => {
+    const { manager, context } = loadActionSender();
+    let capture;
+    const exitWaypointSelectMode = jest.fn();
+    const elements = {
+      'quick-task-builder-view': { hidden: false },
+      'tab-action': { classList: { contains: jest.fn(() => true) } }
+    };
+    context.RosManager = {
+      lastMapMsg: {},
+      _enterWaypointSelectMode: jest.fn(callback => {
+        capture = callback;
+      }),
+      _exitWaypointSelectMode: exitWaypointSelectMode
+    };
+    context.document.getElementById.mockImplementation(id => elements[id] || null);
+    manager._builderMode = 'quick';
+    manager.renderQuickTask = jest.fn();
+
+    manager.startQuickMapCapture('waypoint');
+    exitWaypointSelectMode.mockClear();
+    capture(1, 2, 0.1);
+    capture(3, 4, 0.2);
+
+    expect(manager._quickTaskItems).toHaveLength(2);
+    expect(manager._quickTaskItems.map(item => item.pose)).toEqual([
+      { x: 1, y: 2, theta: 0.1 },
+      { x: 3, y: 4, theta: 0.2 }
+    ]);
+    expect(manager._quickTaskMode).toBe('waypoint');
+    expect(exitWaypointSelectMode).not.toHaveBeenCalled();
+    expect(context.RosManager._enterWaypointSelectMode).toHaveBeenCalledTimes(3);
+
+    manager.startQuickMapCapture('docking');
+
+    expect(exitWaypointSelectMode).toHaveBeenCalledTimes(1);
+    expect(manager._quickTaskMode).toBe('docking');
+  });
+
+  test('Quick Task shortcuts work only in the open builder and support docking first', () => {
+    const { manager, context } = loadActionSender();
+    const buttons = {
+      'btn-quick-waypoint': { click: jest.fn() },
+      'btn-quick-docking': { click: jest.fn() },
+      'btn-quick-docking-out': { click: jest.fn() },
+      'btn-run-quick-task': { click: jest.fn() }
+    };
+    const view = { hidden: false };
+    const taskTab = { classList: { contains: jest.fn(() => true) } };
+    context.document.getElementById.mockImplementation(id =>
+      id === 'quick-task-builder-view'
+        ? view
+        : id === 'tab-action'
+          ? taskTab
+          : buttons[id] || null
+    );
+    manager._builderMode = 'quick';
+
+    const waypointEvent = {
+      key: 'w',
+      target: { tagName: 'DIV' },
+      preventDefault: jest.fn(),
+      stopImmediatePropagation: jest.fn()
+    };
+    expect(manager._handleQuickTaskShortcut(waypointEvent)).toBe(true);
+    expect(buttons['btn-quick-waypoint'].click).toHaveBeenCalledTimes(1);
+
+    const dockingEvent = {
+      key: 'd',
+      target: { tagName: 'DIV' },
+      preventDefault: jest.fn(),
+      stopImmediatePropagation: jest.fn()
+    };
+    expect(manager._handleQuickTaskShortcut(dockingEvent)).toBe(true);
+    expect(buttons['btn-quick-docking'].click).toHaveBeenCalledTimes(1);
+    expect(manager._quickTaskItems).toHaveLength(0);
+
+    const dockingOutEvent = {
+      key: 'o',
+      target: { tagName: 'DIV' },
+      preventDefault: jest.fn(),
+      stopImmediatePropagation: jest.fn()
+    };
+    expect(manager._handleQuickTaskShortcut(dockingOutEvent)).toBe(true);
+    expect(buttons['btn-quick-docking-out'].click).toHaveBeenCalledTimes(1);
+
+    const runEvent = {
+      key: 'Enter',
+      ctrlKey: true,
+      target: { tagName: 'INPUT' },
+      preventDefault: jest.fn(),
+      stopImmediatePropagation: jest.fn()
+    };
+    expect(manager._handleQuickTaskShortcut(runEvent)).toBe(true);
+    expect(buttons['btn-run-quick-task'].click).toHaveBeenCalledTimes(1);
+
+    view.hidden = true;
+    expect(manager._handleQuickTaskShortcut(waypointEvent)).toBe(false);
+    expect(buttons['btn-quick-waypoint'].click).toHaveBeenCalledTimes(1);
+  });
+
+  test('compiles a docking-first Quick Task without requiring a preceding WayPoint', () => {
+    const { manager } = loadActionSender();
+
+    const actions = manager.compileQuickTaskItems([{
+      kind: 'docking',
+      pose: { x: 6, y: 7, theta: 1.2 },
+      docking: { args: [0, 1, 1, 1], params: {} }
+    }]);
+
+    expect(actions.map(action => action.actionType)).toEqual(['0x01', '0x08']);
+    expect(actions[0].name).toBe('Dock_Start_1');
+    expect(actions[0].args).toEqual([6, 7, 1.2]);
+  });
+
+  test('Quick WayPoint uses straight path without avoid mode and supports DockingOut', () => {
+    const { manager } = loadActionSender();
+
+    const actions = manager.compileQuickTaskItems([
+      { kind: 'waypoint', pose: { x: 1, y: 2, theta: 0.3 } },
+      { kind: 'docking-out', distance: -1.5 }
+    ]);
+
+    expect(actions.map(action => action.actionType)).toEqual(['0x01', '0x10']);
+    expect(actions[0].params.find(param => param.param_name === 'avoid_mode').value)
+      .toBe('false');
+    expect(actions[0].params.find(param => param.param_name === 'straight_path').value)
+      .toBe('true');
+    expect(actions[1].name).toBe('DockingOut_1');
+    expect(actions[1].args).toEqual([-1.5]);
+  });
+
+  test('renders the compiled ROS Actions as a compact live Quick Task list', () => {
+    const { manager, context } = loadActionSender();
+    const makeNode = tag => ({
+      tag,
+      children: [],
+      className: '',
+      textContent: '',
+      classList: { add: jest.fn() },
+      addEventListener: jest.fn(),
+      appendChild(child) {
+        this.children.push(child);
+      }
+    });
+    const preview = makeNode('div');
+    Object.defineProperty(preview, 'innerHTML', {
+      set() {
+        this.children = [];
+      }
+    });
+    const count = { textContent: '' };
+    context.document.createElement = jest.fn(makeNode);
+    context.document.getElementById.mockImplementation(id => ({
+      'quick-task-action-preview': preview,
+      'quick-task-action-count': count
+    })[id] || null);
+    manager._quickTaskItems = [
+      { kind: 'waypoint', pose: { x: 1, y: 2, theta: 0 } },
+      {
+        kind: 'docking',
+        pose: { x: 3, y: 4, theta: 1.57 },
+        docking: { args: [0, 1, 1, 1], params: {} }
+      },
+      { kind: 'docking-out', distance: -1 }
+    ];
+
+    manager._renderQuickActionPreview();
+
+    expect(count.textContent).toBe('4');
+    expect(preview.children).toHaveLength(4);
+    expect(preview.children.map(chip => chip.children[1].textContent))
+      .toEqual(['0x01', '0x01', '0x08', '0x10']);
+  });
+
+  test('deletes an Action source atomically and restores it with delete Undo', () => {
+    const { manager } = loadActionSender();
+    manager._quickTaskItems = [
+      { kind: 'waypoint', pose: { x: 1, y: 2, theta: 0 } },
+      {
+        kind: 'docking',
+        pose: { x: 3, y: 4, theta: 1.57 },
+        docking: { args: [0, 1, 1, 1], params: {} }
+      },
+      { kind: 'standby', duration: 5 }
+    ];
+    manager.renderQuickTask = jest.fn();
+    const dockingAction = manager._quickTaskPreviewEntries()
+      .find(entry => entry.action.actionType === '0x08');
+
+    manager.deleteQuickActionPreviewEntry(dockingAction);
+
+    expect(manager._quickTaskItems.map(item => item.kind)).toEqual(['waypoint', 'standby']);
+    expect(manager._quickTaskDeleteUndoStack).toHaveLength(1);
+
+    manager.undoQuickActionDelete();
+
+    expect(manager._quickTaskItems.map(item => item.kind))
+      .toEqual(['waypoint', 'docking', 'standby']);
+    expect(manager._quickTaskDeleteUndoStack).toHaveLength(0);
+  });
+
+  test('selecting a live Action marks its map points and shows Action information', () => {
+    const { manager, context } = loadActionSender();
+    const panel = { hidden: true };
+    const title = { textContent: '' };
+    const detail = { textContent: '' };
+    context.document.getElementById.mockImplementation(id => ({
+      'quick-task-map-action-selection': panel,
+      'quick-task-map-action-title': title,
+      'quick-task-map-action-detail': detail
+    })[id] || null);
+    context.RosManager = { setQuickTaskOverlay: jest.fn() };
+    manager._quickTaskItems = [
+      { kind: 'waypoint', pose: { x: 7, y: 8, theta: 0.5 } }
+    ];
+    const entry = manager._quickTaskPreviewEntries()[0];
+    manager._quickTaskSelectedAction = {
+      key: entry.key,
+      sourceItemIndex: entry.sourceItemIndex,
+      actionOffset: entry.actionOffset,
+      isDraft: false
+    };
+
+    manager._syncQuickTaskOverlay();
+    manager._updateQuickTaskMapActionSelection();
+
+    expect(context.RosManager.setQuickTaskOverlay).toHaveBeenCalledWith([
+      expect.objectContaining({ x: 7, y: 8, selected: true })
+    ]);
+    expect(panel.hidden).toBe(false);
+    expect(title.textContent).toContain('0x01');
+    expect(detail.textContent).toContain('x=7, y=8');
+  });
+
+  test('keeps the docking wizard arguments and user-entered parameters in the compiled Task', () => {
+    const { manager } = loadActionSender();
+    const actions = manager.compileQuickTaskItems([{
+      kind: 'docking',
+      pose: { x: 3, y: 4, theta: 0.75 },
+      docking: {
+        args: [1, -1, 4, 3],
+        params: {
+          dock_dist: '1.45',
+          scan_view: '2',
+          center_offset: '360',
+          target_cfg: 'docking_rack.cfg'
+        }
+      }
+    }]);
+
+    const docking = actions[1];
+    expect(docking.args).toEqual([1, -1, 4, 3]);
+    expect(docking.params.find(param => param.param_name === 'dock_dist').value).toBe('1.45');
+    expect(docking.params.find(param => param.param_name === 'scan_view').value).toBe('2');
+    expect(docking.params.find(param => param.param_name === 'center_offset').value).toBe('360');
+    expect(docking.params.find(param => param.param_name === 'target_cfg').value)
+      .toBe('docking_rack.cfg');
+  });
+
+  test('extracts WayPoint and Trajectory coordinates for the running Task map overlay', () => {
+    const { manager } = loadActionSender();
+
+    const route = manager._extractTaskRoute([
+      { actionType: '0x01', args: [1, 2, 0.5] },
+      { actionType: '0x07', args: [3] },
+      { actionType: '0x15', args: [2, 3, 4, 5, 1.25] }
+    ]);
+
+    expect(route).toHaveLength(3);
+    expect(route[0]).toMatchObject({ x: 1, y: 2, theta: 0.5, actionIndex: 0 });
+    expect(route[1]).toMatchObject({ x: 2, y: 3, actionIndex: 2 });
+    expect(route[1].theta).toBeCloseTo(Math.atan2(2, 2));
+    expect(route[2]).toMatchObject({ x: 4, y: 5, theta: 1.25, actionIndex: 2 });
+  });
+
+  test('exposes Task Info, route visibility controls, and sequential docking questions', () => {
+    const html = fs.readFileSync(
+      path.join(__dirname, '..', 'public', 'index.html'),
+      'utf8'
+    );
+
+    expect(html).toContain('id="btn-builder-task-info"');
+    expect(html).toContain('id="btn-quick-task-info"');
+    expect(html).toContain('id="btn-running-task-info"');
+    expect(html).toContain('id="active-task-show-route"');
+    expect(html).toContain('id="active-task-show-summary"');
+    expect(html).toContain('id="quick-dock-wizard"');
+    expect(html).toContain('id="btn-quick-dock-defaults"');
+    expect(html).toContain('id="btn-quick-docking-out"');
+    expect(html).toContain('id="quick-task-action-preview"');
+    expect(html).toContain('class="quick-task-shortcut-help"');
+    expect(html).toContain('⌨ 단축키 도움말');
+    expect(html).toContain('<kbd>W</kbd> WayPoint 연속');
+    expect(html).toContain('<kbd>O</kbd> DockingOut');
+    expect(html).toContain('<kbd>Ctrl</kbd>+<kbd>Enter</kbd> 저장 후 실행');
+  });
+
   test('labels every Trajectory coordinate pair and the final theta in Task details', () => {
     const { manager } = loadActionSender({
       trajectory: {

@@ -20,6 +20,8 @@ const FleetControl = {
   _selectedSlotIndex: -1,
   _robotHitAreas: [],
   _robotIconSize: 40,
+  _showTaskRoutes: true,
+  _showTaskLabels: true,
   _selectedTaskName: '',
   _taskRunning: false,
   _colors: ['#22c55e', '#38bdf8', '#f59e0b', '#a78bfa', '#f43f5e', '#14b8a6', '#eab308', '#fb7185'],
@@ -46,6 +48,17 @@ const FleetControl = {
     });
     document.getElementById('btn-fleet-task-cancel')?.addEventListener('click', () => {
       this._cancelSelectedTask();
+    });
+    document.getElementById('btn-fleet-running-task-info')?.addEventListener('click', () => {
+      this._showSelectedRunningTaskInfo();
+    });
+    document.getElementById('fleet-show-task-routes')?.addEventListener('change', event => {
+      this._showTaskRoutes = event.target.checked;
+      this.requestRender();
+    });
+    document.getElementById('fleet-show-task-labels')?.addEventListener('change', event => {
+      this._showTaskLabels = event.target.checked;
+      this.requestRender();
     });
     document.addEventListener('easyloop:tasks-changed', () => {
       if (!this._active) return;
@@ -495,6 +508,8 @@ const FleetControl = {
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(mapImage, offsetX, offsetY, drawWidth, drawHeight);
 
+    this._drawRunningTaskRoutes(ctx, info, scale, offsetX, offsetY);
+
     this._connectedIndices().forEach(index => {
       const pose = this._poses.get(index);
       if (!pose) return;
@@ -507,6 +522,41 @@ const FleetControl = {
         radius: Math.max(22, 29 * iconScale)
       });
       this._drawRobot(ctx, point.x, point.y, pose.yaw - point.originYaw, index, pose.receivedAt);
+    });
+  },
+
+  _drawRunningTaskRoutes(ctx, info, scale, offsetX, offsetY) {
+    if (!this._showTaskRoutes || typeof ActionSender === 'undefined') return;
+    this._connectedIndices().forEach(index => {
+      const slot = App.robotSlots[index];
+      const running = slot?.robotId ? ActionSender._runningTasks?.get(slot.robotId) : null;
+      const points = Array.from(running?.points || []);
+      if (points.length === 0) return;
+      const color = this._colorForSlot(slot, index);
+      ctx.save();
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      points.forEach((point, pointIndex) => {
+        const canvasPoint = this._worldToCanvas(point, info, scale, offsetX, offsetY);
+        if (pointIndex > 0) {
+          const previous = this._worldToCanvas(points[pointIndex - 1], info, scale, offsetX, offsetY);
+          ctx.beginPath();
+          ctx.strokeStyle = color;
+          ctx.globalAlpha = Number(point.actionIndex) < Number(running.actionIndex) ? 0.38 : 0.88;
+          ctx.lineWidth = Number(point.actionIndex) === Number(running.actionIndex) ? 4 : 2.5;
+          ctx.setLineDash(Number(point.actionIndex) === Number(running.actionIndex) ? [] : [7, 4]);
+          ctx.moveTo(previous.x, previous.y);
+          ctx.lineTo(canvasPoint.x, canvasPoint.y);
+          ctx.stroke();
+        }
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = Number(point.actionIndex) === Number(running.actionIndex) ? '#facc15' : color;
+        ctx.beginPath();
+        ctx.arc(canvasPoint.x, canvasPoint.y, Number(point.actionIndex) === Number(running.actionIndex) ? 6 : 4, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      ctx.restore();
     });
   },
 
@@ -606,6 +656,16 @@ const FleetControl = {
     ctx.strokeText(label, x - 4 * scale, y);
     ctx.fillStyle = '#ffffff';
     ctx.fillText(label, x - 4 * scale, y);
+    if (this._showTaskLabels && typeof ActionSender !== 'undefined') {
+      const running = ActionSender._runningTasks?.get(slot.robotId);
+      if (running) {
+        const taskLabel = `${running.taskId} · ${String(running.state || 'work').toUpperCase()}`;
+        ctx.font = `600 ${Math.max(9, 9 * scale)}px sans-serif`;
+        ctx.strokeText(taskLabel, x, y + 24 * scale);
+        ctx.fillStyle = '#f8fafc';
+        ctx.fillText(taskLabel, x, y + 24 * scale);
+      }
+    }
     ctx.restore();
   },
 
@@ -734,6 +794,10 @@ const FleetControl = {
     const taskName = document.getElementById('fleet-task-selected-name');
     const runButton = document.getElementById('btn-fleet-task-run');
     const cancelButton = document.getElementById('btn-fleet-task-cancel');
+    const infoButton = document.getElementById('btn-fleet-running-task-info');
+    const running = slot?.robotId && typeof ActionSender !== 'undefined'
+      ? ActionSender._runningTasks?.get(slot.robotId)
+      : null;
     if (label) {
       label.textContent = slot?.connected
         ? `${this._robotNumber(slot)} · ${slot.robotId}`
@@ -741,7 +805,9 @@ const FleetControl = {
     }
     if (detail) {
       detail.textContent = slot?.connected
-        ? `${slot.ip} · ${this._selectedSlotIndex === App.activeSlotIndex ? '연결됨(데이터수신)' : '연결됨(대기)'}`
+        ? `${slot.ip} · ${this._selectedSlotIndex === App.activeSlotIndex ? '연결됨(데이터수신)' : '연결됨(대기)'}${
+          running ? ` · ${running.taskId} (${String(running.state || 'work').toUpperCase()})` : ''
+        }`
         : '맵 아이콘 또는 하단 목록에서 선택';
     }
     card?.classList.toggle('empty', !slot?.connected);
@@ -750,6 +816,24 @@ const FleetControl = {
     const robotEnabled = Boolean(slot?.connected && slot?.ros) && !this._taskRunning;
     if (runButton) runButton.disabled = !(robotEnabled && this._selectedTaskName);
     if (cancelButton) cancelButton.disabled = !robotEnabled;
+    if (infoButton) infoButton.disabled = !running;
+  },
+
+  _showSelectedRunningTaskInfo() {
+    const slot = App.robotSlots?.[this._selectedSlotIndex];
+    const running = slot?.robotId && typeof ActionSender !== 'undefined'
+      ? ActionSender._runningTasks?.get(slot.robotId)
+      : null;
+    if (!running) {
+      App.toast('선택한 로봇의 실행 Task 정보가 없습니다.', 'info');
+      return;
+    }
+    ActionSender.showTaskInfoFromQueue(
+      running.taskId,
+      running.queue,
+      running.loopFlag,
+      `${running.robotId} · ${String(running.state || 'work').toUpperCase()}`
+    );
   },
 
   async _runSelectedTask() {

@@ -225,6 +225,44 @@ describe('fleet control map', () => {
     expect(ctx.lineTo).toHaveBeenCalledWith(14, 0);
   });
 
+  test('draws an optional running Task route for every connected robot', () => {
+    const { manager, App, context } = loadFleetControl(1);
+    context.ActionSender = {
+      _runningTasks: new Map([[
+        App.robotSlots[0].robotId,
+        {
+          actionIndex: 1,
+          points: [
+            { x: 0, y: 0, actionIndex: 0 },
+            { x: 1, y: 1, actionIndex: 1 }
+          ]
+        }
+      ]])
+    };
+    const ctx = {
+      save: jest.fn(),
+      restore: jest.fn(),
+      beginPath: jest.fn(),
+      setLineDash: jest.fn(),
+      moveTo: jest.fn(),
+      lineTo: jest.fn(),
+      stroke: jest.fn(),
+      arc: jest.fn(),
+      fill: jest.fn()
+    };
+
+    manager._drawRunningTaskRoutes(ctx, makeMap().info, 10, 0, 0);
+
+    expect(ctx.lineTo).toHaveBeenCalledTimes(1);
+    expect(ctx.arc).toHaveBeenCalledTimes(2);
+    expect(ctx.fill).toHaveBeenCalledTimes(2);
+
+    manager._showTaskRoutes = false;
+    ctx.lineTo.mockClear();
+    manager._drawRunningTaskRoutes(ctx, makeMap().info, 10, 0, 0);
+    expect(ctx.lineTo).not.toHaveBeenCalled();
+  });
+
   test('side panel renders the complete saved task list with action counts', () => {
     const { manager, elements, context } = loadFleetControl(1);
     const makeNode = tag => ({

@@ -26,6 +26,11 @@ const ActionSender = {
   _quickTaskMode: '',
   _quickTrajectoryDraft: [],
   _quickTaskSequence: 0,
+  _quickDockWizard: null,
+  _quickTaskDeleteUndoStack: [],
+  _quickTaskSelectedAction: null,
+  _runningTasks: new Map(),
+  _activeTaskDisplay: { showRoute: true, showSummary: false },
 
   // Action type definitions with default args and params
   // Based on sp_task action modules from stl_ulsan
@@ -523,6 +528,7 @@ const ActionSender = {
 
     document.addEventListener('amr:active-robot-changed', () => {
       this._subscribeTaskTelemetry();
+      this._syncActiveRunningTask();
       const typeSelect = document.getElementById('action-type');
       if (typeSelect?.value !== '0x08') return;
       this._closeTargetCfgDetails();
@@ -570,6 +576,19 @@ const ActionSender = {
     document.getElementById('btn-close-quick-task')?.addEventListener('click', () => {
       this.closeQuickTaskBuilder();
     });
+    document.getElementById('btn-quick-task-info')?.addEventListener('click', () => {
+      const name = document.getElementById('quick-task-name')?.value?.trim() || 'Quick Task';
+      const loopFlag = Number(document.getElementById('quick-task-loop')?.value) || 0;
+      const items = [...this._quickTaskItems];
+      if (this._quickTrajectoryDraft.length > 0) {
+        items.push({
+          kind: 'trajectory',
+          points: JSON.parse(JSON.stringify(this._quickTrajectoryDraft)),
+          trajectory: this._readQuickTrajectoryOptions()
+        });
+      }
+      this.showTaskInfoFromQueue(name, this.compileQuickTaskItems(items), loopFlag, '작성 중');
+    });
     document.getElementById('btn-save-quick-task')?.addEventListener('click', () => {
       this.finishQuickTask(true);
     });
@@ -591,6 +610,11 @@ const ActionSender = {
     document.getElementById('btn-quick-docking')?.addEventListener('click', () => {
       this.startQuickMapCapture('docking');
     });
+    ['btn-quick-docking-out', 'btn-quick-docking-out-inline'].forEach(id => {
+      document.getElementById(id)?.addEventListener('click', () => {
+        this.addQuickDockingOut();
+      });
+    });
     document.getElementById('btn-quick-standby')?.addEventListener('click', () => {
       this.addQuickStandby();
     });
@@ -600,8 +624,21 @@ const ActionSender = {
     document.getElementById('btn-quick-task-clear')?.addEventListener('click', () => {
       this.clearQuickTask();
     });
+    document.getElementById('btn-quick-action-undo-delete')?.addEventListener('click', () => {
+      this.undoQuickActionDelete();
+    });
+    document.addEventListener('keydown', event => {
+      this._handleQuickTaskShortcut(event);
+    }, true);
     document.getElementById('btn-close-task-builder')?.addEventListener('click', () => {
       this.closeTaskBuilder();
+    });
+    document.getElementById('btn-builder-task-info')?.addEventListener('click', () => {
+      const name = document.getElementById('action-queue-save-name')?.value?.trim()
+        || document.getElementById('action-work-id')?.value?.trim()
+        || '작성 중 Task';
+      const loopFlag = Number(document.getElementById('action-loop-count')?.value) || 0;
+      this.showTaskInfoFromQueue(name, this.actionQueue, loopFlag, '작성 중');
     });
     document.getElementById('btn-save-task-builder')?.addEventListener('click', () => {
       this.saveQueue();
@@ -614,6 +651,41 @@ const ActionSender = {
     });
     document.getElementById('btn-cancel-task')?.addEventListener('click', event => {
       this._controlActiveTask('cancel', event.currentTarget);
+    });
+    document.getElementById('btn-running-task-info')?.addEventListener('click', () => {
+      this.showActiveRunningTaskInfo();
+    });
+    document.getElementById('btn-active-task-info')?.addEventListener('click', () => {
+      this.showActiveRunningTaskInfo();
+    });
+    document.getElementById('active-task-show-route')?.addEventListener('change', event => {
+      this._activeTaskDisplay.showRoute = event.target.checked;
+      this._syncActiveRunningTask();
+    });
+    document.getElementById('active-task-show-summary')?.addEventListener('change', event => {
+      this._activeTaskDisplay.showSummary = event.target.checked;
+      this._syncActiveRunningTask();
+    });
+    const closeTaskInfo = () => document.getElementById('task-info-modal')?.classList.remove('show');
+    document.getElementById('btn-task-info-close')?.addEventListener('click', closeTaskInfo);
+    document.getElementById('btn-task-info-close2')?.addEventListener('click', closeTaskInfo);
+    document.getElementById('task-info-modal')?.addEventListener('click', event => {
+      if (event.target?.id === 'task-info-modal') closeTaskInfo();
+    });
+    document.getElementById('btn-quick-dock-next')?.addEventListener('click', () => {
+      this._advanceQuickDockWizard();
+    });
+    document.getElementById('btn-quick-dock-back')?.addEventListener('click', () => {
+      this._backQuickDockWizard();
+    });
+    document.getElementById('btn-quick-dock-defaults')?.addEventListener('click', () => {
+      this._finishQuickDockWizardWithRecommendations();
+    });
+    const cancelDockWizard = () => this._cancelQuickDockWizard();
+    document.getElementById('btn-quick-dock-cancel')?.addEventListener('click', cancelDockWizard);
+    document.getElementById('btn-quick-dock-cancel-x')?.addEventListener('click', cancelDockWizard);
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && this._quickDockWizard) cancelDockWizard();
     });
 
     // Clear queue button
@@ -732,6 +804,8 @@ const ActionSender = {
     this._quickTrajectoryDraft = [];
     this._quickTaskMode = '';
     this._quickTaskSequence = 0;
+    this._quickTaskDeleteUndoStack = [];
+    this._quickTaskSelectedAction = null;
 
     const nameInput = document.getElementById('quick-task-name');
     const loopInput = document.getElementById('quick-task-loop');
@@ -759,9 +833,14 @@ const ActionSender = {
       return;
     }
     this._stopQuickMapCapture();
+    document.getElementById('quick-dock-wizard')?.classList.remove('show');
+    this._quickDockWizard = null;
     this._quickTaskItems = [];
     this._quickTrajectoryDraft = [];
+    this._quickTaskDeleteUndoStack = [];
+    this._quickTaskSelectedAction = null;
     this._syncQuickTaskOverlay();
+    this._updateQuickTaskMapActionSelection();
     this._setQuickTaskMapHudVisible(false);
     const quickView = document.getElementById('quick-task-builder-view');
     const libraryView = document.getElementById('task-library-view');
@@ -808,7 +887,25 @@ const ActionSender = {
 
     this._quickTaskMode = mode;
     this._updateQuickTaskToolState();
-    RosManager._enterWaypointSelectMode((x, y, theta) => {
+    const selectionOptions = {
+      twoClick: true,
+      onPhaseChange: (phase, point) => {
+        if (phase !== 'direction') return;
+        const prefix = mode === 'trajectory'
+          ? `Trajectory ${this._quickTrajectoryDraft.length + 1}번 점`
+          : mode === 'docking'
+            ? '도킹 시작점'
+            : 'WayPoint';
+        this._setQuickTaskStatus(
+          `${prefix} 위치 (${point.x.toFixed(2)}, ${point.y.toFixed(2)}) 설정됨 · 두 번째 클릭으로 방향을 지정하세요.`
+        );
+      }
+    };
+    const capturePoint = (x, y, theta) => {
+      if (!this._isQuickTaskBuilderOpen()) {
+        this._stopQuickMapCapture();
+        return;
+      }
       const pose = {
         x: Number(x.toFixed(3)),
         y: Number(y.toFixed(3)),
@@ -824,30 +921,33 @@ const ActionSender = {
         return;
       }
       if (mode === 'docking') {
-        this._quickTaskItems.push({
-          kind: 'docking',
-          pose,
-          docking: this._readQuickDockingOptions()
-        });
-        this._setQuickTaskStatus(
-          `도킹 시작점 추가: (${pose.x.toFixed(2)}, ${pose.y.toFixed(2)}, ${(pose.theta * 180 / Math.PI).toFixed(1)}°)`
-        );
+        this._stopQuickMapCapture();
+        this._startQuickDockWizard(pose);
+        return;
       } else {
         this._quickTaskItems.push({ kind: 'waypoint', pose });
         this._setQuickTaskStatus(
-          `WayPoint 추가: (${pose.x.toFixed(2)}, ${pose.y.toFixed(2)}, ${(pose.theta * 180 / Math.PI).toFixed(1)}°)`
+          `WayPoint 추가: (${pose.x.toFixed(2)}, ${pose.y.toFixed(2)}, ${(pose.theta * 180 / Math.PI).toFixed(1)}°) · 다음 WayPoint의 위치를 클릭하세요.`
         );
       }
       this._quickTaskSequence += 1;
-      this._stopQuickMapCapture();
       this.renderQuickTask();
-    });
+      // WayPoint is the primary Quick Task tool: keep capturing until the
+      // operator explicitly chooses another tool or presses Escape. Re-enter
+      // the selector so no coordinate state from the previous pair survives.
+      if (mode === 'waypoint') {
+        RosManager._enterWaypointSelectMode(capturePoint, selectionOptions);
+        return;
+      }
+      this._stopQuickMapCapture();
+    };
+    RosManager._enterWaypointSelectMode(capturePoint, selectionOptions);
 
     const label = mode === 'trajectory'
-      ? 'Trajectory 경유점을 순서대로 찍으세요. 마지막 점은 드래그해서 최종 방향을 지정할 수 있습니다.'
+      ? '각 경유점마다 첫 클릭은 위치, 두 번째 클릭은 진행 방향입니다. 최종 점 방향이 Action의 최종 θ로 전송됩니다.'
       : mode === 'docking'
-        ? '맵에서 도킹 주행을 시작할 위치를 클릭하고, 드래그해서 진입 방향을 지정하세요.'
-        : '맵에서 WayPoint 위치를 클릭하고, 드래그해서 도착 방향을 지정하세요.';
+        ? '첫 클릭으로 도킹 시작 위치, 두 번째 클릭으로 진입 방향을 지정하면 Argument/Parameter 질문이 시작됩니다.'
+        : '첫 클릭으로 WayPoint 위치, 두 번째 클릭으로 도착 방향을 지정하세요.';
     this._setQuickTaskStatus(label);
   },
 
@@ -855,6 +955,66 @@ const ActionSender = {
     this._quickTaskMode = '';
     if (typeof RosManager !== 'undefined') RosManager._exitWaypointSelectMode();
     this._updateQuickTaskToolState();
+  },
+
+  _isQuickTaskBuilderOpen() {
+    const view = document.getElementById('quick-task-builder-view');
+    const taskTab = document.getElementById('tab-action');
+    return this._builderMode === 'quick'
+      && Boolean(view && !view.hidden)
+      && Boolean(taskTab?.classList?.contains('active'));
+  },
+
+  _handleQuickTaskShortcut(event = {}) {
+    if (!this._isQuickTaskBuilderOpen()) return false;
+
+    const key = String(event.key || '');
+    const normalized = key.toLowerCase();
+    const target = event.target || document.activeElement;
+    const tag = String(target?.tagName || '').toUpperCase();
+    const isTyping = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
+      || Boolean(target?.isContentEditable);
+    const saveAndRun = key === 'Enter' && (event.ctrlKey || event.metaKey);
+
+    // Field editing and the sequential docking wizard own their keyboard input.
+    if ((isTyping && !saveAndRun) || this._quickDockWizard) return false;
+    if ((event.ctrlKey || event.metaKey || event.altKey) && !saveAndRun) return false;
+
+    const buttonByKey = {
+      w: 'btn-quick-waypoint',
+      t: 'btn-quick-trajectory',
+      d: 'btn-quick-docking',
+      o: 'btn-quick-docking-out',
+      s: 'btn-quick-standby',
+      f: 'btn-quick-trajectory-finish'
+    };
+    const shortcutKey = saveAndRun || Boolean(buttonByKey[normalized])
+      || key === 'Backspace' || (key === 'Escape' && this._quickTaskMode);
+    if (event.repeat && shortcutKey) {
+      event.preventDefault?.();
+      event.stopImmediatePropagation?.();
+      return true;
+    }
+    let handled = false;
+    if (saveAndRun) {
+      document.getElementById('btn-run-quick-task')?.click();
+      handled = true;
+    } else if (buttonByKey[normalized]) {
+      document.getElementById(buttonByKey[normalized])?.click();
+      handled = true;
+    } else if (key === 'Backspace') {
+      this.undoQuickTaskItem();
+      handled = true;
+    } else if (key === 'Escape' && this._quickTaskMode) {
+      this._stopQuickMapCapture();
+      this._setQuickTaskStatus('맵 입력을 중지했습니다. W/T/D로 다시 시작할 수 있습니다.');
+      handled = true;
+    }
+    if (!handled) return false;
+
+    event.preventDefault?.();
+    event.stopImmediatePropagation?.();
+    return true;
   },
 
   _updateQuickTaskToolState() {
@@ -916,9 +1076,226 @@ const ActionSender = {
     };
   },
 
+  _quickDockRecommendation(field, pose) {
+    const recommendations = {
+      is_charge: '반복 주행 시험이면 0, 실제 충전 도킹이면 1을 권장합니다.',
+      direction: '일반 전면 도킹은 1(전방)을 권장합니다.',
+      scan_type: 'L 마커는 1, LV는 2, Rack cfg 기반이면 4를 권장합니다.',
+      end_condition: '기본 위치 도달 판정은 1, 충전 접점 확인은 3을 권장합니다.',
+      dock_dist: '일반적인 도킹 시작 거리는 1.2 m를 권장합니다.',
+      dock_dist_flag: '로봇 외곽 기준을 사용하는 false가 기본 권장값입니다.',
+      scan_view: '전방 스캐너는 0, 좌/후/우는 각각 1/2/3입니다.',
+      x_offset: '별도 보정값이 없다면 0.0 m를 권장합니다.',
+      y_offset: '별도 보정값이 없다면 0.0 m를 권장합니다.',
+      center_offset: '기본 0°, 방향 자동 탐색이 필요하면 360을 사용합니다.',
+      v_angle: '일반 LV 마커는 90°를 권장합니다.',
+      mark_size: '실제 마커 실측값을 입력하며 기본 추천은 0.1 m입니다.',
+      marker_type: '중앙 마커는 1, 우측 마커는 2입니다.',
+      target_id: 'Aruco를 사용할 때 실제 ID를 입력하세요. 미사용 시 빈 값입니다.',
+      target_size: 'Aruco 실측 크기를 입력하며 기본 추천은 0.1 m입니다.',
+      cradle_width: 'Cradle/Rack 실측 폭을 입력하세요. 미사용 시 0.0 m입니다.',
+      cradle_depth: 'Cradle/Rack 실측 깊이를 입력하세요. 미사용 시 0.0 m입니다.',
+      model_type: 'DD는 0, QD는 1을 권장합니다.',
+      target_cfg: 'Rack/특수 도킹에서만 cfg 파일명을 입력하고 일반 도킹은 비웁니다.'
+    };
+    if (field.name === 'approach_theta') {
+      return `맵에서 지정한 추천 방향: ${(Number(pose?.theta || 0) * 180 / Math.PI).toFixed(1)}°`;
+    }
+    return recommendations[field.name] || field.desc || '현장 조건에 맞는 값을 입력하세요.';
+  },
+
+  _quickDockWizardFields(pose) {
+    const config = this.actionTypes['0x08'];
+    return [
+      ...config.args.map((field, index) => ({
+        ...field,
+        section: 'Argument',
+        valueKey: `arg:${field.name}`,
+        index
+      })),
+      ...config.params.map((field, index) => ({
+        ...field,
+        section: 'Parameter',
+        valueKey: `param:${field.name}`,
+        index
+      }))
+    ].map(field => ({
+      ...field,
+      recommendation: this._quickDockRecommendation(field, pose)
+    }));
+  },
+
+  _startQuickDockWizard(pose) {
+    const preset = this._readQuickDockingOptions();
+    const fields = this._quickDockWizardFields(pose);
+    const values = {};
+    fields.forEach(field => {
+      values[field.valueKey] = field.default ?? '';
+    });
+    values['arg:is_charge'] = preset.isCharge;
+    values['arg:direction'] = preset.direction;
+    values['arg:scan_type'] = preset.scanType;
+    values['arg:end_condition'] = preset.endCondition;
+    this._quickDockWizard = {
+      pose: { ...pose },
+      fields,
+      values,
+      index: 0
+    };
+    document.getElementById('quick-dock-wizard')?.classList.add('show');
+    this._renderQuickDockWizard();
+  },
+
+  _renderQuickDockWizard() {
+    const wizard = this._quickDockWizard;
+    if (!wizard) return;
+    const field = wizard.fields[wizard.index];
+    if (!field) {
+      this._completeQuickDockWizard();
+      return;
+    }
+    const label = document.getElementById('quick-dock-wizard-label');
+    const key = document.getElementById('quick-dock-wizard-key');
+    const progress = document.getElementById('quick-dock-wizard-progress');
+    const description = document.getElementById('quick-dock-wizard-description');
+    const recommendation = document.getElementById('quick-dock-wizard-recommendation');
+    const control = document.getElementById('quick-dock-wizard-control');
+    const back = document.getElementById('btn-quick-dock-back');
+    const next = document.getElementById('btn-quick-dock-next');
+    if (label) label.textContent = this._fieldLabel(field);
+    if (key) key.textContent = `${field.section} · ${field.name} · ${field.type || 'number'}`;
+    if (progress) {
+      progress.textContent = `${field.section} ${wizard.index + 1}/${wizard.fields.length} · 도킹 시작 θ=${(wizard.pose.theta * 180 / Math.PI).toFixed(1)}°`;
+    }
+    if (description) description.textContent = field.desc || '';
+    if (recommendation) {
+      recommendation.textContent = `추천값: ${field.default ?? '(빈 값)'} · ${field.recommendation}`;
+    }
+    if (back) back.disabled = wizard.index === 0;
+    if (next) next.textContent = wizard.index === wizard.fields.length - 1 ? '도킹 추가' : '다음';
+    if (!control) return;
+    control.innerHTML = '';
+
+    let input;
+    if (Array.isArray(field.enumValues) && field.enumValues.length > 0) {
+      input = document.createElement('select');
+      field.enumValues.forEach(optionInfo => {
+        const option = document.createElement('option');
+        option.value = String(optionInfo.value);
+        option.textContent = `${optionInfo.value} · ${optionInfo.label}`;
+        input.appendChild(option);
+      });
+    } else if (field.type === 'bool') {
+      input = document.createElement('select');
+      ['false', 'true'].forEach(value => {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = value;
+        input.appendChild(option);
+      });
+    } else {
+      input = document.createElement('input');
+      input.type = field.type === 'string' ? 'text' : 'number';
+      if (input.type === 'number') input.step = field.type === 'int' ? '1' : '0.01';
+      input.placeholder = String(field.default ?? '');
+    }
+    input.id = 'quick-dock-wizard-input';
+    input.value = String(wizard.values[field.valueKey] ?? field.default ?? '');
+    input.addEventListener('keydown', event => {
+      if (event.key === 'Enter') this._advanceQuickDockWizard();
+    });
+    control.appendChild(input);
+    setTimeout(() => input.focus(), 0);
+  },
+
+  _saveQuickDockWizardValue() {
+    const wizard = this._quickDockWizard;
+    if (!wizard) return false;
+    const field = wizard.fields[wizard.index];
+    const input = document.getElementById('quick-dock-wizard-input');
+    if (!field || !input) return false;
+    const raw = input.value;
+    const numeric = field.section === 'Argument' || field.type === 'float' || field.type === 'int';
+    if (numeric && raw !== '' && !Number.isFinite(Number(raw))) {
+      App.toast(`${this._fieldLabel(field)} 값을 숫자로 입력하세요.`, 'error');
+      input.focus();
+      return false;
+    }
+    wizard.values[field.valueKey] = numeric && raw !== '' ? Number(raw) : raw;
+    return true;
+  },
+
+  _advanceQuickDockWizard() {
+    const wizard = this._quickDockWizard;
+    if (!wizard || !this._saveQuickDockWizardValue()) return;
+    if (wizard.index >= wizard.fields.length - 1) {
+      this._completeQuickDockWizard();
+      return;
+    }
+    wizard.index += 1;
+    this._renderQuickDockWizard();
+  },
+
+  _backQuickDockWizard() {
+    const wizard = this._quickDockWizard;
+    if (!wizard) return;
+    this._saveQuickDockWizardValue();
+    wizard.index = Math.max(0, wizard.index - 1);
+    this._renderQuickDockWizard();
+  },
+
+  _finishQuickDockWizardWithRecommendations() {
+    const wizard = this._quickDockWizard;
+    if (!wizard || !this._saveQuickDockWizardValue()) return;
+    for (let index = wizard.index + 1; index < wizard.fields.length; index += 1) {
+      const field = wizard.fields[index];
+      wizard.values[field.valueKey] = field.default ?? '';
+    }
+    this._completeQuickDockWizard();
+  },
+
+  _completeQuickDockWizard() {
+    const wizard = this._quickDockWizard;
+    if (!wizard) return;
+    const args = this.actionTypes['0x08'].args.map(field =>
+      Number(wizard.values[`arg:${field.name}`] ?? field.default ?? 0)
+    );
+    const params = {};
+    this.actionTypes['0x08'].params.forEach(field => {
+      params[field.name] = String(wizard.values[`param:${field.name}`] ?? field.default ?? '');
+    });
+    this._quickTaskItems.push({
+      kind: 'docking',
+      pose: { ...wizard.pose },
+      docking: {
+        args,
+        params,
+        isCharge: args[0],
+        direction: args[1],
+        scanType: args[2],
+        endCondition: args[3]
+      }
+    });
+    this._quickTaskSequence += 1;
+    document.getElementById('quick-dock-wizard')?.classList.remove('show');
+    this._quickDockWizard = null;
+    this._setQuickTaskStatus(
+      `도킹 추가 완료 · 시작 (${wizard.pose.x.toFixed(2)}, ${wizard.pose.y.toFixed(2)}) · θ ${(wizard.pose.theta * 180 / Math.PI).toFixed(1)}°`
+    );
+    this.renderQuickTask();
+  },
+
+  _cancelQuickDockWizard() {
+    document.getElementById('quick-dock-wizard')?.classList.remove('show');
+    this._quickDockWizard = null;
+    this._setQuickTaskStatus('도킹 설정을 취소했습니다.');
+  },
+
   addQuickStandby() {
     if (this._quickTaskMode === 'trajectory' && this._quickTrajectoryDraft.length > 0) {
       if (!this.finishQuickTrajectory()) return;
+    } else if (this._quickTaskMode) {
+      this._stopQuickMapCapture();
     }
     const durationInput = document.getElementById('quick-standby-duration');
     const duration = Math.max(0, Number(durationInput?.value));
@@ -932,7 +1309,25 @@ const ActionSender = {
     this.renderQuickTask();
   },
 
+  addQuickDockingOut() {
+    if (this._quickTaskMode === 'trajectory' && this._quickTrajectoryDraft.length > 0) {
+      if (!this.finishQuickTrajectory()) return;
+    } else if (this._quickTaskMode) {
+      this._stopQuickMapCapture();
+    }
+    const distance = Number(document.getElementById('quick-docking-out-distance')?.value);
+    if (!Number.isFinite(distance)) {
+      this._setQuickTaskStatus('DockingOut 이동 거리를 확인해주세요.', true);
+      return;
+    }
+    this._quickTaskItems.push({ kind: 'docking-out', distance });
+    this._quickTaskSequence += 1;
+    this._setQuickTaskStatus(`DockingOut 추가: ${distance} m`);
+    this.renderQuickTask();
+  },
+
   undoQuickTaskItem() {
+    this._quickTaskSelectedAction = null;
     if (this._quickTrajectoryDraft.length > 0) {
       this._quickTrajectoryDraft.pop();
       this._setQuickTaskStatus(
@@ -953,8 +1348,12 @@ const ActionSender = {
         && !confirm('Quick Task 항목을 모두 비우시겠습니까?')) {
       return;
     }
+    document.getElementById('quick-dock-wizard')?.classList.remove('show');
+    this._quickDockWizard = null;
     this._quickTaskItems = [];
     this._quickTrajectoryDraft = [];
+    this._quickTaskDeleteUndoStack = [];
+    this._quickTaskSelectedAction = null;
     this._stopQuickMapCapture();
     this._setQuickTaskStatus('모든 항목을 비웠습니다.');
     this.renderQuickTask();
@@ -965,12 +1364,21 @@ const ActionSender = {
     if (index < 0 || target < 0 || target >= this._quickTaskItems.length) return;
     const [item] = this._quickTaskItems.splice(index, 1);
     this._quickTaskItems.splice(target, 0, item);
+    this._quickTaskSelectedAction = null;
     this.renderQuickTask();
   },
 
   removeQuickTaskItem(index) {
     if (index < 0 || index >= this._quickTaskItems.length) return;
-    this._quickTaskItems.splice(index, 1);
+    const [item] = this._quickTaskItems.splice(index, 1);
+    this._quickTaskDeleteUndoStack.push({
+      isDraft: false,
+      index,
+      item: JSON.parse(JSON.stringify(item))
+    });
+    if (this._quickTaskDeleteUndoStack.length > 30) this._quickTaskDeleteUndoStack.shift();
+    this._quickTaskSelectedAction = null;
+    this._setQuickTaskStatus('구성 항목 삭제 · "삭제 취소"로 복원할 수 있습니다.');
     this.renderQuickTask();
   },
 
@@ -985,6 +1393,7 @@ const ActionSender = {
     }
     this._updateQuickTaskToolState();
     this._syncQuickTaskOverlay();
+    this._renderQuickActionPreview();
     if (!list) return;
     list.innerHTML = '';
     if (this._quickTaskItems.length === 0) {
@@ -1019,7 +1428,12 @@ const ActionSender = {
         docking: {
           icon: '🔌',
           title: '도킹 시작점 + Docking',
-          detail: `0x01 → 0x08 · x=${item.pose.x}, y=${item.pose.y}, θ=${item.pose.theta}`
+          detail: `0x01 → 0x08 · x=${item.pose.x}, y=${item.pose.y}, θ=${item.pose.theta} · args=[${(item.docking?.args || []).join(', ')}]`
+        },
+        'docking-out': {
+          icon: '↩',
+          title: 'DockingOut',
+          detail: `0x10 · distance=${item.distance} m`
         }
       };
       const label = labels[item.kind];
@@ -1041,6 +1455,197 @@ const ActionSender = {
     });
   },
 
+  _quickTaskPreviewEntries() {
+    const items = [...this._quickTaskItems];
+    const metadata = items.map((item, sourceItemIndex) => ({
+      item,
+      sourceItemIndex,
+      isDraft: false
+    }));
+    if (this._quickTrajectoryDraft.length > 0) {
+      const draft = {
+        kind: 'trajectory',
+        points: JSON.parse(JSON.stringify(this._quickTrajectoryDraft)),
+        trajectory: this._readQuickTrajectoryOptions()
+      };
+      items.push(draft);
+      metadata.push({
+        item: draft,
+        sourceItemIndex: this._quickTaskItems.length,
+        isDraft: true
+      });
+    }
+    const actions = this.compileQuickTaskItems(items);
+    const entries = [];
+    let actionIndex = 0;
+    metadata.forEach(meta => {
+      const actionCount = meta.item.kind === 'docking' ? 2 : 1;
+      for (let actionOffset = 0; actionOffset < actionCount; actionOffset += 1) {
+        const action = actions[actionIndex];
+        if (!action) break;
+        entries.push({
+          ...meta,
+          action,
+          actionIndex,
+          actionOffset,
+          key: `${meta.isDraft ? 'draft' : 'item'}:${meta.sourceItemIndex}:${actionOffset}`
+        });
+        actionIndex += 1;
+      }
+    });
+    return entries;
+  },
+
+  _renderQuickActionPreview() {
+    const list = document.getElementById('quick-task-action-preview');
+    const count = document.getElementById('quick-task-action-count');
+    const undoButton = document.getElementById('btn-quick-action-undo-delete');
+    if (!list) return;
+    const entries = this._quickTaskPreviewEntries();
+    if (count) count.textContent = String(entries.length);
+    if (undoButton) undoButton.disabled = this._quickTaskDeleteUndoStack.length === 0;
+    list.innerHTML = '';
+    if (entries.length === 0) {
+      const empty = document.createElement('span');
+      empty.className = 'quick-action-preview-empty';
+      empty.textContent = '추가된 Action 없음';
+      list.appendChild(empty);
+      this._quickTaskSelectedAction = null;
+      this._syncQuickTaskOverlay();
+      this._updateQuickTaskMapActionSelection();
+      return;
+    }
+    if (this._quickTaskSelectedAction
+        && !entries.some(entry => entry.key === this._quickTaskSelectedAction.key)) {
+      this._quickTaskSelectedAction = null;
+    }
+    entries.forEach((entry, index) => {
+      const { action } = entry;
+      const typeKey = this._actionTypeKey(action);
+      const config = this.actionTypes[typeKey];
+      const chip = document.createElement('div');
+      chip.className = 'quick-action-preview-chip';
+      if (entry.key === this._quickTaskSelectedAction?.key) chip.classList.add('selected');
+      chip.title = '클릭하면 맵에서 이 Action을 강조합니다.';
+      const number = document.createElement('span');
+      number.className = 'quick-action-preview-number';
+      number.textContent = String(index + 1);
+      const type = document.createElement('strong');
+      type.textContent = typeKey;
+      const name = document.createElement('span');
+      name.textContent = action.name;
+      const args = document.createElement('small');
+      const compactArgs = Array.from(action.args || []).map(value =>
+        typeof value === 'number' ? Number(value.toFixed?.(3) ?? value) : value
+      );
+      args.textContent = `${config?.name || 'Action'} · [${compactArgs.join(', ')}]`;
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'quick-action-preview-remove';
+      remove.textContent = '×';
+      remove.title = entry.item.kind === 'docking'
+        ? 'Dock_Start와 Docking 묶음 전체 삭제'
+        : '이 Action 삭제';
+      chip.appendChild(number);
+      chip.appendChild(type);
+      chip.appendChild(name);
+      chip.appendChild(args);
+      chip.appendChild(remove);
+      chip.addEventListener('click', () => this._selectQuickActionPreview(entry));
+      remove.addEventListener('click', event => {
+        event.stopPropagation();
+        this.deleteQuickActionPreviewEntry(entry);
+      });
+      list.appendChild(chip);
+    });
+    this._updateQuickTaskMapActionSelection();
+  },
+
+  _selectQuickActionPreview(entry) {
+    this._quickTaskSelectedAction = this._quickTaskSelectedAction?.key === entry.key
+      ? null
+      : {
+        key: entry.key,
+        sourceItemIndex: entry.sourceItemIndex,
+        actionOffset: entry.actionOffset,
+        isDraft: entry.isDraft
+      };
+    this._renderQuickActionPreview();
+    this._syncQuickTaskOverlay();
+  },
+
+  deleteQuickActionPreviewEntry(entry) {
+    if (!entry) return;
+    let deleted;
+    if (entry.isDraft) {
+      deleted = {
+        isDraft: true,
+        index: this._quickTaskItems.length,
+        item: JSON.parse(JSON.stringify(this._quickTrajectoryDraft))
+      };
+      this._quickTrajectoryDraft = [];
+    } else {
+      const [item] = this._quickTaskItems.splice(entry.sourceItemIndex, 1);
+      if (!item) return;
+      deleted = {
+        isDraft: false,
+        index: entry.sourceItemIndex,
+        item: JSON.parse(JSON.stringify(item))
+      };
+    }
+    this._quickTaskDeleteUndoStack.push(deleted);
+    if (this._quickTaskDeleteUndoStack.length > 30) this._quickTaskDeleteUndoStack.shift();
+    this._quickTaskSelectedAction = null;
+    const label = entry.item.kind === 'docking'
+      ? 'Dock_Start + Docking 묶음'
+      : entry.action.name;
+    this._setQuickTaskStatus(`${label} 삭제 · "삭제 취소"로 복원할 수 있습니다.`);
+    this.renderQuickTask();
+  },
+
+  undoQuickActionDelete() {
+    const deleted = this._quickTaskDeleteUndoStack.pop();
+    if (!deleted) return;
+    if (deleted.isDraft) {
+      this._quickTrajectoryDraft = JSON.parse(JSON.stringify(deleted.item));
+    } else {
+      const index = Math.max(0, Math.min(deleted.index, this._quickTaskItems.length));
+      this._quickTaskItems.splice(index, 0, JSON.parse(JSON.stringify(deleted.item)));
+    }
+    this._quickTaskSelectedAction = null;
+    this._setQuickTaskStatus('삭제한 Action을 복원했습니다.');
+    this.renderQuickTask();
+  },
+
+  _updateQuickTaskMapActionSelection() {
+    const panel = document.getElementById('quick-task-map-action-selection');
+    if (!panel) return;
+    const selected = this._quickTaskSelectedAction;
+    const entry = selected
+      ? this._quickTaskPreviewEntries().find(candidate => candidate.key === selected.key)
+      : null;
+    if (!entry) {
+      panel.hidden = true;
+      return;
+    }
+    const title = document.getElementById('quick-task-map-action-title');
+    const detail = document.getElementById('quick-task-map-action-detail');
+    const typeKey = this._actionTypeKey(entry.action);
+    if (title) title.textContent = `${typeKey} · ${entry.action.name}`;
+    let positionText = '맵 좌표 없음';
+    if (entry.item.pose) {
+      positionText = `x=${entry.item.pose.x}, y=${entry.item.pose.y}, θ=${entry.item.pose.theta}`;
+    } else if (Array.isArray(entry.item.points) && entry.item.points.length > 0) {
+      const start = entry.item.points[0];
+      const end = entry.item.points.at(-1);
+      positionText = `${entry.item.points.length} points · (${start.x}, ${start.y}) → (${end.x}, ${end.y})`;
+    }
+    if (detail) {
+      detail.textContent = `${positionText} · args=[${Array.from(entry.action.args || []).join(', ')}]`;
+    }
+    panel.hidden = false;
+  },
+
   _setQuickTaskStatus(message, error = false) {
     const status = document.getElementById('quick-task-status');
     if (status) {
@@ -1054,20 +1659,23 @@ const ActionSender = {
   _syncQuickTaskOverlay() {
     if (typeof RosManager === 'undefined' || typeof RosManager.setQuickTaskOverlay !== 'function') return;
     const overlay = [];
+    const selected = this._quickTaskSelectedAction;
     this._quickTaskItems.forEach((item, itemIndex) => {
       if (item.kind === 'waypoint' || item.kind === 'docking') {
         overlay.push({
           ...item.pose,
           kind: item.kind,
           label: String(itemIndex + 1),
-          group: `item-${itemIndex}`
+          group: `item-${itemIndex}`,
+          selected: !selected?.isDraft && selected?.sourceItemIndex === itemIndex
         });
       } else if (item.kind === 'trajectory') {
         item.points.forEach((point, pointIndex) => overlay.push({
           ...point,
           kind: 'trajectory',
           label: `${itemIndex + 1}.${pointIndex + 1}`,
-          group: `trajectory-${itemIndex}`
+          group: `trajectory-${itemIndex}`,
+          selected: !selected?.isDraft && selected?.sourceItemIndex === itemIndex
         }));
       }
     });
@@ -1075,7 +1683,8 @@ const ActionSender = {
       ...point,
       kind: 'trajectory-draft',
       label: `T${pointIndex + 1}`,
-      group: 'trajectory-draft'
+      group: 'trajectory-draft',
+      selected: Boolean(selected?.isDraft)
     }));
     RosManager.setQuickTaskOverlay(overlay);
   },
@@ -1106,13 +1715,18 @@ const ActionSender = {
     let trajectoryIndex = 0;
     let standbyIndex = 0;
     let dockingIndex = 0;
+    let dockingOutIndex = 0;
     (items || []).forEach(item => {
       if (item.kind === 'waypoint') {
         waypointIndex += 1;
         actions.push(this._buildQuickAction(
           '0x01',
           [item.pose.x, item.pose.y, item.pose.theta],
-          `WayPoint_${waypointIndex}`
+          `WayPoint_${waypointIndex}`,
+          {
+            avoid_mode: false,
+            straight_path: true
+          }
         ));
       } else if (item.kind === 'trajectory') {
         trajectoryIndex += 1;
@@ -1146,15 +1760,26 @@ const ActionSender = {
           `Dock_Start_${dockingIndex}`
         ));
         const dock = item.docking || {};
-        actions.push(this._buildQuickAction(
-          '0x08',
-          [
+        const dockArgs = Array.isArray(dock.args)
+          ? dock.args
+          : [
             dock.isCharge ?? 0,
             dock.direction ?? 1,
             dock.scanType ?? 1,
             dock.endCondition ?? 1
-          ],
-          `Docking_${dockingIndex}`
+          ];
+        actions.push(this._buildQuickAction(
+          '0x08',
+          dockArgs,
+          `Docking_${dockingIndex}`,
+          dock.params || {}
+        ));
+      } else if (item.kind === 'docking-out') {
+        dockingOutIndex += 1;
+        actions.push(this._buildQuickAction(
+          '0x10',
+          [item.distance],
+          `DockingOut_${dockingOutIndex}`
         ));
       }
     });
@@ -1192,7 +1817,10 @@ const ActionSender = {
     this._updateUndoRedoButtons();
     this._quickTaskItems = [];
     this._quickTrajectoryDraft = [];
+    this._quickTaskDeleteUndoStack = [];
+    this._quickTaskSelectedAction = null;
     this._syncQuickTaskOverlay();
+    this._updateQuickTaskMapActionSelection();
     this._setQuickTaskMapHudVisible(false);
 
     if (saveNow) return this.saveQueue();
@@ -1234,7 +1862,9 @@ const ActionSender = {
     if (!libraryView || !builderView) return;
 
     this._stopQuickMapCapture();
+    this._quickTaskSelectedAction = null;
     this._syncQuickTaskOverlay();
+    this._updateQuickTaskMapActionSelection();
     this._setQuickTaskMapHudVisible(false);
     this._builderMode = taskName ? 'edit' : 'create';
     this._editingTaskName = taskName || '';
@@ -1275,7 +1905,10 @@ const ActionSender = {
     this._stopQuickMapCapture();
     this._quickTaskItems = [];
     this._quickTrajectoryDraft = [];
+    this._quickTaskDeleteUndoStack = [];
+    this._quickTaskSelectedAction = null;
     this._syncQuickTaskOverlay();
+    this._updateQuickTaskMapActionSelection();
     this._setQuickTaskMapHudVisible(false);
     builderView.hidden = true;
     if (quickView) quickView.hidden = true;
@@ -1782,6 +2415,7 @@ const ActionSender = {
     if (typeof TestMode !== 'undefined' && TestMode.enabled) {
       try {
         const simResult = await TestMode.runTask(slotIndex, request);
+        this._registerRunningTask(slotIndex, taskId, actions, loopCount);
         this.showResult(`[TestMode] Simulated Success!\nTask ID: ${taskId} (${actions.length} action(s))\nTarget: ${robotId}\n\nResponse:\n${JSON.stringify(simResult, null, 2)}`);
         App.addEvent('action', `Send success (${taskId}, ${actions.length} actions)`, `${serviceName} [${robotId}] [TestMode]`, 'success');
       } catch (error) {
@@ -1800,6 +2434,7 @@ const ActionSender = {
       this.showResult(`[${robotId}] Sending to ${serviceName} (${actions.length} action(s), loop: ${loopLabel}):\n${JSON.stringify(request, null, 2)}`);
       const result = await this._callTaskService(ros, serviceName, taskInterface.goalType, request);
       if (result.success) {
+        this._registerRunningTask(slotIndex, taskId, actions, loopCount);
         this.showResult(`Success!\nTask ID: ${taskId} (${actions.length} action(s))\nTarget: ${robotId}\n\nResponse:\n${JSON.stringify(result, null, 2)}`);
         App.addEvent('action', `Send success (${taskId}, ${actions.length} actions)`, `${serviceName} [${robotId}]`, 'success');
         // Audit log
@@ -2109,11 +2744,20 @@ const ActionSender = {
   getTaskDetailModel(taskName) {
     const entry = this.getSavedQueues()[taskName];
     if (!entry || !Array.isArray(entry.queue)) return null;
+    return this._buildTaskDetailModel(
+      entry.yamlTaskId || taskName,
+      entry.queue,
+      entry.loopFlag ?? 1
+    );
+  },
+
+  _buildTaskDetailModel(name, queue, loopFlag = 1) {
+    const taskQueue = Array.from(queue || []);
     return {
-      name: entry.yamlTaskId || taskName,
-      loopFlag: entry.loopFlag ?? 1,
-      missionCount: this._queueToMissionGroups(entry.queue).length,
-      actions: entry.queue.map((item, index) => {
+      name,
+      loopFlag,
+      missionCount: this._queueToMissionGroups(taskQueue).length,
+      actions: taskQueue.map((item, index) => {
         const typeKey = this._actionTypeKey(item);
         const config = this.actionTypes[typeKey];
         const args = Array.from(item.args || item.action_args || []);
@@ -2152,6 +2796,12 @@ const ActionSender = {
     if (!container) return;
     container.innerHTML = '';
     const model = this.getTaskDetailModel(taskName);
+    this._renderTaskDetailModel(container, model);
+  },
+
+  _renderTaskDetailModel(container, model) {
+    if (!container) return;
+    container.innerHTML = '';
     if (!model) {
       container.textContent = 'Task를 선택하면 Action과 파라미터가 표시됩니다.';
       return;
@@ -2209,6 +2859,208 @@ const ActionSender = {
       card.appendChild(params);
       container.appendChild(card);
     });
+  },
+
+  showTaskInfoFromQueue(name, queue, loopFlag = 1, contextLabel = '') {
+    const modal = document.getElementById('task-info-modal');
+    const body = document.getElementById('task-info-modal-body');
+    const title = document.getElementById('task-info-modal-title');
+    const subtitle = document.getElementById('task-info-modal-subtitle');
+    if (!modal || !body) return;
+    const model = this._buildTaskDetailModel(name, queue, loopFlag);
+    if (title) title.textContent = `Task Info · ${name}`;
+    if (subtitle) {
+      subtitle.textContent = [
+        contextLabel,
+        `${model.missionCount} Missions`,
+        `${model.actions.length} Actions`,
+        `반복 ${model.loopFlag === 0 ? '무한' : model.loopFlag}`
+      ].filter(Boolean).join(' · ');
+    }
+    if (model.actions.length === 0) {
+      body.innerHTML = '<p class="task-info-empty">아직 추가된 Action이 없습니다.</p>';
+    } else {
+      this._renderTaskDetailModel(body, model);
+    }
+    modal.classList.add('show');
+  },
+
+  _findSavedTaskById(taskId) {
+    const saved = this.getSavedQueues();
+    const key = Object.keys(saved).find(name =>
+      name === taskId || saved[name]?.yamlTaskId === taskId
+    );
+    return key ? { key, entry: saved[key] } : null;
+  },
+
+  _extractTaskRoute(queue) {
+    const points = [];
+    Array.from(queue || []).forEach((item, actionIndex) => {
+      const typeKey = this._actionTypeKey(item);
+      const args = Array.from(item.args || item.action_args || []).map(Number);
+      if ((typeKey === '0x01' || typeKey === '0x17')
+          && args.length >= 3
+          && args.slice(0, 3).every(Number.isFinite)) {
+        points.push({
+          x: args[0],
+          y: args[1],
+          theta: args[2],
+          actionIndex,
+          label: String(actionIndex + 1)
+        });
+      } else if (typeKey === '0x15' && args.length >= 3) {
+        const finalTheta = Number(args.at(-1)) || 0;
+        const trajectory = [];
+        for (let index = 0; index + 1 < args.length - 1; index += 2) {
+          if (!Number.isFinite(args[index]) || !Number.isFinite(args[index + 1])) continue;
+          trajectory.push({ x: args[index], y: args[index + 1] });
+        }
+        trajectory.forEach((point, pointIndex) => {
+          const next = trajectory[pointIndex + 1];
+          points.push({
+            ...point,
+            theta: next ? Math.atan2(next.y - point.y, next.x - point.x) : finalTheta,
+            actionIndex,
+            label: `${actionIndex + 1}.${pointIndex + 1}`
+          });
+        });
+      }
+    });
+    return points;
+  },
+
+  _registerRunningTask(slotIndex, taskId, queue, loopFlag = 1, state = 'work') {
+    const slot = App.robotSlots?.[slotIndex];
+    if (!slot?.robotId) return null;
+    const actions = JSON.parse(JSON.stringify(Array.from(queue || [])));
+    const record = {
+      robotId: slot.robotId,
+      taskId: taskId || 'Task',
+      queue: actions,
+      loopFlag,
+      state,
+      missionIndex: 0,
+      actionIndex: 0,
+      loopCount: 0,
+      startedAt: Date.now(),
+      points: this._extractTaskRoute(actions)
+    };
+    this._runningTasks.set(slot.robotId, record);
+    if (slotIndex === App.activeSlotIndex) this._syncActiveRunningTask();
+    return record;
+  },
+
+  _ensureRunningTask(robotId, taskId) {
+    let record = this._runningTasks.get(robotId);
+    if (record && (!taskId || record.taskId === taskId)) return record;
+    const saved = this._findSavedTaskById(taskId);
+    record = {
+      robotId,
+      taskId: taskId || 'Task',
+      queue: JSON.parse(JSON.stringify(saved?.entry?.queue || [])),
+      loopFlag: saved?.entry?.loopFlag ?? 1,
+      state: 'work',
+      missionIndex: 0,
+      actionIndex: 0,
+      loopCount: 0,
+      startedAt: Date.now()
+    };
+    record.points = this._extractTaskRoute(record.queue);
+    this._runningTasks.set(robotId, record);
+    return record;
+  },
+
+  _flattenTaskActionIndex(record, missionIndex, actionIndex) {
+    const groups = this._queueToMissionGroups(record?.queue || []);
+    const mission = Math.max(0, Number(missionIndex) || 0);
+    const action = Math.max(0, Number(actionIndex) || 0);
+    return groups.slice(0, mission).reduce((sum, group) => sum + group.actions.length, 0)
+      + action;
+  },
+
+  _taskSummaryText(record) {
+    if (!record) return '';
+    const model = this._buildTaskDetailModel(record.taskId, record.queue, record.loopFlag);
+    const header = [
+      `Task: ${record.taskId}`,
+      `State: ${String(record.state || 'idle').toUpperCase()}`,
+      `Mission: ${Number(record.missionIndex) + 1}/${Math.max(1, model.missionCount)}`,
+      model.actions.length > 0
+        ? `Action: ${Math.min(Number(record.actionIndex) + 1, model.actions.length)}/${model.actions.length}`
+        : 'Action: 정보 없음',
+      `Loop: ${Number(record.loopCount) + 1}${record.loopFlag === 0 ? '/∞' : `/${record.loopFlag}`}`
+    ].join(' · ');
+    const actions = model.actions.map((action, index) => {
+      const marker = index === Number(record.actionIndex) ? '▶' : ' ';
+      const args = action.args.map(arg => `${arg.name}=${arg.value}`).join(', ');
+      return `${marker} ${index + 1}. ${action.id} · ${action.typeKey} ${action.typeName}${args ? ` · ${args}` : ''}`;
+    });
+    return [header, ...actions].join('\n');
+  },
+
+  _syncActiveRunningTask() {
+    const slot = App.robotSlots?.[App.activeSlotIndex];
+    const panel = document.getElementById('active-task-map-panel');
+    const record = slot?.robotId ? this._runningTasks.get(slot.robotId) : null;
+    if (!panel || !record) {
+      if (panel) panel.hidden = true;
+      if (typeof RosManager !== 'undefined') RosManager.setActiveTaskOverlay?.(null);
+      if (typeof FleetControl !== 'undefined' && FleetControl._active) {
+        FleetControl._updateTaskPanel?.();
+        FleetControl.requestRender?.();
+      }
+      return;
+    }
+    panel.hidden = false;
+    const title = document.getElementById('active-task-map-title');
+    const robot = document.getElementById('active-task-map-robot');
+    const state = document.getElementById('active-task-map-state');
+    const routeToggle = document.getElementById('active-task-show-route');
+    const summaryToggle = document.getElementById('active-task-show-summary');
+    const summary = document.getElementById('active-task-map-summary');
+    if (title) title.textContent = record.taskId;
+    if (robot) {
+      robot.textContent = record.queue.length > 0
+        ? `${record.robotId} · Action ${Math.min(Number(record.actionIndex) + 1, record.queue.length)}/${record.queue.length}`
+        : `${record.robotId} · Action 정보 수신 대기`;
+    }
+    if (state) state.textContent = String(record.state || 'idle').toUpperCase();
+    if (routeToggle) routeToggle.checked = this._activeTaskDisplay.showRoute;
+    if (summaryToggle) summaryToggle.checked = this._activeTaskDisplay.showSummary;
+    if (summary) {
+      summary.hidden = !this._activeTaskDisplay.showSummary;
+      summary.textContent = this._taskSummaryText(record);
+    }
+    if (typeof RosManager !== 'undefined') {
+      RosManager.setActiveTaskOverlay?.({
+        ...record,
+        currentActionIndex: record.actionIndex,
+        showRoute: this._activeTaskDisplay.showRoute
+      });
+    }
+    if (typeof FleetControl !== 'undefined' && FleetControl._active) {
+      FleetControl._updateTaskPanel?.();
+      FleetControl.requestRender?.();
+    }
+  },
+
+  showActiveRunningTaskInfo() {
+    const slot = App.robotSlots?.[App.activeSlotIndex];
+    const record = slot?.robotId ? this._runningTasks.get(slot.robotId) : null;
+    if (!record) {
+      App.toast('활성 로봇에서 확인할 실행 Task가 없습니다.', 'info');
+      return;
+    }
+    this.showTaskInfoFromQueue(
+      record.taskId,
+      record.queue,
+      record.loopFlag,
+      `${record.robotId} · ${String(record.state || 'idle').toUpperCase()} · ${
+        record.queue.length > 0
+          ? `Action ${Math.min(Number(record.actionIndex) + 1, record.queue.length)}/${record.queue.length}`
+          : 'Action 정보 없음'
+      }`
+    );
   },
 
   renderTaskLibrary(filterText = '') {
@@ -2284,6 +3136,13 @@ const ActionSender = {
 
       const controls = document.createElement('div');
       controls.className = 'task-library-card-controls';
+      const infoButton = document.createElement('button');
+      infoButton.type = 'button';
+      infoButton.className = 'btn btn-small';
+      infoButton.textContent = 'Task Info';
+      infoButton.addEventListener('click', () => {
+        this.showTaskInfoFromQueue(model.name, entry.queue, model.loopFlag, '저장 Task');
+      });
       const editButton = document.createElement('button');
       editButton.type = 'button';
       editButton.className = 'btn btn-small';
@@ -2307,6 +3166,7 @@ const ActionSender = {
       const activeSlot = App.robotSlots?.[this.getTargetSlot()];
       runButton.disabled = !activeSlot?.connected || !activeSlot.ros || model.actions.length === 0;
       runButton.addEventListener('click', () => this.runSavedTask(name, runButton));
+      controls.appendChild(infoButton);
       controls.appendChild(editButton);
       controls.appendChild(copyButton);
       controls.appendChild(deleteButton);
@@ -2453,6 +3313,12 @@ const ActionSender = {
     };
     if (typeof TestMode !== 'undefined' && TestMode.enabled && slot.virtualTestRobot) {
       const result = await TestMode.runTask(slotIndex, request);
+      this._registerRunningTask(
+        slotIndex,
+        taskId || queueName,
+        entry.queue,
+        request.loop_flag
+      );
       if (typeof App.logAudit === 'function') {
         App.logAudit('fleet_task_send', {
           taskId: taskId || queueName,
@@ -2475,6 +3341,12 @@ const ActionSender = {
     if (result && result.success === false) {
       throw new Error(result.message || `error_code=${result.error_code}`);
     }
+    this._registerRunningTask(
+      slotIndex,
+      taskId || queueName,
+      entry.queue,
+      request.loop_flag
+    );
     if (typeof App.logAudit === 'function') {
       App.logAudit('fleet_task_send', {
         taskId: taskId || queueName,
@@ -2984,6 +3856,11 @@ const ActionSender = {
     try {
       await this._controlTaskOnSlot(slotIndex, kind);
       const state = kind === 'pause' ? 'pause' : kind === 'resume' ? 'work' : 'idle';
+      const running = this._runningTasks.get(slot.robotId);
+      if (running) {
+        running.state = kind === 'cancel' ? 'cancel' : state;
+        this._syncActiveRunningTask();
+      }
       const statusText = kind === 'cancel'
         ? `${slot.robotId} · Task 취소됨 · 대기`
         : `${slot.robotId} · Task ${labels[kind]} 요청 완료`;
@@ -3077,8 +3954,19 @@ const ActionSender = {
     const states = ['idle', 'work', 'complete', 'pause', 'cancel', 'abort', 'recovery'];
     const state = states[rawState] || 'work';
     const taskId = message.task_id || 'Task';
+    const running = this._ensureRunningTask(robotId, taskId);
+    running.state = state;
+    running.missionIndex = Number(message.mission_idx ?? 0);
+    running.actionIndex = this._flattenTaskActionIndex(
+      running,
+      running.missionIndex,
+      Number(message.action_idx ?? 0)
+    );
+    running.loopCount = Number(message.loop_count ?? 0);
     if (rawState === 4) {
       this._taskCancelRequests.set(robotId, Date.now());
+      running.state = 'cancel';
+      this._syncActiveRunningTask();
       this._setTaskExecutionFeedback('idle', `${robotId} · ${taskId} · 취소됨`);
       return;
     }
@@ -3090,6 +3978,7 @@ const ActionSender = {
     if (loop > 0) parts.push(`loop ${loop}`);
     if (elapsed > 0) parts.push(`${elapsed.toFixed(1)}s`);
     if (message.state_message) parts.push(message.state_message);
+    this._syncActiveRunningTask();
     this._setTaskExecutionFeedback(state, `${robotId} · ${taskId}`, parts.join(' · '));
   },
 
@@ -3100,6 +3989,9 @@ const ActionSender = {
     const cancelMessage = /cancel|취소/i.test(String(message.message || ''));
     if (!success && (cancelRequested || cancelMessage)) {
       this._taskCancelRequests.delete(robotId);
+      const cancelled = this._ensureRunningTask(robotId, message.task_id || 'Task');
+      cancelled.state = 'cancel';
+      this._syncActiveRunningTask();
       this._setTaskExecutionFeedback(
         'idle',
         `${robotId} · ${message.task_id || 'Task'} · 취소됨`
@@ -3107,6 +3999,10 @@ const ActionSender = {
       return;
     }
     this._taskCancelRequests.delete(robotId);
+    const running = this._ensureRunningTask(robotId, message.task_id || 'Task');
+    running.state = success ? 'complete' : 'abort';
+    if (success && running.queue.length > 0) running.actionIndex = running.queue.length - 1;
+    this._syncActiveRunningTask();
     const elapsed = Number(
       variant === 'sp_task' ? message.elapsed_time : message.total_elapsed_time
     ) || 0;
