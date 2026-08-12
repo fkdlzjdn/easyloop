@@ -442,6 +442,8 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // Command History Manager
+/* exported CommandHistory */
+// eslint-disable-next-line no-unused-vars -- classic-script global consumed by index.html handlers
 const CommandHistory = {
   STORAGE_KEY: 'amrCmdHistory',
   MAX_ITEMS: 50,

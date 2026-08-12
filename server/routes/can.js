@@ -10,9 +10,8 @@ const {
   VALIDATION_LIMITS,
 } = require('../validation');
 const {
+  CAN_INTERFACE,
   executeCanCommand,
-  candump,
-  cansend,
   sdoRead,
   sdoWrite,
   scanAllNodes,
@@ -22,7 +21,6 @@ const {
 } = require('../can/can-commands');
 const {
   isProtectedNode,
-  isDriveMotor,
   PROTECTED_NODES,
   SYNTRON_PARAMS,
 } = require('../can/syntron-params');
@@ -48,7 +46,50 @@ function createCanRouter() {
       badRequest(res, 'nodeId is required');
       return null;
     }
+    if (!Number.isInteger(nodeId)) {
+      badRequest(res, 'nodeId must be an integer');
+      return null;
+    }
     return nodeId;
+  }
+
+  function validateHexField(res, field, value, maxDigits) {
+    const err = validateStringField(field, value, {
+      required: true,
+      maxLength: maxDigits + 2
+    });
+    if (err) { badRequest(res, err); return null; }
+    const normalized = value.replace(/^0x/i, '');
+    if (!new RegExp(`^[0-9a-fA-F]{1,${maxDigits}}$`).test(normalized)) {
+      badRequest(res, `${field} must be a hexadecimal value`);
+      return null;
+    }
+    return normalized;
+  }
+
+  function validateSubIndex(res, value) {
+    const subIndex = value === undefined ? 0 : value;
+    const err = validateNumberField('subIndex', subIndex, { min: 0, max: 255 });
+    if (err) { badRequest(res, err); return null; }
+    if (!Number.isInteger(subIndex)) {
+      badRequest(res, 'subIndex must be an integer');
+      return null;
+    }
+    return subIndex;
+  }
+
+  function validateNodeIds(res, nodeIds) {
+    if (!Array.isArray(nodeIds) || nodeIds.length === 0) {
+      badRequest(res, 'nodeIds must be a non-empty array');
+      return null;
+    }
+    if (nodeIds.length > 127 || nodeIds.some(nodeId => (
+      !Number.isInteger(nodeId) || nodeId < 1 || nodeId > 127
+    ))) {
+      badRequest(res, 'nodeIds must contain integers from 1 to 127');
+      return null;
+    }
+    return nodeIds;
   }
 
   // ==================== POST /scan ====================
@@ -71,15 +112,16 @@ function createCanRouter() {
     const nodeId = validateNodeId(req, res);
     if (nodeId === null) return;
 
-    const { indexHex, subIndex } = req.body;
-    const idxErr = validateStringField('indexHex', indexHex, { required: true, maxLength: 8 });
-    if (idxErr) return badRequest(res, idxErr);
+    const indexHex = validateHexField(res, 'indexHex', req.body.indexHex, 4);
+    if (indexHex === null) return;
+    const subIndex = validateSubIndex(res, req.body.subIndex);
+    if (subIndex === null) return;
 
     // Parse index into low/high bytes
     const idx = indexHex.replace(/^0x/i, '').padStart(4, '0');
     const indexHi = idx.slice(0, 2);
     const indexLo = idx.slice(2, 4);
-    const sub = (subIndex !== undefined ? subIndex : 0).toString(16).padStart(2, '0');
+    const sub = subIndex.toString(16).padStart(2, '0');
 
     try {
       const result = await sdoRead(robotIp, nodeId, indexLo, indexHi, sub);
@@ -103,20 +145,21 @@ function createCanRouter() {
       });
     }
 
-    const { indexHex, subIndex, dataHex } = req.body;
-    const idxErr = validateStringField('indexHex', indexHex, { required: true, maxLength: 8 });
-    if (idxErr) return badRequest(res, idxErr);
-    const dataErr = validateStringField('dataHex', dataHex, { required: true, maxLength: 16 });
-    if (dataErr) return badRequest(res, dataErr);
+    const indexHex = validateHexField(res, 'indexHex', req.body.indexHex, 4);
+    if (indexHex === null) return;
+    const dataHex = validateHexField(res, 'dataHex', req.body.dataHex, 8);
+    if (dataHex === null) return;
+    const subIndex = validateSubIndex(res, req.body.subIndex);
+    if (subIndex === null) return;
 
     const idx = indexHex.replace(/^0x/i, '').padStart(4, '0');
     const indexHi = idx.slice(0, 2);
     const indexLo = idx.slice(2, 4);
-    const sub = (subIndex !== undefined ? subIndex : 0).toString(16).padStart(2, '0');
-    const dataSize = Math.ceil(dataHex.replace(/^0x/i, '').length / 2);
+    const sub = subIndex.toString(16).padStart(2, '0');
+    const dataSize = Math.ceil(dataHex.length / 2);
 
     try {
-      const result = await sdoWrite(robotIp, nodeId, indexLo, indexHi, sub, dataHex.replace(/^0x/i, ''), dataSize);
+      const result = await sdoWrite(robotIp, nodeId, indexLo, indexHi, sub, dataHex, dataSize);
 
       // Check for rebootRequired params
       const matchParam = SYNTRON_PARAMS.find(p => p.reg.toUpperCase() === indexLo.toUpperCase() && indexHi.toUpperCase() === '20');
@@ -136,10 +179,8 @@ function createCanRouter() {
     const robotIp = validateRobotIp(req, res);
     if (!robotIp) return;
 
-    const { nodeIds } = req.body;
-    if (!Array.isArray(nodeIds) || nodeIds.length === 0) {
-      return badRequest(res, 'nodeIds must be a non-empty array');
-    }
+    const nodeIds = validateNodeIds(res, req.body.nodeIds);
+    if (nodeIds === null) return;
 
     try {
       const results = {};
@@ -236,6 +277,9 @@ function createCanRouter() {
     if (newErr) return badRequest(res, newErr);
     if (oldId === undefined) return badRequest(res, 'oldId is required');
     if (newId === undefined) return badRequest(res, 'newId is required');
+    if (!Number.isInteger(oldId) || !Number.isInteger(newId)) {
+      return badRequest(res, 'oldId and newId must be integers');
+    }
 
     try {
       // Write new Node ID to Fn0F4 (register F4, index 20F4h)
@@ -351,10 +395,9 @@ function createCanRouter() {
     const robotIp = validateRobotIp(req, res);
     if (!robotIp) return;
 
-    const { nodeIds, value } = req.body;
-    if (!Array.isArray(nodeIds) || nodeIds.length === 0) {
-      return badRequest(res, 'nodeIds must be a non-empty array');
-    }
+    const nodeIds = validateNodeIds(res, req.body.nodeIds);
+    if (nodeIds === null) return;
+    const { value } = req.body;
     if (value !== 'on' && value !== 'off') {
       return badRequest(res, 'value must be "on" or "off"');
     }

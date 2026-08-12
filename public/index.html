@@ -1,15 +1,12 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ko">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>EasyLoop</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/style.css?v=20260725-loop-closure-ui">
+  <link rel="stylesheet" href="css/style.css?v=20260806-stl-ulsan-jog">
   <link rel="stylesheet" href="css/can-diagnostics.css?v=20260725-responsive-layout">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+  <link rel="stylesheet" href="vendor/xterm/xterm.css?v=5.3.0">
 </head>
 <body>
   <!-- Password Overlay -->
@@ -19,17 +16,19 @@
       <div class="role-select">
         <label class="role-option">
           <input type="radio" name="login-role" value="user" checked>
-          <span class="role-label">User</span>
+          <span class="role-label">일반 사용자</span>
         </label>
         <label class="role-option">
           <input type="radio" name="login-role" value="engineer">
-          <span class="role-label">Engineer</span>
+          <span class="role-label">엔지니어</span>
         </label>
       </div>
-      <input type="password" id="password-input" data-i18n-placeholder="login.placeholder" placeholder="Password" maxlength="10" autofocus>
+      <p class="login-guide">사용 유형을 선택하고 EasyLoop 비밀번호를 입력하세요.</p>
+      <input type="password" id="password-input" data-i18n-placeholder="login.placeholder"
+             placeholder="비밀번호" maxlength="128" autocomplete="current-password" autofocus>
       <br>
-      <button id="password-submit" data-i18n="login.submit">Sign In</button>
-      <p id="password-error" data-i18n="login.error">Invalid password</p>
+      <button type="button" id="password-submit" data-i18n="login.submit">로그인</button>
+      <p id="password-error" role="alert" aria-live="polite">비밀번호가 올바르지 않습니다.</p>
     </div>
   </div>
 
@@ -43,33 +42,72 @@
         <div class="hdr-group hdr-group-robot">
           <div class="active-robot-selector">
             <select id="active-robot-select">
-              <option value="">-- No Robot --</option>
+              <option value="">로봇 선택</option>
             </select>
-            <button id="btn-robot-scan" class="btn btn-small btn-primary" title="로봇 검색 후 연결 대기 목록에 추가">로봇 스캔</button>
-            <button id="btn-robot-manager" class="btn btn-small btn-robot-settings" title="로봇 및 네트워크 설정" aria-label="로봇 설정">⚙</button>
-            <span id="active-robot-status" class="status" data-i18n="header.disconnected">Disconnected</span>
-            <span id="robot-model-name" class="robot-model-name" title="Robot Model"></span>
-            <span id="ros-latency" class="ros-latency" title="ROS Bridge Latency">--</span>
-            <button id="btn-auto-reconnect" class="btn btn-mini btn-auto-reconnect" title="Auto Reconnect: ON">🔄</button>
+          </div>
+          <div class="header-popover-wrap connection-summary-wrap">
+            <button id="btn-connection-summary" class="header-summary-btn connection-summary"
+                    type="button" aria-expanded="false" aria-controls="connection-popover"
+                    title="연결 상세 보기">
+              <span class="connection-dot" aria-hidden="true"></span>
+              <span id="active-robot-status">대기</span>
+            </button>
+            <div id="connection-popover" class="header-quick-popover connection-popover" hidden>
+              <div class="header-popover-title">로봇 연결</div>
+              <div class="header-detail-row">
+                <span>상태</span>
+                <strong id="connection-detail-state">대기</strong>
+              </div>
+              <div class="header-detail-row">
+                <span>로봇</span>
+                <strong id="connection-detail-robot">선택 안 됨</strong>
+              </div>
+              <div class="header-detail-row">
+                <span>IP</span>
+                <strong id="connection-detail-ip">--</strong>
+              </div>
+              <div class="header-detail-row">
+                <span>모델</span>
+                <strong id="robot-model-name" class="robot-model-name">--</strong>
+              </div>
+              <div class="header-detail-row">
+                <span>지연</span>
+                <strong id="ros-latency" class="ros-latency">--</strong>
+              </div>
+              <div class="header-popover-actions">
+                <button id="btn-robot-scan" class="btn connection-icon-btn" type="button"
+                        title="로봇 다시 검색" aria-label="로봇 다시 검색">
+                  <span aria-hidden="true">⌕</span>
+                </button>
+                <button id="btn-auto-reconnect" class="btn connection-icon-btn btn-auto-reconnect"
+                        type="button" title="자동 재연결" aria-label="자동 재연결" aria-pressed="true">
+                  <span class="auto-reconnect-symbol" aria-hidden="true">↻</span>
+                </button>
+                <button id="btn-robot-manager" class="btn connection-icon-btn btn-robot-settings"
+                        type="button" title="로봇 및 네트워크 상세 설정" aria-label="로봇 및 네트워크 상세 설정">
+                  <span aria-hidden="true">⚙</span>
+                </button>
+              </div>
+            </div>
           </div>
           <div class="header-work-state" id="header-work-state">
             <div class="header-ws-bar" id="header-ws-bar"></div>
             <span class="header-ws-text" id="header-ws-text">--</span>
           </div>
-          <div class="bms-gauge-container">
-            <div class="bms-gauge">
-              <div class="bms-gauge-fill" id="bms-gauge-fill"></div>
-              <span class="bms-gauge-text" id="bms-gauge-text">--%</span>
-              <span class="bms-charging-icon" id="bms-charging-icon" title="Charging">&#9889;</span>
-            </div>
-            <span id="bms-time-estimate" class="bms-time-estimate" title="배터리 시간 예측">예측 대기</span>
-            <button id="btn-bms-detail" class="btn btn-mini" data-i18n-title="dashboard.bmsDetails" title="BMS Details">Detail</button>
-          </div>
+          <button id="btn-bms-detail" class="header-summary-btn bms-gauge" type="button"
+                  title="배터리 상세 보기">
+            <span class="bms-gauge-fill" id="bms-gauge-fill"></span>
+            <span class="header-summary-icon" aria-hidden="true">▰</span>
+            <span class="bms-gauge-text" id="bms-gauge-text">--%</span>
+            <span class="bms-charging-icon" id="bms-charging-icon" title="충전 중">&#9889;</span>
+          </button>
         </div>
         <div class="hdr-sep"></div>
         <div class="hdr-group hdr-group-controls">
           <div class="op-mode-toggle" id="op-mode-toggle">
-            <button id="btn-op-mode" class="btn btn-small btn-op-mode manual" title="Toggle Operation Mode">MANUAL</button>
+            <button id="btn-op-mode" class="btn btn-small btn-op-mode manual"
+                    title="MANUAL: Task를 직접 실행합니다. AUTO: Scheduler의 예약 Task를 자동 실행합니다."
+                    aria-label="운영 모드: MANUAL">MANUAL</button>
           </div>
           <div id="multi-robot-btns" class="multi-robot-btns hidden">
             <!-- Fleet/Cmp/Prop: disabled, pending reimplementation -->
@@ -80,56 +118,151 @@
             <span class="mini-control-icon" aria-hidden="true">▦</span>
             <span id="mini-control-button-label">미니관제</span>
           </button>
-          <button id="btn-jog-toggle" class="btn btn-small" title="Jog Control">Jog</button>
-          <button id="btn-cmd-toggle" class="btn btn-small" title="Quick Commands">CMD</button>
+          <button id="btn-jog-toggle" class="header-tool-icon-btn" type="button"
+                  title="Jog 수동 조작 패널 열기/닫기" aria-label="Jog 수동 조작 패널">
+            <span class="header-tool-glyph jog-glyph" aria-hidden="true">✥</span>
+          </button>
+          <button id="btn-cmd-toggle" class="header-tool-icon-btn" type="button"
+                  title="빠른 명령어 CMD 패널 열기/닫기" aria-label="빠른 명령어 CMD 패널">
+            <span class="header-tool-glyph cmd-glyph" aria-hidden="true">&gt;_</span>
+          </button>
         </div>
       </div>
       <div class="header-right">
-        <div class="test-mode-chip" id="test-mode-chip">
-          <span class="test-mode-label">Test</span>
-          <label class="test-mode-robot-count" title="Test Mode에서 생성할 임시 가상 로봇 수">
-            <span>Robots</span>
-            <select id="test-mode-robot-count">
-              <option value="1">1</option>
-              <option value="2">2</option>
-              <option value="3" selected>3</option>
-            </select>
-          </label>
-          <span id="test-mode-status" class="test-mode-status">OFF</span>
-          <button id="btn-test-mode" class="btn btn-ghost" title="Toggle Test Mode">Toggle</button>
-        </div>
-        <button id="btn-theme-toggle" class="btn btn-theme" title="Toggle Theme">
-          <span class="theme-icon">🌙</span>
-          <span class="theme-text">Dark</span>
+        <button id="btn-global-quick-task" class="header-primary-quick-task" type="button"
+                title="어느 화면에서든 맵을 이용해 Quick Task를 바로 생성합니다"
+                aria-label="Quick Task 바로 생성">
+          <span class="quick-task-primary-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false">
+              <path d="M13.4 1.8 4.6 13.4h6.2l-1 8.8 9.6-12.6h-6.7l.7-7.8Z"></path>
+            </svg>
+          </span>
+          <span class="quick-task-primary-copy">
+            <strong>QUICK TASK</strong>
+            <small>맵에서 바로 생성</small>
+          </span>
+          <span class="quick-task-primary-arrow" aria-hidden="true">→</span>
         </button>
-        <div class="hdr-sep"></div>
+        <div class="header-popover-wrap test-mode-chip" id="test-mode-chip">
+          <button id="btn-test-mode-menu" class="header-summary-btn test-mode-summary"
+                  type="button" aria-expanded="false" aria-controls="test-mode-popover"
+                  title="Test Mode 설정">
+            <span class="header-summary-icon" aria-hidden="true">◈</span>
+            <span class="test-mode-label">TEST</span>
+            <span id="test-mode-status" class="test-mode-status">OFF</span>
+          </button>
+          <div id="test-mode-popover" class="header-quick-popover test-mode-popover" hidden>
+            <div class="header-popover-title">Test Mode</div>
+            <p class="header-popover-help">가상 로봇과 경량 Mapping 환경을 실행합니다.</p>
+            <label class="test-mode-robot-count" title="생성할 임시 가상 로봇 수">
+              <span>가상 로봇 수</span>
+              <select id="test-mode-robot-count">
+                <option value="1">1대</option>
+                <option value="2">2대</option>
+                <option value="3" selected>3대</option>
+              </select>
+            </label>
+            <label class="test-mode-robot-count" title="Test Mode Task와 맵 주행에 적용할 가상 구동 모델">
+              <span>주행 모델</span>
+              <select id="test-mode-drive-model">
+                <option value="dd" selected>DD · 차체 전방축 주행</option>
+                <option value="qd">QD · 전방향 주행</option>
+                <option value="action">Action 설정값 사용</option>
+              </select>
+            </label>
+            <div class="header-detail-row">
+              <span>현재 상태</span>
+              <strong id="test-mode-detail-status">꺼짐</strong>
+            </div>
+            <section id="test-mode-failure-guide" class="test-mode-failure-guide"
+                     role="alert" aria-live="assertive" hidden>
+              <div class="test-mode-failure-head">
+                <span aria-hidden="true">!</span>
+                <strong id="test-mode-failure-title">Test Mode 시작 실패</strong>
+              </div>
+              <dl>
+                <div>
+                  <dt>실패 원인</dt>
+                  <dd id="test-mode-failure-cause">원인을 확인할 수 없습니다.</dd>
+                </div>
+                <div>
+                  <dt>조치 방법</dt>
+                  <dd id="test-mode-failure-action">다시 시도해주세요.</dd>
+                </div>
+              </dl>
+              <details>
+                <summary>기술 정보</summary>
+                <p id="test-mode-failure-detail"></p>
+              </details>
+            </section>
+            <button id="btn-test-mode" class="btn btn-primary test-mode-toggle" type="button">시작</button>
+            <button id="btn-drive-simulation-lab"
+                    class="btn test-mode-lab-open engineer-only"
+                    type="button"
+                    disabled
+                    title="Test Mode에서 현재 주행 설정과 개선 후보를 같은 조건으로 비교합니다">
+              <span aria-hidden="true">⌁</span>
+              <span><strong>주행 A/B 시뮬레이션</strong><small>현재 설정 ↔ 개선 후보</small></span>
+            </button>
+          </div>
+        </div>
         <div class="hdr-more-wrap">
-          <button id="btn-hdr-more" class="btn btn-small btn-hdr-more" title="More">···</button>
+          <button id="btn-hdr-more" class="header-summary-btn btn-hdr-more" title="도구 및 설정"
+                  type="button" aria-expanded="false" aria-controls="hdr-more-menu">···</button>
           <div class="hdr-more-menu" id="hdr-more-menu">
             <div class="hdr-menu-section">
-              <span class="hdr-menu-label">Font Size</span>
+              <span class="hdr-menu-label">화면</span>
+              <button id="btn-theme-toggle" class="hdr-menu-item hdr-menu-theme" title="화면 테마 전환">
+                <span class="theme-icon">🌙</span>
+                <span class="theme-text">다크 모드</span>
+              </button>
               <div class="hdr-menu-font-btns">
-                <button class="btn btn-small btn-font-size" data-size="small" title="Small">S</button>
-                <button class="btn btn-small btn-font-size active" data-size="normal" title="Normal">M</button>
-                <button class="btn btn-small btn-font-size" data-size="large" title="Large">L</button>
-                <button class="btn btn-small btn-font-size" data-size="xlarge" title="Extra Large">XL</button>
+                <button class="btn btn-small btn-font-size" data-size="small" title="작게">작게</button>
+                <button class="btn btn-small btn-font-size active" data-size="normal" title="보통">보통</button>
+                <button class="btn btn-small btn-font-size" data-size="large" title="크게">크게</button>
+                <button class="btn btn-small btn-font-size" data-size="xlarge" title="매우 크게">XL</button>
               </div>
             </div>
             <div class="hdr-menu-divider"></div>
-            <button id="btn-init-setup" class="hdr-menu-item btn-init-setup" title="Initial Setup Mode">Setup</button>
-            <button id="btn-alarm-settings" class="hdr-menu-item" title="Alarm Settings" data-i18n="header.alarm">Alarm</button>
-            <button id="btn-event-log" class="hdr-menu-item" title="Event Log" data-i18n="header.log">Log</button>
-            <button id="btn-error-codes" class="hdr-menu-item" title="Error Code Database">Error DB</button>
-            <button id="btn-health-check" class="hdr-menu-item" title="Health Check">Health Check</button>
-            <button id="btn-diagnostic" class="hdr-menu-item" title="Diagnostic Tree">Diagnose</button>
-            <button id="btn-incident-report" class="hdr-menu-item" title="Incident Report">Report</button>
-            <button id="btn-audit-trail" class="hdr-menu-item" title="Audit Trail">Audit</button>
-            <button id="btn-session-export" class="hdr-menu-item" title="Export Session" data-i18n="header.export">Export</button>
-            <button id="btn-session-import" class="hdr-menu-item" title="Import Session" data-i18n="header.import">Import</button>
+            <div class="hdr-menu-section">
+              <span class="hdr-menu-label">도구</span>
+              <div class="hdr-tool-grid">
+                <button id="btn-init-setup" class="hdr-menu-item btn-init-setup" title="초기 설정">
+                  <span class="hdr-tool-icon">⚙</span><span><strong>초기 설정</strong><small>네트워크·환경</small></span>
+                </button>
+                <button id="btn-alarm-settings" class="hdr-menu-item" title="알람 설정">
+                  <span class="hdr-tool-icon">🔔</span><span><strong>알람</strong><small>조건·소리</small></span>
+                </button>
+                <button id="btn-event-log" class="hdr-menu-item" title="이벤트 로그">
+                  <span class="hdr-tool-icon">≡</span><span><strong>이벤트</strong><small>최근 동작</small></span>
+                </button>
+                <button id="btn-error-codes" class="hdr-menu-item" title="에러 코드 데이터베이스">
+                  <span class="hdr-tool-icon">!</span><span><strong>에러 코드</strong><small>원인·조치</small></span>
+                </button>
+                <button id="btn-health-check" class="hdr-menu-item" title="로봇 상태 점검">
+                  <span class="hdr-tool-icon">✓</span><span><strong>상태 점검</strong><small>ROS·시스템</small></span>
+                </button>
+                <button id="btn-diagnostic" class="hdr-menu-item" title="증상 기반 진단">
+                  <span class="hdr-tool-icon">◇</span><span><strong>진단</strong><small>단계별 안내</small></span>
+                </button>
+                <button id="btn-incident-report" class="hdr-menu-item" title="장애 보고서 생성">
+                  <span class="hdr-tool-icon">▤</span><span><strong>보고서</strong><small>장애 기록</small></span>
+                </button>
+                <button id="btn-audit-trail" class="hdr-menu-item" title="감사 기록">
+                  <span class="hdr-tool-icon">⌁</span><span><strong>감사 기록</strong><small>변경 이력</small></span>
+                </button>
+              </div>
+            </div>
+            <div class="hdr-menu-divider"></div>
+            <div class="hdr-menu-section hdr-menu-backup">
+              <span class="hdr-menu-label">설정 백업</span>
+              <button id="btn-session-export" class="hdr-menu-item" title="설정 내보내기">내보내기</button>
+              <button id="btn-session-import" class="hdr-menu-item" title="설정 가져오기">가져오기</button>
+            </div>
             <input type="file" id="session-import-file" accept=".json" style="display:none;">
           </div>
         </div>
-        <button id="btn-logout" class="btn btn-small">Logout</button>
+        <button id="btn-logout" class="btn btn-small btn-logout-compact" title="로그아웃">나가기</button>
       </div>
     </header>
 
@@ -158,16 +291,23 @@
       <div id="panel-map">
         <div class="map-tab-section">
           <div class="map-panel-header">
-            <span class="map-panel-title" data-i18n="map.title">Map</span>
+            <div class="map-panel-heading-main">
+              <span class="map-panel-title" data-i18n="map.title">Map</span>
+              <button id="btn-map-fullscreen" class="map-fullscreen-primary" type="button"
+                      title="맵 전체화면 열기 (ESC로 닫기)" aria-label="맵 전체화면 열기">
+                <span class="map-fullscreen-icon" aria-hidden="true">⛶</span>
+                <span class="map-fullscreen-label">전체화면</span>
+              </button>
+            </div>
             <button id="btn-map-panel-collapse" class="btn btn-ghost btn-small" data-i18n-title="map.collapse" title="Collapse/Expand Map Panel">◀</button>
           </div>
-          <div class="map-controls">
-            <details id="map-layer-menu" class="map-layer-menu">
+          <div class="map-controls map-tool-dock">
+            <details id="map-layer-menu" class="map-layer-menu map-tool-menu">
               <summary>
-                <span>Layers</span>
+                <span>레이어</span>
                 <span id="map-layer-count" class="map-layer-count">2</span>
               </summary>
-              <div class="map-layer-popover">
+              <div class="map-layer-popover map-tool-popover">
                 <div class="map-layer-heading">Base</div>
                 <label class="map-layer-item">
                   <span><input type="checkbox" id="chk-map" checked> Map</span>
@@ -239,59 +379,122 @@
                 </div>
               </div>
             </details>
+            <details id="map-view-menu" class="map-tool-menu">
+              <summary>
+                <span>보기</span>
+                <span id="map-zoom-value" class="map-tool-summary-value">100%</span>
+              </summary>
+              <div class="map-tool-popover map-view-popover">
+                <div class="map-tool-section">
+                  <strong>확대 / 축소</strong>
+                  <div class="map-tool-actions">
+                    <button id="btn-map-zoom-in" class="btn btn-small" title="Zoom In">확대 +</button>
+                    <button id="btn-map-zoom-out" class="btn btn-small" title="Zoom Out">축소 −</button>
+                    <button id="btn-map-zoom-reset" class="btn btn-small" title="Reset Zoom">100%</button>
+                  </div>
+                </div>
+                <div class="map-tool-section">
+                  <strong>회전 <span id="map-rotation-value">0°</span></strong>
+                  <div class="map-tool-actions">
+                    <button id="btn-map-rotate-left" class="btn btn-small" title="Rotate Left 90°">왼쪽 90°</button>
+                    <button id="btn-map-rotate-right" class="btn btn-small" title="Rotate Right 90°">오른쪽 90°</button>
+                    <button id="btn-map-rotate-reset" class="btn btn-small" title="Reset Rotation">초기화</button>
+                    <button id="btn-map-auto-align" class="btn btn-small" title="Auto-align map">자동 정렬</button>
+                  </div>
+                </div>
+                <div class="map-tool-section">
+                  <strong>화면</strong>
+                  <div class="map-tool-actions">
+                    <button id="btn-follow-robot" class="btn btn-small" title="Auto-follow robot position">로봇 따라가기</button>
+                    <button id="btn-map-view-reset" class="btn btn-small"
+                            title="실행 중인 Task는 유지하고 다른 Task/입력 표시와 화면 위치를 초기화">
+                      View Reset
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </details>
+
+            <details id="map-robot-menu" class="map-tool-menu">
+              <summary><span>위치 / 이동</span></summary>
+              <div class="map-tool-popover map-robot-popover">
+                <div class="map-tool-section">
+                  <strong>맵에서 위치 또는 목적지를 지정하세요</strong>
+                  <div class="map-tool-actions map-tool-actions-grid">
+                    <button id="btn-set-pose-mode" class="btn btn-small" title="Click on map to set initial pose">초기 위치</button>
+                    <button id="btn-cov-reposition" class="btn btn-small" title="Covariance Reposition">COV 재배치</button>
+                    <button id="btn-nav-goal-mode" class="btn btn-small" title="Click on map to set navigation goal">목적지 지정</button>
+                    <button id="btn-jog-toggle-map" class="btn btn-small jog-toggle-fullscreen" title="Jog Control">수동 이동</button>
+                  </div>
+                </div>
+              </div>
+            </details>
+
+            <details id="map-mapping-menu" class="map-tool-menu">
+              <summary>
+                <span>Mapping</span>
+                <span id="map-mapping-summary-state" class="map-tool-summary-value">대기</span>
+              </summary>
+              <div class="map-tool-popover map-mapping-popover">
+                <div class="map-tool-section">
+                  <strong>새 맵 생성 <span id="slam-status" class="mapping-status">꺼짐</span></strong>
+                  <small>SLAM Mapping을 시작하거나 종료합니다.</small>
+                  <div class="map-tool-actions">
+                    <button id="btn-slam-start" class="btn btn-small btn-primary" title="Start SLAM mapping">시작</button>
+                    <button id="btn-slam-stop" class="btn btn-small btn-danger" title="Stop SLAM mapping" disabled>종료</button>
+                  </div>
+                </div>
+                <div class="map-tool-section">
+                  <strong>부분 Mapping <span id="lifelong-status" class="mapping-status">꺼짐</span></strong>
+                  <small>기존 맵을 유지하면서 변경 영역을 갱신합니다.</small>
+                  <div class="map-tool-actions">
+                    <button id="btn-lifelong-start" class="btn btn-small btn-primary" title="Start Lifelong mapping">시작</button>
+                    <button id="btn-lifelong-stop" class="btn btn-small btn-danger" title="Stop Lifelong mapping" disabled>종료</button>
+                  </div>
+                </div>
+                <div class="map-tool-section">
+                  <strong>도구</strong>
+                  <div class="map-tool-actions map-tool-actions-grid">
+                    <button id="btn-map-edit-toggle" class="btn btn-small" title="Map Edit Mode">맵 편집</button>
+                    <button id="btn-lidar-align" class="btn btn-small" title="LiDAR Alignment Check">LiDAR 정렬</button>
+                    <button id="btn-save-map" class="btn btn-small btn-primary" title="현재 Mapping 결과 저장">맵 저장</button>
+                  </div>
+                </div>
+              </div>
+            </details>
+
             <span id="map-info"></span>
           </div>
-          <div class="map-controls map-controls-row2">
-            <!-- View: Zoom & Rotation -->
-            <div class="map-btn-group">
-              <span class="map-group-label">View</span>
-              <div class="map-zoom-controls">
-                <button id="btn-map-zoom-in" class="btn btn-small" title="Zoom In">+</button>
-                <span id="map-zoom-value">100%</span>
-                <button id="btn-map-zoom-out" class="btn btn-small" title="Zoom Out">-</button>
-                <button id="btn-map-zoom-reset" class="btn btn-small" title="Reset Zoom">1:1</button>
+          <div id="mapping-save-confirm-modal" class="modal mapping-save-confirm-modal"
+               role="dialog" aria-modal="true" aria-labelledby="mapping-save-confirm-title">
+            <div class="modal-content mapping-save-confirm-content">
+              <div class="mapping-save-confirm-head">
+                <div>
+                  <span class="mapping-save-confirm-label">MAPPING</span>
+                  <h3 id="mapping-save-confirm-title">맵을 저장하시겠습니까?</h3>
+                </div>
+                <button id="btn-mapping-save-close" class="modal-close" type="button"
+                        aria-label="닫기">&times;</button>
               </div>
-              <div class="map-rotation-controls">
-                <button id="btn-map-rotate-left" class="btn btn-small" title="Rotate Left 90°">↺</button>
-                <span id="map-rotation-value">0°</span>
-                <button id="btn-map-rotate-right" class="btn btn-small" title="Rotate Right 90°">↻</button>
-                <button id="btn-map-rotate-reset" class="btn btn-small" title="Reset Rotation">R</button>
-                <button id="btn-map-auto-align" class="btn btn-small" title="Auto-align map (detect angle and straighten)">Auto</button>
+              <p id="mapping-save-confirm-message">
+                이번 Mapping 결과가 아직 저장되지 않았습니다.
+              </p>
+              <div class="mapping-save-fixed-path">
+                <span>저장 위치</span>
+                <code>~/ROS_DB/map/map.pgm</code>
+                <small>기존 map 파일 세트는 날짜별 백업으로 보존됩니다.</small>
               </div>
-              <button id="btn-map-fullscreen" class="btn btn-small" title="Map Fullscreen (ESC to close)">⤢</button>
-              <button id="btn-follow-robot" class="btn btn-small" title="Auto-follow robot position">ViewRobot</button>
-            </div>
-
-            <!-- Robot: Pose & Navigation -->
-            <div class="map-btn-group">
-              <span class="map-group-label">Robot</span>
-              <button id="btn-set-pose-mode" class="btn btn-small" title="Click on map to set initial pose">InitPose</button>
-              <button id="btn-cov-reposition" class="btn btn-small" title="Covariance Reposition">COV</button>
-              <button id="btn-nav-goal-mode" class="btn btn-small" title="Click on map to set navigation goal">NavGoal</button>
-              <button id="btn-jog-toggle-map" class="btn btn-small jog-toggle-fullscreen" title="Jog Control">Jog</button>
-            </div>
-
-
-          </div>
-          <!-- Mapping Controls -->
-          <div class="map-mapping-controls">
-            <div class="mapping-group">
-              <span class="mapping-group-label">SLAM:</span>
-              <button id="btn-slam-start" class="btn btn-small btn-primary" title="Start SLAM mapping">Start</button>
-              <button id="btn-slam-stop" class="btn btn-small btn-danger" title="Stop SLAM mapping" disabled>Stop</button>
-              <span id="slam-status" class="mapping-status">Off</span>
-            </div>
-            <div class="mapping-group">
-              <span class="mapping-group-label">Lifelong:</span>
-              <button id="btn-lifelong-start" class="btn btn-small btn-primary" title="Start Lifelong mapping">Start</button>
-              <button id="btn-lifelong-stop" class="btn btn-small btn-danger" title="Stop Lifelong mapping" disabled>Stop</button>
-              <span id="lifelong-status" class="mapping-status">Off</span>
-            </div>
-            <div class="mapping-group">
-              <button id="btn-map-edit-toggle" class="btn btn-small" title="Map Edit Mode">Edit Map</button>
-            </div>
-            <div class="mapping-group">
-              <button id="btn-lidar-align" class="btn btn-small" title="LiDAR Alignment Check">LiDAR Align</button>
+              <div id="save-map-status" class="mapping-save-status" role="status"
+                   aria-live="polite"></div>
+              <div class="modal-buttons mapping-save-confirm-actions">
+                <button id="btn-mapping-save-cancel" class="btn" type="button">취소</button>
+                <button id="btn-mapping-save-no" class="btn btn-danger" type="button">
+                  아니요, 저장하지 않고 종료
+                </button>
+                <button id="btn-mapping-save-yes" class="btn btn-primary" type="button">
+                  예, 저장 후 종료
+                </button>
+              </div>
             </div>
           </div>
           <!-- Map Edit Controls -->
@@ -360,9 +563,24 @@
             <span>X: <b id="robot-pos-x">-</b></span>
             <span>Y: <b id="robot-pos-y">-</b></span>
             <span>Yaw: <b id="robot-pos-yaw">-</b></span>
+            <span id="slam-dimension-status" class="slam-dimension-status"
+                  title="수신 중인 ROS topic을 기준으로 SLAM 차원을 자동 판별합니다">
+              <b id="slam-active-dimension">SLAM 판별 중</b>
+              <small id="slam-dimension-detail">Mapping ? · Localization ?</small>
+            </span>
           </div>
           <div class="map-canvas-container">
             <canvas id="map-canvas" width="600" height="600"></canvas>
+            <div id="test-mapping-status" class="test-mapping-status" role="status" aria-live="polite" hidden>
+              <span class="test-mapping-status-icon" aria-hidden="true">SIM</span>
+              <span class="test-mapping-status-copy">
+                <strong id="test-mapping-status-title">가상 환경 Mapping</strong>
+                <small id="test-mapping-status-detail">가상 LiDAR로 맵을 생성할 준비가 되었습니다</small>
+              </span>
+              <button type="button" id="btn-test-mapping-demo" class="btn btn-small btn-primary">
+                순환주행
+              </button>
+            </div>
             <div id="loop-closure-status" class="loop-closure-status waiting" role="status" aria-live="polite" hidden>
               <span class="loop-closure-status-icon" aria-hidden="true">↻</span>
               <span class="loop-closure-status-copy">
@@ -375,8 +593,8 @@
               <div class="loop-closure-notice-card">
                 <div class="loop-closure-success-icon" aria-hidden="true">✓</div>
                 <div class="loop-closure-notice-copy">
-                  <strong>Loop Closure 성사!</strong>
-                  <p>이전에 지나간 위치가 인식되어 맵 연결이 정상적으로 보정되었습니다.</p>
+                  <strong id="loop-closure-notice-title">Loop Closure 성사!</strong>
+                  <p id="loop-closure-notice-message">이전에 지나간 위치가 인식되어 맵 연결이 정상적으로 보정되었습니다.</p>
                   <small id="loop-closure-notice-count">이번 맵핑에서 총 1회 연결 보정</small>
                 </div>
                 <button type="button" id="btn-loop-closure-confirm" class="btn btn-primary">확인</button>
@@ -390,6 +608,21 @@
               <strong id="quick-task-map-action-title">선택 Action</strong>
               <span id="quick-task-map-action-detail">Action을 선택하세요.</span>
             </div>
+            <aside id="task-preview-map-panel" class="task-preview-map-panel" hidden>
+              <div class="task-preview-map-head">
+                <div>
+                  <strong id="task-preview-map-title">Task 미리보기</strong>
+                  <small id="task-preview-map-detail">Task를 선택하세요.</small>
+                </div>
+                <button type="button" id="btn-task-preview-map-close" aria-label="Task 미리보기 닫기">&times;</button>
+              </div>
+              <div class="task-preview-map-actions">
+                <span id="task-preview-map-badge">전체 경로</span>
+                <button type="button" id="btn-task-preview-map-all" class="btn btn-small">
+                  전체 Task 보기
+                </button>
+              </div>
+            </aside>
             <aside id="active-task-map-panel" class="active-task-map-panel" hidden>
               <div class="active-task-map-header">
                 <div>
@@ -473,6 +706,11 @@
                          type="range" min="24" max="72" step="2" value="40">
                   <strong id="fleet-icon-size-value">40 px</strong>
                 </label>
+                <span id="fleet-active-map-source" class="fleet-active-map-source">활성 맵 대기</span>
+                <button id="btn-fleet-sync-active-map" class="btn btn-small btn-primary"
+                        title="현재 활성 로봇에서 최신 맵을 다시 받아 미니관제 기준 맵으로 사용합니다">
+                  ↻ 활성 로봇 맵 동기화
+                </button>
                 <button id="btn-fleet-map-refresh" class="btn btn-small">맵 다시 확인</button>
               </div>
             </div>
@@ -530,6 +768,35 @@
                   </div>
                 </section>
               </aside>
+            </div>
+          </div>
+        </div>
+
+        <div id="fleet-shortcut-task-modal" class="modal" role="dialog" aria-modal="true"
+             aria-labelledby="fleet-shortcut-task-title">
+          <div class="modal-content fleet-shortcut-task-content">
+            <div class="fleet-shortcut-task-header">
+              <div>
+                <span id="fleet-shortcut-task-key" class="fleet-shortcut-task-key">Ctrl+1</span>
+                <h3 id="fleet-shortcut-task-title">이 Task를 입력하시겠습니까?</h3>
+              </div>
+              <button id="btn-fleet-shortcut-close" class="modal-close" type="button"
+                      aria-label="닫기">&times;</button>
+            </div>
+            <div class="fleet-shortcut-task-summary">
+              <div><span>대상 로봇</span><strong id="fleet-shortcut-task-robot">--</strong></div>
+              <div><span>Task</span><strong id="fleet-shortcut-task-name">--</strong></div>
+              <div><span>구성</span><strong id="fleet-shortcut-task-meta">--</strong></div>
+            </div>
+            <div id="fleet-shortcut-task-preview" class="fleet-shortcut-task-preview"></div>
+            <p class="fleet-shortcut-task-warning">
+              확인을 누르면 선택한 로봇으로 Task가 즉시 전송됩니다.
+            </p>
+            <div class="modal-buttons">
+              <button id="btn-fleet-shortcut-cancel" class="btn" type="button"
+                      title="Esc 키로 취소">취소 <kbd>Esc</kbd></button>
+              <button id="btn-fleet-shortcut-confirm" class="btn btn-primary" type="button"
+                      title="Enter 키로 Task 입력">Task 입력 <kbd>Enter</kbd></button>
             </div>
           </div>
         </div>
@@ -669,17 +936,6 @@
               <span id="checklist-summary" class="checklist-summary"></span>
             </div>
             <div id="checklist-items" class="checklist-items"></div>
-          </div>
-
-          <!-- Connection Timeline -->
-          <div class="conn-timeline-section" data-widget="conn-timeline">
-            <div class="conn-timeline-header">
-              <span class="conn-timeline-title">Connection Timeline</span>
-              <button id="btn-clear-conn-timeline" class="btn btn-small btn-danger">Clear</button>
-            </div>
-            <div id="conn-timeline-list" class="conn-timeline-list">
-              <span class="conn-timeline-empty">No events</span>
-            </div>
           </div>
 
         </div>
@@ -850,11 +1106,32 @@
               </div>
             </div>
 
+            <section id="recent-task-runs" class="recent-task-runs" aria-labelledby="recent-task-runs-title" hidden>
+              <div class="recent-task-runs-heading">
+                <div>
+                  <h5 id="recent-task-runs-title">최근 실행</h5>
+                  <p>직전에 실행한 Task 3개를 이 브라우저 세션 동안 보관합니다.</p>
+                </div>
+                <span>바로 다시 실행</span>
+              </div>
+              <div id="recent-task-runs-list" class="recent-task-runs-list"></div>
+            </section>
+
             <!-- Target Robot (Active Robot) -->
             <div class="action-row">
               <label data-i18n="action.targetRobot">대상 로봇</label>
               <span id="action-target-robot-label" class="action-target-robot-label">--</span>
               <span id="action-target-status" class="action-target-status">Disconnected</span>
+            </div>
+
+            <div class="action-row task-interface-row">
+              <label for="task-interface-mode">Task/Action 인터페이스</label>
+              <select id="task-interface-mode" aria-describedby="task-interface-status">
+                <option value="auto">자동 감지</option>
+                <option value="spx">SPX</option>
+                <option value="legacy">Legacy (TARU)</option>
+              </select>
+              <span id="task-interface-status" class="task-interface-status" data-state="idle">로봇 연결 대기</span>
             </div>
 
             <div class="task-persistent-control">
@@ -886,17 +1163,43 @@
                 </div>
               </div>
               <div class="task-library-header">
-                <div>
+                <div class="task-library-heading">
                   <h5 id="task-library-title">저장 Task</h5>
-                  <p>Task를 펼쳐 Action과 파라미터를 확인하거나 바로 실행하세요.</p>
+                  <p>기본 Task는 용도별 값을 저장해 재사용하고, 사용자 Task는 별도로 관리합니다.</p>
                 </div>
                 <div class="task-library-tools">
                   <input type="search" id="task-library-search" placeholder="Task 검색" autocomplete="off">
                   <button type="button" id="btn-task-library-refresh" class="btn btn-small" title="Task 목록 새로고침">↻</button>
-                  <button type="button" id="btn-quick-task" class="btn btn-small quick-task-launch"
-                          title="맵에서 WayPoint, Trajectory, 도킹 시작점을 찍어 Task를 빠르게 만듭니다">⚡ Quick Task 생성</button>
+                  <button type="button" id="btn-quick-task" class="btn quick-task-launch"
+                          title="맵에서 WayPoint, Trajectory, 도킹 시작점을 찍어 Task를 빠르게 만듭니다">⚡ QUICK TASK 생성</button>
                   <button type="button" id="btn-new-task" class="btn btn-small btn-primary">＋ Task 추가</button>
                 </div>
+              </div>
+              <details id="builtin-task-toggle" class="builtin-task-toggle">
+                <summary>
+                  <span class="builtin-task-toggle-main">
+                    <span class="builtin-task-toggle-icon" aria-hidden="true">◆</span>
+                    <span>
+                      <strong>기본 Task</strong>
+                      <small>현장 용도에 맞게 Argument와 Parameter를 설정하면 이 프로그램에 저장됩니다.</small>
+                    </span>
+                  </span>
+                  <span id="builtin-task-count" class="builtin-task-count">0</span>
+                </summary>
+                <div class="builtin-task-storage-note">
+                  <span>이 PC의 EasyLoop에 자동 저장</span>
+                  <small>서버나 로봇 파일은 변경하지 않습니다.</small>
+                </div>
+                <div id="builtin-task-grid" class="task-library-grid builtin-task-grid">
+                  <p class="task-library-empty">기본 Task를 준비하는 중입니다.</p>
+                </div>
+              </details>
+              <div class="user-task-library-heading">
+                <div>
+                  <strong>사용자 Task</strong>
+                  <small>직접 만들거나 YAML에서 불러온 Task</small>
+                </div>
+                <span id="user-task-count">0</span>
               </div>
               <div id="task-library-grid" class="task-library-grid">
                 <p class="task-library-empty">저장된 Task가 없습니다.</p>
@@ -911,13 +1214,17 @@
                 </div>
                 <div class="task-builder-heading-actions">
                   <button type="button" id="btn-close-quick-task" class="btn btn-small">취소</button>
-                  <button type="button" id="btn-quick-task-info" class="btn btn-small">Task Info 보기</button>
-                  <button type="button" id="btn-quick-task-edit" class="btn btn-small">상세 편집</button>
-                  <button type="button" id="btn-save-quick-task" class="btn btn-small btn-primary">Task 저장</button>
-                  <button type="button" id="btn-run-quick-task" class="btn btn-small quick-task-run"
-                          title="현재 Quick Task를 저장한 뒤 활성 로봇에서 바로 실행합니다">저장 후 실행</button>
+                  <button type="button" id="btn-quick-task-info" class="btn btn-small"
+                          title="Task Info 보기 (I)">Task Info 보기</button>
+                  <button type="button" id="btn-quick-task-edit" class="btn btn-small"
+                          title="상세 편집으로 전환 (E)">상세 편집</button>
+                  <button type="button" id="btn-save-quick-task" class="btn btn-small btn-primary"
+                          title="Task 저장 (Ctrl+S)">Task 저장</button>
                 </div>
               </div>
+              <button type="button" id="btn-run-quick-task"
+                      class="btn quick-task-run quick-task-run-primary"
+                      title="현재 Quick Task를 저장한 뒤 활성 로봇에서 바로 실행합니다">저장 후 실행</button>
 
               <div class="quick-task-meta">
                 <label>
@@ -934,33 +1241,67 @@
 
               <div class="quick-task-guide">
                 <strong>빠른 반복시험</strong>
-                <span>① WayPoint는 다른 도구를 고를 때까지 연속 입력 → ② 도킹은 처음부터 선택 가능하며 순차 질문 입력 → ③ 반복 설정 → ④ 저장 후 실행</span>
+                <span>① WayPoint·Trajectory·곡선 경로 입력 → ② 주행 입력 완료 → ③ 마지막 동작 선택(생략 가능) → ④ 저장 후 실행</span>
               </div>
 
               <div class="quick-task-tools">
-                <button type="button" id="btn-quick-waypoint" class="btn btn-small"
+                <button type="button" id="btn-quick-waypoint" class="btn btn-small" data-shortcut="W"
                         title="첫 클릭으로 위치, 두 번째 클릭으로 방향을 지정해 Way_Point Action을 추가합니다">📍 WayPoint</button>
-                <button type="button" id="btn-quick-trajectory" class="btn btn-small"
+                <button type="button" id="btn-quick-trajectory" class="btn btn-small" data-shortcut="T"
                         title="각 경유점의 위치와 방향을 두 번의 클릭으로 지정해 TrajectoryFollowing Action을 만듭니다">〰 Trajectory 시작</button>
-                <button type="button" id="btn-quick-trajectory-finish" class="btn btn-small btn-primary" disabled
-                        title="현재 Trajectory 경유점 입력을 완료합니다">Trajectory 완료</button>
-                <button type="button" id="btn-quick-docking" class="btn btn-small"
-                        title="도킹 위치·방향 지정 후 Argument와 Parameter를 추천값과 함께 순서대로 입력합니다">🔌 도킹 시작점</button>
-                <button type="button" id="btn-quick-docking-out" class="btn btn-small"
-                        title="설정된 거리만큼 도킹 위치에서 이탈하는 DockingOut Action을 추가합니다">↩ DockingOut 추가</button>
+                <button type="button" id="btn-quick-freehand" class="btn btn-small quick-freehand-tool" data-shortcut="G"
+                        title="맵에서 누른 채 곡선을 그리면 경로를 자동 정리해 TrajectoryFollowing Action을 만듭니다">✍ 곡선 경로 그리기</button>
+                <button type="button" id="btn-quick-trajectory-finish" class="btn btn-small btn-primary"
+                        data-shortcut="F" disabled
+                        title="현재 WayPoint 또는 Trajectory 입력을 마치고 마지막 동작을 선택합니다">✓ 주행 입력 완료</button>
+                <button type="button" id="btn-quick-docking" class="btn btn-small" data-shortcut="D"
+                        title="맵에서 도킹 시작 위치·방향을 지정한 뒤 WayPoint와 Docking을 함께 추가합니다">⌖ 맵 지정 + Docking</button>
+                <button type="button" id="btn-quick-docking-inline" class="btn btn-small"
+                        data-shortcut="⇧D"
+                        title="위치 WayPoint 없이 Docking Action만 현재 Task 맨 뒤에 추가합니다">🔌 Docking만 추가</button>
+                <button type="button" id="btn-quick-docking-out" class="btn btn-small" data-shortcut="O"
+                        title="위치 WayPoint 없이 DockingOut Action만 현재 Task 맨 뒤에 추가합니다">↩ DockingOut만 추가</button>
+                <button type="button" id="btn-quick-docking-out-map" class="btn btn-small"
+                        data-shortcut="⇧O"
+                        title="맵에서 시작 위치·방향을 지정한 뒤 WayPoint와 DockingOut을 함께 추가합니다">⌖ 맵 지정 + DockingOut</button>
               </div>
               <details class="quick-task-shortcut-help">
-                <summary>⌨ 단축키 도움말</summary>
-                <div class="quick-task-shortcuts" aria-label="Quick Task 단축키">
-                  <span><kbd>W</kbd> WayPoint 연속</span>
-                  <span><kbd>T</kbd> Trajectory</span>
-                  <span><kbd>D</kbd> 도킹</span>
-                  <span><kbd>O</kbd> DockingOut</span>
-                  <span><kbd>S</kbd> Standby</span>
-                  <span><kbd>F</kbd> Trajectory 완료</span>
-                  <span><kbd>Backspace</kbd> 마지막 취소</span>
-                  <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> 저장 후 실행</span>
-                  <span><kbd>Esc</kbd> 맵 입력 중지</span>
+                <summary>⌨ Quick Task 단축키 전체 보기</summary>
+                <div class="quick-task-shortcut-groups" aria-label="Quick Task 단축키">
+                  <section>
+                    <strong>Action 입력</strong>
+                    <div class="quick-task-shortcuts">
+                      <span><kbd>W</kbd> WayPoint 연속</span>
+                      <span><kbd>T</kbd> Trajectory</span>
+                      <span><kbd>G</kbd> 곡선 경로</span>
+                      <span><kbd>D</kbd> 맵 지정 + Docking</span>
+                      <span><kbd>Shift+D</kbd> Docking만 추가</span>
+                      <span><kbd>O</kbd> DockingOut만 추가</span>
+                      <span><kbd>Shift+O</kbd> 맵 지정 + DockingOut</span>
+                      <span><kbd>S</kbd> Standby</span>
+                      <span><kbd>F</kbd> 주행 입력 완료</span>
+                    </div>
+                  </section>
+                  <section>
+                    <strong>마지막 동작 선택창</strong>
+                    <div class="quick-task-shortcuts">
+                      <span><kbd>D</kbd> Docking</span>
+                      <span><kbd>O</kbd> DockingOut</span>
+                      <span><kbd>S</kbd> Standby</span>
+                      <span><kbd>N</kbd> 또는 <kbd>0</kbd> 추가 없음</span>
+                    </div>
+                  </section>
+                  <section>
+                    <strong>작성 · 실행</strong>
+                    <div class="quick-task-shortcuts">
+                      <span><kbd>I</kbd> Task Info</span>
+                      <span><kbd>E</kbd> 상세 편집</span>
+                      <span><kbd>Ctrl</kbd>+<kbd>S</kbd> Task 저장</span>
+                      <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> 저장 후 실행</span>
+                      <span><kbd>Backspace</kbd> 마지막 취소</span>
+                      <span><kbd>Esc</kbd> 입력 중지 / 선택창 닫기</span>
+                    </div>
+                  </section>
                 </div>
               </details>
 
@@ -982,6 +1323,10 @@
                         <option value="0">전진</option>
                         <option value="3">후진</option>
                       </select>
+                    </label>
+                    <label>곡선 경유점 간격 (m)
+                      <input type="number" id="quick-freehand-spacing" step="0.05" min="0.1" max="1" value="0.25"
+                             title="작을수록 그린 곡선을 세밀하게 따라가지만 Action 데이터가 커집니다">
                     </label>
                   </div>
                 </details>
@@ -1027,16 +1372,18 @@
 
               <div class="quick-inline-actions">
                 <div class="quick-standby-row">
-                  <label for="quick-standby-duration">중간 Standby</label>
+                  <label for="quick-standby-duration">Standby 시간</label>
                   <input type="number" id="quick-standby-duration" min="0" step="0.1" value="5">
                   <span>초</span>
-                  <button type="button" id="btn-quick-standby" class="btn btn-small">＋ Standby 추가</button>
+                  <button type="button" id="btn-quick-standby" class="btn btn-small"
+                          data-shortcut="S">＋ Standby 추가</button>
                 </div>
                 <div class="quick-standby-row">
                   <label for="quick-docking-out-distance">DockingOut 거리</label>
                   <input type="number" id="quick-docking-out-distance" step="0.1" value="-1.0">
                   <span>m</span>
-                  <button type="button" id="btn-quick-docking-out-inline" class="btn btn-small">↩ DockingOut 추가</button>
+                  <button type="button" id="btn-quick-docking-out-inline" class="btn btn-small"
+                          data-shortcut="O">↩ 현재 Task 맨 뒤에 추가</button>
                 </div>
               </div>
 
@@ -1142,6 +1489,13 @@
             <!-- Send Button -->
             <div class="action-buttons">
               <button id="btn-add-to-queue" class="btn btn-primary" data-i18n="action.addToQueue">Task에 추가</button>
+              <button id="btn-save-selected-action" class="btn btn-small" disabled
+                      title="변경된 선택 Action만 현재 Task에 즉시 저장">Action 저장</button>
+              <button id="btn-apply-params-same-type" class="btn btn-small" disabled
+                      title="현재 파라미터를 적용할 같은 종류의 Action을 선택">파라미터 적용 대상 선택</button>
+              <span id="action-edit-change-status" class="action-edit-change-status">
+                수정할 Action을 선택하세요.
+              </span>
               <button id="btn-clear-queue" class="btn btn-small" data-i18n="action.clearQueue">Action 전체 비우기</button>
               <div class="undo-redo-controls">
                 <button id="btn-undo-queue" class="btn-mini" title="Undo (Ctrl+Z)" disabled>&#8630;</button>
@@ -1223,9 +1577,9 @@
               <h4>Camera Output</h4>
               <div class="camera-tab-controls">
                 <label><input type="checkbox" class="cam-select-chk" data-cam="cam1-depth"> Cam1 Depth</label>
-                <label><input type="checkbox" class="cam-select-chk" data-cam="cam1-color" checked> Cam1 Color</label>
+                <label><input type="checkbox" class="cam-select-chk" data-cam="cam1-color"> Cam1 Color</label>
                 <label><input type="checkbox" class="cam-select-chk" data-cam="cam2-depth"> Cam2 Depth</label>
-                <label><input type="checkbox" class="cam-select-chk" data-cam="cam2-color" checked> Cam2 Color</label>
+                <label><input type="checkbox" class="cam-select-chk" data-cam="cam2-color"> Cam2 Color</label>
                 <select id="cam-layout-select" class="cam-layout-select" title="표시할 카메라 개수" aria-label="표시할 카메라 개수">
                   <option value="1">카메라 1개</option>
                   <option value="2" selected>카메라 2개</option>
@@ -1574,6 +1928,60 @@ free -h"></textarea>
           </div>
         </div>
 
+        <div class="modal" id="scheduler-add-modal" role="dialog" aria-modal="true" aria-labelledby="scheduler-add-title">
+          <div class="modal-content scheduler-add-modal-content">
+            <h3 id="scheduler-add-title">Scheduler 미션 추가</h3>
+            <p>저장된 Task를 선택하고 실행 조건을 설정하세요.</p>
+            <div class="scheduler-add-form">
+              <label>미션 이름
+                <input id="scheduler-mission-name" type="text" placeholder="예: 배터리 부족 자동 충전" autocomplete="off">
+              </label>
+              <label>실행할 저장 Task
+                <select id="scheduler-queue-name">
+                  <option value="">저장된 Task를 선택하세요</option>
+                </select>
+                <small id="scheduler-task-help">선택한 Task에 저장된 Action 순서대로 실행됩니다.</small>
+                <small id="scheduler-queue-empty" class="scheduler-queue-empty" hidden>저장된 Task가 없습니다. 작업 탭에서 먼저 Task를 저장하세요.</small>
+              </label>
+              <label>실행 조건
+                <select id="scheduler-execution-mode">
+                  <option value="battery">배터리 조건 충족 시</option>
+                  <option value="once">한 번 실행</option>
+                  <option value="interval">일정 간격 반복</option>
+                  <option value="cron">매일 지정 시각</option>
+                </select>
+                <small id="scheduler-condition-help">배터리가 선택한 조건을 만족하면 저장 Task를 실행합니다.</small>
+              </label>
+              <label id="scheduler-battery-row">배터리 임계값 (%)
+                <input id="scheduler-battery-threshold" type="number" min="0" max="100" step="1" value="20">
+                <select id="scheduler-battery-condition">
+                  <option value="below" selected>이하 (≤)</option>
+                  <option value="above">이상 (≥)</option>
+                </select>
+                <small>0~100% 범위로 입력하고, 임계값과 조건을 함께 설정하세요.</small>
+              </label>
+              <label id="scheduler-interval-row" hidden>반복 간격 (초)
+                <select id="scheduler-interval-sec">
+                  <option value="60">1분</option>
+                  <option value="300" selected>5분</option>
+                  <option value="600">10분</option>
+                  <option value="1800">30분</option>
+                  <option value="3600">1시간</option>
+                </select>
+                <small>선택한 주기로 저장 Task를 반복 실행합니다.</small>
+              </label>
+              <label id="scheduler-cron-row" hidden>매일 실행 시각
+                <input id="scheduler-cron-time" type="time" value="09:00">
+                <small>매일 이 시각에 저장 Task를 한 번 실행합니다.</small>
+              </label>
+            </div>
+            <div class="modal-buttons">
+              <button id="btn-scheduler-cancel" class="btn btn-small">취소</button>
+              <button id="btn-scheduler-save" class="btn btn-small btn-primary">미션 저장</button>
+            </div>
+          </div>
+        </div>
+
         <!-- Tab Content: Diagnostics -->
         <div class="tab-content" id="tab-diagnostics">
           <div class="diag-section">
@@ -1680,10 +2088,18 @@ free -h"></textarea>
             <option value="192.168.20"></option>
             <option value="192.168.3"></option>
           </datalist>
+          <label class="rm-subnet-label" for="rm-scan-mode">검색 방식</label>
+          <select id="rm-scan-mode" class="rm-scan-mode" title="포트의 용도">
+            <option value="rosbridge">ROS Bridge</option>
+            <option value="ssh">SSH 포트포워딩</option>
+          </select>
+          <label class="rm-subnet-label" for="rm-scan-port">포트</label>
+          <input type="number" id="rm-scan-port" class="rm-scan-port"
+                 min="1" max="65535" value="9090" inputmode="numeric" title="검색할 TCP 포트">
           <button id="btn-rm-scan" class="btn btn-small btn-primary">로봇 스캔</button>
           <span id="rm-scan-status" class="rm-scan-status"></span>
         </div>
-        <div class="rm-scan-help">검색된 로봇은 연결 대기 상태로 추가되며 토픽 데이터는 받지 않습니다. 목록에서 선택한 활성 로봇 1대의 데이터만 수신합니다. <code>192.168.3.5</code>는 항상 검색합니다.</div>
+        <div class="rm-scan-help">ROS Bridge는 RID까지 확인합니다. SSH 포트포워딩은 <code>192.168.20.63:2222</code>처럼 열린 외부 포트를 찾고, 저장된 수동 로봇 정보와 자동으로 연결합니다. <code>192.168.3.5</code>는 항상 검색합니다.</div>
         <div id="rm-scan-results" class="rm-scan-results" style="display:none;">
           <div class="rm-scan-list" id="rm-scan-list"></div>
         </div>
@@ -1801,50 +2217,58 @@ free -h"></textarea>
   <!-- BMS Detail Modal -->
   <div id="bms-detail-modal" class="modal">
     <div class="modal-content bms-modal-content">
-      <h3 data-i18n="bms.title">BMS Details</h3>
+      <h3>배터리 상세</h3>
+      <div class="bms-detail-summary">
+        <span>예상 시간</span>
+        <strong id="bms-time-estimate" class="bms-time-estimate">계산 대기</strong>
+      </div>
       <div class="bms-detail-grid" id="bms-detail-grid">
         <div class="bms-detail-item">
-          <span class="bms-label">Voltage</span>
+          <span class="bms-label">전압</span>
           <span class="bms-value" id="bms-voltage">--</span>
         </div>
         <div class="bms-detail-item">
-          <span class="bms-label">Current</span>
+          <span class="bms-label">전류</span>
           <span class="bms-value" id="bms-current">--</span>
         </div>
         <div class="bms-detail-item">
-          <span class="bms-label">SOC</span>
+          <span class="bms-label">잔량</span>
           <span class="bms-value" id="bms-soc">--</span>
         </div>
       </div>
       <div id="bms-charge-section" class="bms-charge-section" style="display:none;">
-        <h4>Charge Time Estimate</h4>
+        <h4>충전 예상 시간</h4>
         <div class="bms-charge-row">
-          <span class="bms-charge-label">To Full:</span>
+          <span class="bms-charge-label">완충까지:</span>
           <span class="bms-charge-value" id="bms-charge-full-eta">--</span>
         </div>
         <div class="bms-charge-row">
-          <span class="bms-charge-label">Target:</span>
+          <span class="bms-charge-label">목표:</span>
           <span class="bms-charge-value" id="bms-charge-target-eta">--</span>
           <div class="bms-charge-target-set">
             <input type="number" id="bms-charge-target-input" min="1" max="100" value="80">
             <span>%</span>
-            <button id="btn-bms-set-target" class="btn btn-small">Set</button>
+            <button id="btn-bms-set-target" class="btn btn-small">적용</button>
           </div>
         </div>
       </div>
       <div id="bms-usage-section" class="bms-charge-section" style="display:none;">
-        <h4>Estimated Usage Time</h4>
+        <h4>사용 가능 예상 시간</h4>
         <div class="bms-charge-row">
-          <span class="bms-charge-label">Remaining:</span>
+          <span class="bms-charge-label">남은 시간:</span>
           <span class="bms-charge-value" id="bms-usage-time-eta">--</span>
         </div>
       </div>
-      <div class="bms-raw-data">
-        <h4>Raw Data</h4>
-        <pre id="bms-content">No data</pre>
+      <div class="bms-test-controls">
+        <button id="btn-bms-test-charge" class="btn btn-small" type="button" disabled>Test Mode 충전 전환</button>
+        <small>Test Mode에서만 사용할 수 있습니다.</small>
       </div>
+      <details class="bms-raw-data">
+        <summary>원시 데이터 보기</summary>
+        <pre id="bms-content">No data</pre>
+      </details>
       <div class="modal-buttons">
-        <button id="btn-bms-modal-close" class="btn" data-i18n="common.close">Close</button>
+        <button id="btn-bms-modal-close" class="btn">닫기</button>
       </div>
     </div>
   </div>
@@ -2011,7 +2435,7 @@ free -h"></textarea>
         <span>Az: <strong id="jog-cur-az">0.00</strong></span>
         <span>Pub: <strong id="jog-pub-status">Off</strong></span>
       </div>
-      <p class="jog-hint">DD: W/X/A/D | QD: W/X=fwd/bwd, A/D=strafe, Q/E=rotate | Lift: Z=up, C=down</p>
+      <p class="jog-hint">DD: W/X/A/D | QD: W/X=fwd/bwd, A/D=strafe, Q/E=rotate | Lift: Z=up, C=down | 충전: O=ON, F=OFF</p>
       <div class="jog-service-btns">
         <button class="btn btn-small btn-warning" id="jog-motor-reset" title="Call /rid/motor_reset">Motor Reset</button>
         <button class="btn btn-small btn-warning" id="jog-lift-motor-reset" title="Call /rid/lift_motor_reset">Lift Motor Reset</button>
@@ -2030,6 +2454,25 @@ free -h"></textarea>
           </button>
         </div>
         <div id="jog-manual-lift-status" class="jog-manual-lift-status">버튼 또는 키를 누르는 동안만 동작</div>
+      </div>
+      <div id="jog-stl-ulsan-control" class="jog-stl-ulsan-control" hidden>
+        <div class="jog-stl-ulsan-header">
+          <span>stl_ulsan 턴테이블</span>
+          <strong id="jog-stl-ulsan-target">ROBOT_MODEL 확인 중</strong>
+        </div>
+        <div class="jog-turntable-presets">
+          <button class="btn btn-small" type="button" data-turntable-target="-90">-90°</button>
+          <button class="btn btn-small" type="button" data-turntable-target="0">0°</button>
+          <button class="btn btn-small" type="button" data-turntable-target="90">+90°</button>
+          <button class="btn btn-small" type="button" data-turntable-target="180">180°</button>
+        </div>
+        <div class="jog-turntable-target-row">
+          <label for="jog-turntable-target">목표 각도</label>
+          <input id="jog-turntable-target" type="number" min="-180" max="180" step="1" value="0">
+          <button class="btn btn-small btn-primary" id="jog-turntable-go" type="button">이동</button>
+          <button class="btn btn-small btn-danger" id="jog-turntable-cancel" type="button">정지 / Task 취소</button>
+        </div>
+        <div id="jog-turntable-status" class="jog-turntable-status">Turntable Action args: [mode, target, asyncmode]</div>
       </div>
       <div id="jog-model-io-control" class="jog-model-io-control" hidden>
         <div class="jog-model-io-header">
@@ -2061,8 +2504,10 @@ free -h"></textarea>
           <strong id="jog-charge-relay-state" class="unknown">상태 확인 중</strong>
         </div>
         <div class="jog-charge-buttons">
-          <button class="btn btn-small btn-primary" id="jog-charge-on">충전 ON</button>
-          <button class="btn btn-small" id="jog-charge-off">충전 OFF</button>
+          <button class="btn btn-small btn-primary" id="jog-charge-on"
+                  title="충전 ON (단축키 O, 실행 전 확인)">충전 ON (O)</button>
+          <button class="btn btn-small" id="jog-charge-off"
+                  title="충전 OFF (단축키 F, 즉시 실행)">충전 OFF (F)</button>
         </div>
         <div id="jog-charge-progress" class="jog-charge-progress idle">
           BMS 충전 전류를 기다리는 중입니다.
@@ -2098,20 +2543,37 @@ free -h"></textarea>
       <h3 data-i18n="shortcuts.title">Keyboard Shortcuts</h3>
       <div class="shortcuts-grid">
         <div class="sc-item"><kbd>숫자</kbd> <span>호기 전환 (예: 1, 10, 101 입력 후 잠시 대기 또는 Enter)</span></div>
-        <div class="sc-item"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> <span data-i18n="shortcuts.jogMove">Jog Move</span></div>
-        <div class="sc-item"><kbd>Q</kbd><kbd>E</kbd> <span data-i18n="shortcuts.jogRotate">Jog Rotate</span></div>
-        <div class="sc-item"><kbd>Space</kbd> <span data-i18n="shortcuts.emergencyStop">Emergency Stop</span></div>
-        <div class="sc-item"><kbd>Enter</kbd> <span data-i18n="shortcuts.sendAction">Send Action</span></div>
-        <div class="sc-item"><kbd>Esc</kbd> <span data-i18n="shortcuts.closeModal">Close Modal</span></div>
-        <div class="sc-item"><kbd>?</kbd> <span data-i18n="shortcuts.showHelp">This Help</span></div>
+        <div class="sc-item"><kbd>Backspace</kbd><kbd>Enter</kbd> <span>호기 입력 수정 / 즉시 선택</span></div>
         <div class="sc-item"><kbd>Ctrl</kbd>+<kbd>1</kbd>~<kbd>9</kbd> <span>탭 전환</span></div>
+        <div class="sc-item"><kbd>Ctrl</kbd>+<kbd>1</kbd>~<kbd>9</kbd> <span>미니관제: 선택 로봇 Task 미리보기</span></div>
+        <div class="sc-item"><kbd>Enter</kbd> / <kbd>Esc</kbd> <span>미니관제 Task 확인창 실행 / 취소</span></div>
         <div class="sc-item"><kbd>Ctrl</kbd>+<kbd>K</kbd> <span data-i18n="shortcuts.search">Search</span></div>
         <div class="sc-item"><kbd>Ctrl</kbd>+<kbd>M</kbd> <span data-i18n="shortcuts.toggleMap">Toggle Map</span></div>
-        <div class="sc-item"><kbd>F</kbd> <span data-i18n="shortcuts.fullscreen">Fullscreen</span></div>
         <div class="sc-item"><kbd>G</kbd> <span data-i18n="shortcuts.navGoal">Nav Goal</span></div>
         <div class="sc-item"><kbd>P</kbd> <span data-i18n="shortcuts.setPose">Set Pose</span></div>
+        <div class="sc-item"><kbd>J</kbd> <span>Jog 패널 열기/닫기</span></div>
+        <div class="sc-item"><kbd>F</kbd> <span>전체화면 (Jog가 닫혀 있을 때)</span></div>
+        <div class="sc-item"><kbd>W</kbd><kbd>X</kbd><kbd>A</kbd><kbd>D</kbd> <span>Jog 전진 / 후진 / 좌 / 우</span></div>
+        <div class="sc-item"><kbd>Q</kbd><kbd>E</kbd> <span>Jog 회전</span></div>
+        <div class="sc-item"><kbd>S</kbd><kbd>Space</kbd> <span>Jog 즉시 정지</span></div>
+        <div class="sc-item"><kbd>Z</kbd><kbd>C</kbd> <span>리프트 상승 / 하강</span></div>
+        <div class="sc-item"><kbd>O</kbd><kbd>F</kbd> <span>Jog 충전 ON(확인) / OFF(즉시)</span></div>
+        <div class="sc-item"><kbd>+</kbd><kbd>-</kbd> <span>Jog 선속도 증감</span></div>
+        <div class="sc-item"><kbd>Ctrl</kbd>+<kbd>+</kbd><kbd>-</kbd> <span>Jog 각속도 증감</span></div>
+        <div class="sc-item"><kbd>W/T/G</kbd><kbd>D/O/S/F</kbd> <span>Quick Task Action 입력</span></div>
+        <div class="sc-item"><kbd>D/O/S</kbd><kbd>N/0</kbd> <span>Quick Task 마지막 동작 / 추가 없음</span></div>
+        <div class="sc-item"><kbd>I/E</kbd><kbd>Ctrl+S</kbd> <span>Quick Task Info / 상세 편집 / 저장</span></div>
+        <div class="sc-item"><kbd>Backspace</kbd> <span>Quick Task 마지막 항목 취소</span></div>
+        <div class="sc-item"><kbd>Ctrl</kbd>+<kbd>Enter</kbd> <span>Quick Task 저장 후 실행</span></div>
+        <div class="sc-item"><kbd>1~5</kbd> <span>맵 편집 도구 선택</span></div>
+        <div class="sc-item"><kbd>Q</kbd><kbd>[</kbd><kbd>]</kbd> <span>맵 편집 브러시 모양 / 크기</span></div>
+        <div class="sc-item"><kbd>Shift</kbd><kbd>Space</kbd> <span>맵 편집 직선 / Pan</span></div>
         <div class="sc-item"><kbd>Ctrl</kbd>+<kbd>Z</kbd> <span>Undo</span></div>
         <div class="sc-item"><kbd>Ctrl</kbd>+<kbd>Y</kbd> <span>Redo</span></div>
+        <div class="sc-item"><kbd>Ctrl</kbd>+<kbd>F</kbd> <span>Terminal 검색</span></div>
+        <div class="sc-item"><kbd>Enter</kbd> <span>Action 전송 / 검색 다음 결과</span></div>
+        <div class="sc-item"><kbd>Esc</kbd> <span data-i18n="shortcuts.closeModal">Close Modal</span></div>
+        <div class="sc-item"><kbd>?</kbd> <span data-i18n="shortcuts.showHelp">This Help</span></div>
       </div>
       <button id="btn-shortcuts-close" class="btn btn-small" data-i18n="shortcuts.close">Close</button>
     </div>
@@ -2120,7 +2582,7 @@ free -h"></textarea>
   <!-- Nav Goal Parameter Popup -->
   <div id="nav-goal-popup" class="nav-goal-popup hidden">
     <div class="nav-goal-popup-header">
-      <span class="nav-goal-popup-title">Nav Goal Parameters</span>
+      <span class="nav-goal-popup-title">목적지 주행 설정</span>
     </div>
     <div class="nav-goal-popup-body">
       <div class="nav-goal-coord">
@@ -2129,27 +2591,26 @@ free -h"></textarea>
         <span>Yaw: <b id="nav-goal-yaw">0.0</b>&deg;</span>
       </div>
       <div class="nav-goal-param-row">
-        <label>Max Vel (m/s)</label>
+        <label>최대 속도 (m/s)</label>
         <input type="number" id="nav-goal-max-vel" value="0.8" min="0.1" max="2.0" step="0.1">
       </div>
       <div class="nav-goal-param-row">
-        <label>Passing</label>
+        <label>목적지 통과</label>
         <select id="nav-goal-passing">
-          <option value="false">Stop at goal</option>
-          <option value="true">Pass through</option>
+          <option value="false">목적지에서 정지</option>
+          <option value="true">정지 없이 통과</option>
         </select>
       </div>
       <div class="nav-goal-param-row">
-        <label>Avoid</label>
-        <select id="nav-goal-avoid">
-          <option value="false">Avoid Obstacles ON</option>
-          <option value="true">Avoid OFF</option>
+        <label>검은 장애물 회피</label>
+        <select id="nav-goal-avoid" title="검은 점유 셀은 안전을 위해 항상 회피합니다.">
+          <option value="false">회피 ON (안전 고정)</option>
         </select>
       </div>
     </div>
     <div class="nav-goal-popup-actions">
-      <button id="btn-nav-goal-send" class="btn btn-primary btn-small">Send</button>
-      <button id="btn-nav-goal-cancel" class="btn btn-small">Cancel</button>
+      <button id="btn-nav-goal-send" class="btn btn-primary btn-small">주행 시작</button>
+      <button id="btn-nav-goal-cancel" class="btn btn-small">취소</button>
     </div>
   </div>
 
@@ -2319,7 +2780,7 @@ free -h"></textarea>
       </div>
       <div class="fw-row">
         <span class="fw-label">State</span>
-        <span class="fw-value" id="fw-work-state"><span class="fw-ws-dot" id="fw-ws-dot"></span>--</span>
+        <span class="fw-value" id="fw-work-state"><span class="fw-ws-dot" id="fw-ws-dot"></span><span id="fw-work-state-text">--</span></span>
       </div>
       <div class="fw-row">
         <span class="fw-label">Pose</span>
@@ -2478,30 +2939,33 @@ free -h"></textarea>
   <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
   <!-- Scripts -->
-  <script src="https://cdn.jsdelivr.net/npm/roslib@1.0.1/build/roslib.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-search@0.13.0/lib/xterm-addon-search.min.js"></script>
+  <!-- Closed-network runtime dependencies: keep these local and before app modules. -->
+  <script src="vendor/roslib/roslib.min.js?v=1.0.1"></script>
+  <script src="vendor/xterm/xterm.js?v=5.3.0"></script>
+  <script src="vendor/xterm-addon-fit/xterm-addon-fit.js?v=0.8.0"></script>
+  <script src="vendor/xterm-addon-search/xterm-addon-search.js?v=0.13.0"></script>
   <script src="js/i18n.js"></script>
-  <script src="js/app.js?v=20260725-responsive-layout"></script>
+  <script src="js/app.js?v=20260731-manual-on-robot-switch&health=3"></script>
   <script src="js/dashboard.js"></script>
-  <script src="js/ros-manager.js?v=20260725-loop-closure-ui"></script>
-  <script src="js/test-mode.js?v=20260724-task-info-direction"></script>
+  <script src="js/robot-compatibility.js?v=20260806-stl-ulsan-jog"></script>
+  <script src="js/ros-manager.js?v=20260806-stl-ulsan-jog&health=3"></script>
+  <script src="js/test-mode.js?v=20260728-drive-lab"></script>
   <script src="js/ros-info.js"></script>
   <script src="js/map-context-menu.js"></script>
   <!-- Test Mode Loading Overlay -->
   <div id="testmode-loading-overlay" class="testmode-loading-overlay" style="display:none;">
     <div class="testmode-loading-box">
-      <div class="testmode-loading-title">Starting Test Mode...</div>
-      <div class="testmode-loading-step" id="testmode-step-text">Waiting for rosbridge server</div>
+      <div class="testmode-loading-title">Test Mode 시작</div>
+      <div class="testmode-loading-step" id="testmode-step-text">가상 ROS 준비 중</div>
       <div class="testmode-progress-bar">
         <div class="testmode-progress-fill" id="testmode-progress-fill"></div>
       </div>
       <div class="testmode-loading-pct" id="testmode-loading-pct">0%</div>
+      <button id="btn-testmode-start-cancel" class="btn btn-small" type="button">취소</button>
     </div>
   </div>
 
-  <!-- Reusable Task Info Modal -->
+      <!-- Reusable Task Info Modal -->
   <div id="task-info-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="task-info-modal-title">
     <div class="modal-content task-info-modal-content">
       <div class="task-info-modal-header">
@@ -2515,6 +2979,121 @@ free -h"></textarea>
       <div class="modal-buttons">
         <button type="button" id="btn-task-info-close2" class="btn">닫기</button>
       </div>
+    </div>
+  </div>
+  <div id="action-param-target-modal" class="modal" role="dialog" aria-modal="true"
+       aria-labelledby="action-param-target-title">
+    <div class="modal-content action-param-target-content">
+      <div class="action-param-target-head">
+        <div>
+          <h3 id="action-param-target-title">파라미터 적용 대상 선택</h3>
+          <p id="action-param-target-subtitle">같은 종류의 Action 중 적용할 항목만 선택하세요.</p>
+        </div>
+        <button type="button" id="btn-action-param-target-close" class="modal-close"
+                aria-label="닫기">&times;</button>
+      </div>
+      <label class="action-param-target-all">
+        <input type="checkbox" id="action-param-target-all">
+        <span>전체 선택</span>
+      </label>
+      <div id="action-param-target-list" class="action-param-target-list"></div>
+      <p id="action-param-target-status" class="action-param-target-status">
+        좌표·방향·Action 이름은 변경되지 않습니다.
+      </p>
+      <div class="modal-buttons">
+        <button type="button" id="btn-action-param-target-cancel" class="btn">취소</button>
+        <button type="button" id="btn-action-param-target-apply" class="btn btn-primary">
+          선택 항목에 적용
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <aside id="task-info-mini" class="task-info-mini" role="status" aria-live="polite" hidden>
+    <div class="task-info-mini-head">
+      <span class="task-info-mini-symbol" aria-hidden="true">▶</span>
+      <div>
+        <strong id="task-info-mini-title">실행 Task</strong>
+        <small id="task-info-mini-robot">--</small>
+      </div>
+      <span id="task-info-mini-state" class="task-state-badge">WORK</span>
+      <button type="button" id="btn-task-info-mini-close" class="task-info-mini-close"
+              title="작은 실행창 숨기기" aria-label="작은 실행창 숨기기">&times;</button>
+    </div>
+    <div class="task-info-mini-progress" aria-hidden="true">
+      <span id="task-info-mini-progress-fill"></span>
+    </div>
+    <div id="task-info-mini-detail" class="task-info-mini-detail">Action 정보 수신 대기</div>
+    <button type="button" id="btn-task-info-mini-open" class="task-info-mini-open">Task Info 자세히 보기</button>
+  </aside>
+
+  <!-- Built-in Task purpose-specific settings -->
+  <div id="builtin-task-settings-modal" class="modal" role="dialog" aria-modal="true"
+       aria-labelledby="builtin-task-settings-title">
+    <div class="modal-content builtin-task-settings-content">
+      <div class="builtin-task-settings-head">
+        <div>
+          <span class="builtin-task-settings-label">기본 TASK · 이 PC 저장</span>
+          <h3 id="builtin-task-settings-title">기본 Task 용도별 설정</h3>
+          <p id="builtin-task-settings-subtitle">Argument와 Parameter를 현장 용도에 맞게 설정하세요.</p>
+        </div>
+        <button type="button" id="btn-builtin-task-settings-close" class="modal-close"
+                aria-label="닫기">&times;</button>
+      </div>
+      <div id="builtin-task-settings-body" class="builtin-task-settings-body"></div>
+      <div id="builtin-task-settings-status" class="builtin-task-settings-status"
+           role="status" aria-live="polite"></div>
+      <div class="modal-buttons builtin-task-settings-actions">
+        <button type="button" id="btn-builtin-task-settings-reset" class="btn">추천 초기값 복원</button>
+        <button type="button" id="btn-builtin-task-settings-cancel" class="btn">취소</button>
+        <button type="button" id="btn-builtin-task-settings-save" class="btn btn-primary">이 PC에 설정 저장</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Optional terminal action after Quick Task driving input -->
+  <div id="quick-terminal-action-modal" class="modal" role="dialog" aria-modal="true"
+       aria-labelledby="quick-terminal-action-title">
+    <div class="modal-content quick-terminal-action-content">
+      <div class="quick-terminal-action-head">
+        <div>
+          <span>QUICK TASK · 마지막 단계</span>
+          <h3 id="quick-terminal-action-title">마지막 동작을 추가할까요?</h3>
+          <p id="quick-terminal-action-context">주행 경로 입력이 완료되었습니다.</p>
+        </div>
+        <button type="button" id="btn-quick-terminal-close" class="modal-close"
+                aria-label="추가 없이 닫기">&times;</button>
+      </div>
+      <div class="quick-terminal-action-grid">
+        <button type="button" id="btn-quick-terminal-docking" class="quick-terminal-action-card">
+          <kbd>D</kbd>
+          <span class="quick-terminal-action-icon">🔌</span>
+          <strong>도킹</strong>
+          <small>도킹 시작 위치와 방향을 지정합니다.</small>
+        </button>
+        <button type="button" id="btn-quick-terminal-docking-out" class="quick-terminal-action-card">
+          <kbd>O</kbd>
+          <span class="quick-terminal-action-icon">↩</span>
+          <strong>도킹아웃</strong>
+          <small>설정한 거리만큼 도킹 위치에서 이탈합니다.</small>
+        </button>
+        <button type="button" id="btn-quick-terminal-standby" class="quick-terminal-action-card">
+          <kbd>S</kbd>
+          <span class="quick-terminal-action-icon">⏸</span>
+          <strong>스탠바이</strong>
+          <small>설정한 시간만큼 대기합니다.</small>
+        </button>
+        <button type="button" id="btn-quick-terminal-none"
+                class="quick-terminal-action-card quick-terminal-action-none">
+          <kbd>N / 0</kbd>
+          <span class="quick-terminal-action-icon">✓</span>
+          <strong>추가 액션 없음</strong>
+          <small>현재 주행 경로까지만 구성하고 마칩니다.</small>
+        </button>
+      </div>
+      <p class="quick-terminal-action-note">
+        도킹아웃 거리와 스탠바이 시간은 Quick Task 화면에 입력된 값을 사용합니다.
+      </p>
     </div>
   </div>
 
@@ -2568,11 +3147,103 @@ free -h"></textarea>
     </div>
   </div>
 
+  <!-- Engineer Test Mode driving algorithm A/B simulation -->
+  <div id="drive-simulation-modal"
+       class="modal engineer-only"
+       role="dialog"
+       aria-modal="true"
+       aria-labelledby="drive-simulation-title">
+    <div class="modal-content drive-simulation-content">
+      <div class="drive-simulation-head">
+        <div>
+          <span class="drive-simulation-kicker">ENGINEER · TEST MODE ONLY</span>
+          <h3 id="drive-simulation-title">주행 알고리즘 A/B 시뮬레이션</h3>
+          <p>SR-AMR-Base Pure Planner의 가감속·곡률 감속·lookahead·passing 계산을 경량 재현합니다.</p>
+        </div>
+        <button id="btn-drive-simulation-close" class="modal-close" type="button" aria-label="닫기">&times;</button>
+      </div>
+
+      <div id="drive-simulation-guard" class="drive-simulation-guard">
+        가상 환경에서만 계산합니다. 실제 로봇 파라미터에는 반영되지 않습니다.
+      </div>
+
+      <div class="drive-simulation-toolbar">
+        <label>
+          <span>시험 시나리오</span>
+          <select id="drive-simulation-scenario">
+            <option value="s_curve">S 커브 추종</option>
+            <option value="corner">직각 코너</option>
+            <option value="slalom">장애물 슬라럼</option>
+            <option value="obstacle_stop">전방 장애물 안전정지</option>
+            <option value="active_task">현재 실행 Task 경로</option>
+          </select>
+        </label>
+        <button id="btn-drive-load-current" class="btn btn-small" type="button">현재 설정 다시 읽기</button>
+        <button id="btn-drive-recommend" class="btn btn-small" type="button">개선 후보 자동 구성</button>
+        <button id="btn-drive-run-comparison" class="btn btn-primary" type="button">
+          ▶ 동일 조건 비교 실행
+        </button>
+      </div>
+
+      <div class="drive-profile-columns">
+        <section class="drive-profile-card current">
+          <div class="drive-profile-title">
+            <span class="drive-profile-swatch"></span>
+            <div><strong>A · 현재 설정</strong><small id="drive-current-source">기본 Action 설정</small></div>
+          </div>
+          <div id="drive-profile-current" class="drive-profile-grid"></div>
+        </section>
+        <section class="drive-profile-card improved">
+          <div class="drive-profile-title">
+            <span class="drive-profile-swatch"></span>
+            <div><strong>B · 개선 후보</strong><small>이 PC의 Test Mode에만 임시 적용 가능</small></div>
+          </div>
+          <div id="drive-profile-improved" class="drive-profile-grid"></div>
+        </section>
+      </div>
+
+      <section class="drive-simulation-visual">
+        <div class="drive-simulation-visual-head">
+          <strong>동일 경로 주행 결과</strong>
+          <div class="drive-simulation-legend">
+            <span class="reference">기준 경로</span>
+            <span class="current">A 현재</span>
+            <span class="improved">B 개선</span>
+            <span class="obstacle">장애물</span>
+          </div>
+        </div>
+        <canvas id="drive-simulation-canvas" width="960" height="360"></canvas>
+      </section>
+
+      <div id="drive-simulation-verdict" class="drive-simulation-verdict idle">
+        비교 실행을 누르면 두 설정의 차이를 계산합니다.
+      </div>
+
+      <div class="drive-metrics-wrap">
+        <table class="drive-metrics-table">
+          <thead>
+            <tr><th>지표</th><th>A · 현재</th><th>B · 개선</th><th>판정 기준</th></tr>
+          </thead>
+          <tbody id="drive-simulation-metrics">
+            <tr><td colspan="4">아직 실행한 결과가 없습니다.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="drive-simulation-actions">
+        <button id="btn-drive-clear-override" class="btn" type="button">현재 Action 설정 사용</button>
+        <button id="btn-drive-apply-improved" class="btn btn-primary" type="button" disabled>
+          개선 후보를 Test Mode에 임시 적용
+        </button>
+      </div>
+    </div>
+  </div>
+
   <script src="js/ssh-terminal.js"></script>
   <script src="js/file-transfer.js?v=20260723-active-robot-session"></script>
   <script src="js/commands.js"></script>
-  <script src="js/action-sender.js?v=20260725-quick-action-edit-map"></script>
-  <script src="js/jog-control.js?v=20260724-conveyor-commands"></script>
+  <script src="js/action-sender.js?v=20260806-stl-ulsan-jog"></script>
+  <script src="js/jog-control.js?v=20260806-stl-ulsan-jog"></script>
   <script src="js/vel-monitor.js"></script>
   <script src="js/docking-test.js"></script>
   <script src="js/init-setup.js"></script>
@@ -2592,11 +3263,13 @@ free -h"></textarea>
   <script src="js/no-go-zone-editor.js"></script>
   <script src="js/map-version-control.js"></script>
   <script src="js/fleet-dashboard.js"></script>
-  <script src="js/fleet-control.js?v=20260724-task-route-overlay"></script>
+  <script src="js/fleet-control.js?v=20260805-task-cancel-state"></script>
+  <script src="js/usage-guides.js?v=20260730-slam-dimension-loop"></script>
   <script src="js/robot-comparison.js"></script>
   <script src="js/diagnostics.js"></script>
   <script src="js/lidar-align.js"></script>
   <script src="js/can-robot-view.js"></script>
   <script src="js/can-diagnostics.js"></script>
+  <script src="js/drive-simulation-lab.js?v=20260728"></script>
 </body>
 </html>

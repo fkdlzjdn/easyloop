@@ -91,7 +91,7 @@ const RobotComparison = {
     }
   },
 
-  async fetchRobotConfig(slotIdx) {
+  async fetchRobotConfig(_slotIdx) {
     const config = { rosParams: {}, systemInfo: {} };
 
     const paramsResult = await SSHTerminal.execCommand(`

@@ -88,7 +88,6 @@ const ParamTuning = {
         return;
       }
 
-      const robotId = RosManager.getRobotId(App.activeSlotIndex) || 'R_001';
 
       // Use rosparam list via SSH
       const result = await SSHTerminal.execCommand(`rosparam list 2>/dev/null | grep -i "${searchTerm}" | head -30`);

@@ -15,12 +15,18 @@ function createAuthRouter({ authSessions, getSharedPassword, authRateLimiter }) 
     const { password, role } = req.body || {};
 
     if (!password) {
-      return res.status(400).json({ success: false, message: 'Password required' });
+      return res.status(400).json({ success: false, message: '비밀번호를 입력하세요.' });
     }
 
     const sharedPassword = getSharedPassword();
-    if (sharedPassword && password !== sharedPassword) {
-      return res.status(401).json({ success: false, message: 'Invalid password' });
+    if (!sharedPassword) {
+      return res.status(503).json({
+        success: false,
+        message: '서버 로그인 비밀번호가 설정되지 않았습니다. .env의 SHARED_PASSWORD를 확인하세요.'
+      });
+    }
+    if (password !== sharedPassword) {
+      return res.status(401).json({ success: false, message: '비밀번호가 올바르지 않습니다.' });
     }
 
     const userRole = (role === 'engineer') ? 'engineer' : 'user';

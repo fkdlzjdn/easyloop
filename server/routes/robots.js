@@ -162,6 +162,7 @@ async function scanSubnet(options = {}) {
   const {
     baseIp = DEFAULT_SCAN_SUBNET,
     port = DEFAULT_ROSBRIDGE_PORT,
+    discoveryMode = 'rosbridge',
     timeout = 650,
     start = 1,
     end = 254,
@@ -189,15 +190,23 @@ async function scanSubnet(options = {}) {
   );
   const reachableHosts = reachability.filter(target => target.reachable);
 
-  const hosts = await Promise.all(reachableHosts.map(async target => ({
-    ip: target.ip,
-    port,
-    robotId: await discoverRobotIdFn(target.ip, port),
-    fixed: target.fixed
-  })));
+  const hosts = await Promise.all(reachableHosts.map(async target => {
+    const portForwarded = discoveryMode === 'ssh';
+    return {
+      ip: target.ip,
+      port,
+      robotId: portForwarded ? null : await discoverRobotIdFn(target.ip, port),
+      fixed: target.fixed,
+      ...(portForwarded
+        ? { sshPort: port, portForwarded: true, discoveryMode: 'ssh' }
+        : { wsPort: port, discoveryMode: 'rosbridge' })
+    };
+  }));
 
   return {
     subnet,
+    port,
+    discoveryMode,
     fixedTarget: FIXED_DISCOVERY_IP,
     scanned: targets.length,
     hosts
@@ -215,7 +224,11 @@ function checkHost(ip, port, timeout) {
   });
 }
 
-function createRobotsRouter({ loadRobotsConfig, saveRobotsConfig }) {
+function createRobotsRouter({
+  loadRobotsConfig,
+  saveRobotsConfig,
+  syncWindowsNetwork
+}) {
   const router = express.Router();
 
   router.get('/', (req, res) => {
@@ -288,6 +301,7 @@ function createRobotsRouter({ loadRobotsConfig, saveRobotsConfig }) {
   router.get('/scan-subnet', async (req, res) => {
     const baseIp = req.query.base || DEFAULT_SCAN_SUBNET;
     const portToCheck = Number.parseInt(req.query.port, 10) || DEFAULT_ROSBRIDGE_PORT;
+    const discoveryMode = req.query.mode === 'ssh' ? 'ssh' : 'rosbridge';
     const startRange = Math.max(Number.parseInt(req.query.start, 10) || 1, 1);
     const endRange = Math.min(Number.parseInt(req.query.end, 10) || 254, 254);
 
@@ -302,9 +316,13 @@ function createRobotsRouter({ loadRobotsConfig, saveRobotsConfig }) {
     }
 
     try {
+      if (typeof syncWindowsNetwork === 'function') {
+        await syncWindowsNetwork();
+      }
       const result = await scanSubnet({
         baseIp,
         port: portToCheck,
+        discoveryMode,
         start: startRange,
         end: endRange
       });

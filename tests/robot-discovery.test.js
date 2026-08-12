@@ -51,9 +51,56 @@ describe('robot discovery helpers', () => {
       FIXED_DISCOVERY_IP
     ]));
     expect(result.hosts).toEqual([
-      { ip: '192.168.20.51', port: 9090, robotId: 'R_001', fixed: false },
-      { ip: FIXED_DISCOVERY_IP, port: 9090, robotId: 'R_999', fixed: true }
+      {
+        ip: '192.168.20.51',
+        port: 9090,
+        wsPort: 9090,
+        robotId: 'R_001',
+        fixed: false,
+        discoveryMode: 'rosbridge'
+      },
+      {
+        ip: FIXED_DISCOVERY_IP,
+        port: 9090,
+        wsPort: 9090,
+        robotId: 'R_999',
+        fixed: true,
+        discoveryMode: 'rosbridge'
+      }
     ]);
+  });
+
+  test('scans an SSH port-forwarding port without treating it as rosbridge', async () => {
+    const discoverRobotIdFn = jest.fn();
+    const checkHostFn = jest.fn(async (ip, port) => (
+      ip === '192.168.20.63' && port === 2222
+    ));
+
+    const result = await scanSubnet({
+      baseIp: '192.168.20',
+      port: 2222,
+      discoveryMode: 'ssh',
+      start: 63,
+      end: 63,
+      checkHostFn,
+      discoverRobotIdFn
+    });
+
+    expect(result).toMatchObject({
+      subnet: '192.168.20',
+      port: 2222,
+      discoveryMode: 'ssh'
+    });
+    expect(result.hosts).toEqual([{
+      ip: '192.168.20.63',
+      port: 2222,
+      sshPort: 2222,
+      robotId: null,
+      fixed: false,
+      portForwarded: true,
+      discoveryMode: 'ssh'
+    }]);
+    expect(discoverRobotIdFn).not.toHaveBeenCalled();
   });
 
   test('does not duplicate fixed target when scanning 192.168.3', async () => {

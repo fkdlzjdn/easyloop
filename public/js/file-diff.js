@@ -126,7 +126,6 @@ const FileDiff = {
 
   computeDiff(linesA, linesB) {
     // LCS-based diff (simplified)
-    const maxLen = Math.max(linesA.length, linesB.length);
     const html = [];
     let added = 0, removed = 0, same = 0;
 

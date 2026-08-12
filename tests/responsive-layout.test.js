@@ -28,7 +28,16 @@ describe('Resolution-adaptive layout contract', () => {
     expect(canStyle).toContain('@media (max-width: 980px)');
     expect(canStyle).toContain('@media (max-width: 620px)');
     expect(app).toContain("btn.title = '지도 패널 표시/숨김'");
-    expect(html).toContain('css/style.css?v=20260725-loop-closure-ui');
-    expect(html).toContain('js/app.js?v=20260725-responsive-layout');
+    expect(html).toContain('css/style.css?v=20260806-stl-ulsan-jog');
+    expect(html).toContain('js/app.js?v=20260731-manual-on-robot-switch');
+  });
+
+  test('keeps the global Quick Task entry prominent and full-width on mobile', () => {
+    expect(html).toContain('id="btn-global-quick-task"');
+    expect(style).toMatch(/\.header-primary-quick-task\s*\{[\s\S]*?min-width:\s*184px/);
+    expect(style).toMatch(
+      /@media \(max-width: 620px\)\s*\{[\s\S]*?\.header-primary-quick-task\s*\{[\s\S]*?width:\s*100%/
+    );
+    expect(style).toMatch(/\.quick-task-run-primary\s*\{[\s\S]*?min-height:\s*74px/);
   });
 });

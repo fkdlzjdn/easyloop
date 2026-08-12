@@ -17,6 +17,7 @@ const APP_DIR = (function() {
   return __dirname;
 })();
 
+const { loadEnvironmentFile } = require('./server/env');
 const { createRateLimiterStore } = require('./server/rate-limit');
 const { createAuthMiddleware, getAuthToken, isAuthTokenValid } = require('./server/auth');
 const { createAuthRouter } = require('./server/routes/auth');
@@ -28,6 +29,19 @@ const { createCanRouter } = require('./server/routes/can');
 const { createSSHConnection } = require('./server/ssh');
 const { createRobotsConfigStore } = require('./server/robots-config');
 const { listenOnAvailablePort, normalizePort } = require('./server/available-port');
+const { startWindowsNetworkSync } = require('./server/windows-network-sync');
+const { stopLocalRosMaster } = require('./server/ros-master-cleanup');
+const { validateRosProxyTarget } = require('./server/ws-proxy-target');
+const { waitForRosService } = require('./server/ros-service-wait');
+
+// npm start/start.sh/package 실행 모두 동일하게 로컬 인증 설정을 사용한다.
+// 셸에서 명시한 환경 변수는 .env보다 우선하며 비밀번호 값은 로그에 남기지 않는다.
+loadEnvironmentFile(path.join(APP_DIR, '.env'), process.env, ['PORT', 'SHARED_PASSWORD']);
+// pkg 빌드는 .env를 바이너리 내부 asset으로 포함한다. 실행 파일 옆에
+// 외부 .env가 없는 경우에만 포함된 설정을 fallback으로 사용한다.
+if (process.pkg) {
+  loadEnvironmentFile(path.join(__dirname, '.env'), process.env, ['PORT', 'SHARED_PASSWORD']);
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -66,6 +80,7 @@ const rateLimiterStore = createRateLimiterStore({
 });
 const authRateLimiter = rateLimiterStore.createRateLimiter(RATE_LIMIT_CONFIG.auth);
 const commandRateLimiter = rateLimiterStore.createRateLimiter(RATE_LIMIT_CONFIG.commands);
+const windowsNetworkSync = startWindowsNetworkSync({ logger: console });
 
 function getSharedPassword() {
   return process.env.SHARED_PASSWORD || '';
@@ -76,6 +91,8 @@ let testModeProcess = null;
 let rosapiProcess = null;
 let roscoreProcess = null;
 let roscoreStartedByUs = false;
+const TEST_MODE_ROSBRIDGE_PORT = 19090;
+const TEST_MODE_ROS_LOG_DIR = path.join(os.tmpdir(), 'easyloop-ros-log');
 
 function waitForPort(port, timeout) {
   const net = require('net');
@@ -105,14 +122,20 @@ function waitForPort(port, timeout) {
 }
 
 async function startTestModeProcess() {
-  // First check if port 9090 is already listening (rosbridge already up)
-  const alreadyUp = await waitForPort(9090, 1000);
+  // Test Mode uses a dedicated port so its wildcard listener cannot block
+  // real-robot SSH tunnels on 127.0.0.{RID}:9090.
+  const alreadyUp = await waitForPort(TEST_MODE_ROSBRIDGE_PORT, 1000);
   if (alreadyUp) {
-    return { started: true, message: 'rosbridge already running' };
+    return {
+      started: true,
+      message: 'rosbridge already running',
+      port: TEST_MODE_ROSBRIDGE_PORT
+    };
   }
 
   // Check if roscore is running (port 11311)
   let roscoreUp = await waitForPort(11311, 1500);
+  fs.mkdirSync(TEST_MODE_ROS_LOG_DIR, { recursive: true });
   if (!roscoreUp) {
     // Auto-start roscore
     console.log('[TestMode] roscore not running, starting automatically...');
@@ -121,6 +144,7 @@ async function startTestModeProcess() {
       ROS_MASTER_URI: 'http://localhost:11311',
       ROS_HOSTNAME: '127.0.0.1',
       ROS_IP: '127.0.0.1',
+      ROS_LOG_DIR: TEST_MODE_ROS_LOG_DIR,
       ROS_DISTRO: 'noetic',
       PYTHONPATH: '/opt/ros/noetic/lib/python3/dist-packages' + (process.env.PYTHONPATH ? ':' + process.env.PYTHONPATH : ''),
       LD_LIBRARY_PATH: '/opt/ros/noetic/lib:/opt/ros/noetic/lib/x86_64-linux-gnu' + (process.env.LD_LIBRARY_PATH ? ':' + process.env.LD_LIBRARY_PATH : ''),
@@ -141,13 +165,18 @@ async function startTestModeProcess() {
     roscoreProcess.on('exit', (code) => {
       console.log(`[TestMode] roscore exited with code ${code}`);
       roscoreProcess = null;
-      roscoreStartedByUs = false;
+      // Keep the ownership flag until Test Mode cleanup. The tracked shell can
+      // exit before its rosmaster child, which still needs owned cleanup.
     });
     roscoreStartedByUs = true;
 
     // Wait for roscore to be ready (up to 10s)
     roscoreUp = await waitForPort(11311, 10000);
     if (!roscoreUp) {
+      try { if (roscoreProcess) roscoreProcess.kill('SIGTERM'); } catch (_error) {}
+      roscoreProcess = null;
+      stopLocalRosMaster({ port: 11311, owned: true, logger: console });
+      roscoreStartedByUs = false;
       return { started: false, message: 'roscore 자동 시작 실패. 수동으로 roscore를 실행해주세요.' };
     }
     console.log('[TestMode] roscore started successfully');
@@ -166,6 +195,7 @@ async function startTestModeProcess() {
     ROS_MASTER_URI: 'http://localhost:11311',
     ROS_HOSTNAME: '127.0.0.1',
     ROS_IP: '127.0.0.1',
+    ROS_LOG_DIR: TEST_MODE_ROS_LOG_DIR,
     ROS_DISTRO: 'noetic',
     PYTHONPATH: '/opt/ros/noetic/lib/python3/dist-packages' + (process.env.PYTHONPATH ? ':' + process.env.PYTHONPATH : ''),
     LD_LIBRARY_PATH: '/opt/ros/noetic/lib:/opt/ros/noetic/lib/x86_64-linux-gnu' + (process.env.LD_LIBRARY_PATH ? ':' + process.env.LD_LIBRARY_PATH : ''),
@@ -178,7 +208,7 @@ async function startTestModeProcess() {
   // twisted/python needs writable stdout, so use 'pipe' and drain.
   testModeProcess = spawn('python3', [
     '/opt/ros/noetic/lib/rosbridge_server/rosbridge_websocket.py',
-    '_port:=9090'
+    `_port:=${TEST_MODE_ROSBRIDGE_PORT}`
   ], {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: rosEnv
@@ -191,8 +221,8 @@ async function startTestModeProcess() {
     testModeProcess = null;
   });
 
-  // Wait until port 9090 is listening
-  const ready = await waitForPort(9090, 15000);
+  // Wait until the dedicated Test Mode port is listening
+  const ready = await waitForPort(TEST_MODE_ROSBRIDGE_PORT, 15000);
   if (ready) {
     // Start rosapi_node for ROS Info queries (nodes, topics, services, params)
     if (rosapiProcess) {
@@ -212,30 +242,59 @@ async function startTestModeProcess() {
       rosapiProcess = null;
     });
 
-    return { started: true, message: 'rosbridge ready' };
+    const rosapiReady = await waitForRosService('/rosapi/nodes', 5000, rosEnv);
+    if (!rosapiReady) {
+      try { if (rosapiProcess) rosapiProcess.kill('SIGTERM'); } catch (_error) {}
+      try { if (testModeProcess) testModeProcess.kill('SIGTERM'); } catch (_error) {}
+      rosapiProcess = null;
+      testModeProcess = null;
+      stopTestModeProcess();
+      return { started: false, message: 'rosapi 시작 timeout' };
+    }
+
+    return {
+      started: true,
+      message: 'rosbridge ready',
+      port: TEST_MODE_ROSBRIDGE_PORT
+    };
   } else {
+    stopTestModeProcess();
     return { started: false, message: 'rosbridge 시작 timeout' };
   }
 }
 
 function stopTestModeProcess() {
-  if (!testModeProcess && !rosapiProcess) {
-    return { stopped: false, message: 'Test mode not running' };
-  }
+  const ownsRosMaster = roscoreStartedByUs;
+  const hadTestModeProcess = Boolean(
+    testModeProcess || rosapiProcess || roscoreProcess || roscoreStartedByUs
+  );
   try { if (testModeProcess) testModeProcess.kill('SIGTERM'); } catch (e) {}
   try { if (rosapiProcess) rosapiProcess.kill('SIGTERM'); } catch (e) {}
   testModeProcess = null;
   rosapiProcess = null;
-  // Also stop roscore if we started it
-  if (roscoreStartedByUs && roscoreProcess) {
-    console.log('[TestMode] Stopping roscore (started by us)');
-    try { process.kill(-roscoreProcess.pid, 'SIGTERM'); } catch (e) {
-      try { roscoreProcess.kill('SIGTERM'); } catch (e2) {}
-    }
+  if (roscoreProcess) {
+    console.log('[TestMode] Stopping tracked roscore process');
+    try { roscoreProcess.kill('SIGTERM'); } catch (_error) {}
     roscoreProcess = null;
-    roscoreStartedByUs = false;
   }
-  return { stopped: true, message: 'Test mode process stopped' };
+  roscoreStartedByUs = false;
+
+  // The tracked shell may exit while its rosmaster child still owns 11311.
+  // Resolve and stop that listener only when this Test Mode started it. A
+  // pre-existing developer ROS master must survive Test Mode shutdown.
+  const rosMaster = stopLocalRosMaster({
+    port: 11311,
+    owned: ownsRosMaster,
+    logger: console
+  });
+  const masterStopped = rosMaster.terminated.length > 0;
+  return {
+    stopped: hadTestModeProcess || masterStopped,
+    rosMasterStopped: masterStopped,
+    message: hadTestModeProcess || masterStopped
+      ? 'Test mode process and local ROS master stopped'
+      : 'Test mode and local ROS master were not running'
+  };
 }
 
 // ==================== Download API (no auth, for Windows portable) ====================
@@ -264,12 +323,16 @@ app.post('/api/testmode/start', async (req, res) => {
   const { password } = req.body || {};
   const sharedPw = getSharedPassword();
   if (sharedPw && password !== sharedPw) {
+    console.warn('[TestMode] Start rejected: password mismatch');
     return res.json({ success: false, authFailed: true, message: '비밀번호가 올바르지 않습니다.' });
   }
   try {
+    console.log('[TestMode] Start requested');
     const result = await startTestModeProcess();
+    console.log(`[TestMode] Start result: ${result.started ? 'ready' : 'failed'} (${result.message})`);
     res.json({ success: result.started, ...result });
   } catch (e) {
+    console.error(`[TestMode] Start error: ${e.message}`);
     res.json({ success: false, message: e.message });
   }
 });
@@ -288,7 +351,8 @@ app.use('/api/sftp', commandRateLimiter, createSftpRouter({
 }));
 app.use('/api/robots', createRobotsRouter({
   loadRobotsConfig: robotsStore.load,
-  saveRobotsConfig: robotsStore.save
+  saveRobotsConfig: robotsStore.save,
+  syncWindowsNetwork: windowsNetworkSync.syncNow
 }));
 app.use('/api/tunnel', createTunnelRouter());
 app.use('/api/can', commandRateLimiter, createCanRouter());
@@ -310,24 +374,13 @@ server.on('upgrade', (req, socket, head) => {
 
     // Validate target before attempting robot connection
     const target = url.searchParams.get('target');
-    if (!target || !/^[\w.\-]+:\d+$/.test(target)) {
-      socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-    const [targetHost, targetPort] = target.split(':');
-    const isLocal = /^127\./.test(targetHost) || targetHost === 'localhost';
-    const isPrivate = /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/.test(targetHost);
-    if (!isLocal && !isPrivate) {
-      console.warn(`[WS-Proxy] Blocked: ${target} (not private network)`);
-      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-    const port = parseInt(targetPort, 10);
-    if (port < 9000 || port > 9100) {
-      console.warn(`[WS-Proxy] Blocked: ${target} (port out of range)`);
-      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+    const validation = validateRosProxyTarget(target, {
+      testModePort: TEST_MODE_ROSBRIDGE_PORT
+    });
+    if (!validation.ok) {
+      console.warn(`[WS-Proxy] Blocked: ${target || '(missing)'} (${validation.message})`);
+      const reason = validation.statusCode === 400 ? 'Bad Request' : 'Forbidden';
+      socket.write(`HTTP/1.1 ${validation.statusCode} ${reason}\r\n\r\n`);
       socket.destroy();
       return;
     }
@@ -343,6 +396,14 @@ server.on('upgrade', (req, socket, head) => {
       console.log(`[WS-Proxy] Robot reachable: ${target}, completing client upgrade`);
       // Robot confirmed reachable — now complete the client WS upgrade
       rosProxyWss.handleUpgrade(req, socket, head, (clientWs) => {
+        // A stale browser tab or a remote network drop can leave the robot
+        // side in FIN-WAIT while rosbridge is back-pressured. Terminate the
+        // peer socket instead of waiting for a graceful close handshake.
+        const terminatePeer = (ws) => {
+          try {
+            if (ws && ws.readyState !== WebSocket.CLOSED) ws.terminate();
+          } catch (e) { /* ignore stale socket cleanup */ }
+        };
         // Wire up bidirectional proxy
         robotWs.on('message', (data, isBinary) => {
           if (clientWs.readyState === WebSocket.OPEN) {
@@ -354,10 +415,10 @@ server.on('upgrade', (req, socket, head) => {
             robotWs.send(data, { binary: isBinary });
           }
         });
-        robotWs.on('close', () => { try { clientWs.close(); } catch(e) {} });
-        clientWs.on('close', () => { try { robotWs.close(); } catch(e) {} });
-        robotWs.on('error', () => { try { clientWs.close(); } catch(e) {} });
-        clientWs.on('error', () => { try { robotWs.close(); } catch(e) {} });
+        robotWs.on('close', () => terminatePeer(clientWs));
+        clientWs.on('close', () => terminatePeer(robotWs));
+        robotWs.on('error', () => terminatePeer(clientWs));
+        clientWs.on('error', () => terminatePeer(robotWs));
       });
     });
 
@@ -368,6 +429,7 @@ server.on('upgrade', (req, socket, head) => {
         socket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
         socket.destroy();
       }
+      try { robotWs.terminate(); } catch (closeError) { /* ignore */ }
     });
 
   } else {
@@ -449,15 +511,8 @@ wss.on('connection', (ws, req) => {
 // B3 fix: 서버 종료 시 모든 자식 프로세스 정리
 function cleanupProcesses() {
   console.log('[Server] Cleaning up child processes...');
-  if (testModeProcess) { try { testModeProcess.kill('SIGTERM'); } catch (e) {} testModeProcess = null; }
-  if (rosapiProcess) { try { rosapiProcess.kill('SIGTERM'); } catch (e) {} rosapiProcess = null; }
-  if (roscoreProcess) {
-    try { process.kill(-roscoreProcess.pid, 'SIGTERM'); } catch (e) {
-      try { roscoreProcess.kill('SIGTERM'); } catch (e2) {}
-    }
-    roscoreProcess = null;
-    roscoreStartedByUs = false;
-  }
+  windowsNetworkSync.stop();
+  stopTestModeProcess();
 }
 
 process.on('SIGTERM', () => { cleanupProcesses(); process.exit(0); });

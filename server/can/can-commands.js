@@ -7,7 +7,7 @@ const { Client } = require('ssh2');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { parseCandumpLine, parseSdoResponse, parseTpdo2Drive, parseTpdo1Encoder, decodeStatusword } = require('./can-parser');
+const { parseCandumpLine, parseSdoResponse, parseTpdo2Drive, decodeStatusword } = require('./can-parser');
 const { lookupError } = require('./error-codes');
 const { SYNTRON_PARAMS, CANOPEN_PARAMS, isProtectedNode, isDriveMotor, isEncoder } = require('./syntron-params');
 
@@ -437,6 +437,7 @@ async function getCanPortStatus(robotIp) {
 }
 
 module.exports = {
+  CAN_INTERFACE,
   executeCanCommand,
   candump,
   cansend,

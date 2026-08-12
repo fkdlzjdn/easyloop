@@ -35,7 +35,7 @@ function loadSetupTabs() {
     'utf8'
   );
   const methodMatch = source.match(
-    /  setupTabs\(\) \{([\s\S]*?)\n  \},\n\n\n  setupMobileSidebar\(\) \{/
+    / {2}setupTabs\(\) \{([\s\S]*?)\n {2}\},\n\n\n {2}setupMobileSidebar\(\) \{/
   );
   if (!methodMatch) throw new Error('App.setupTabs method not found');
 

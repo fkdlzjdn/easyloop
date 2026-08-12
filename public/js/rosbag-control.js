@@ -187,7 +187,7 @@ const RosbagControl = {
 
     try {
       // Kill rosbag record process
-      const result = await SSHTerminal.execCommand('pkill -f "rosbag record"');
+      await SSHTerminal.execCommand('pkill -f "rosbag record"');
 
       this._isRecording = false;
       document.getElementById('btn-rosbag-start').disabled = false;
@@ -326,7 +326,7 @@ const RosbagControl = {
     if (!confirm(`Delete ${filename}?`)) return;
 
     try {
-      const result = await SSHTerminal.execCommand(`rm -f ${filename}`);
+      await SSHTerminal.execCommand(`rm -f ${filename}`);
       App.toast('Bag file deleted', 'success');
       this.refreshFileList();
     } catch (e) {

@@ -31,7 +31,7 @@ function makeElement(extra = {}) {
   };
 }
 
-function loadJogControl(robotId = 'R_051') {
+function loadJogControl(robotId = 'R_051', robotModel = null) {
   const source = fs.readFileSync(
     path.join(__dirname, '..', 'public', 'js', 'jog-control.js'),
     'utf8'
@@ -40,9 +40,12 @@ function loadJogControl(robotId = 'R_051') {
   const liftControl = makeElement();
   const modelIoControl = makeElement({ hidden: true });
   const modelIoStatus = makeElement();
+  const stlUlsanControl = makeElement({ hidden: true });
+  const turntableStatus = makeElement();
   const chassisCurrent = makeElement();
   const chassisButtons = [
     makeElement({ dataset: { modelId: 'default_lift_dd' } }),
+    makeElement({ dataset: { modelId: 'stl_ulsan' } }),
     makeElement({ dataset: { modelId: 'sr3_ls_1st' } })
   ];
   const commandButtons = [
@@ -60,7 +63,9 @@ function loadJogControl(robotId = 'R_051') {
     'jog-model-io-control': modelIoControl,
     'jog-model-io-status': modelIoStatus,
     'jog-model-io-command-preview': commandPreview,
-    'jog-chassis-current': chassisCurrent
+    'jog-chassis-current': chassisCurrent,
+    'jog-stl-ulsan-control': stlUlsanControl,
+    'jog-turntable-status': turntableStatus
   };
   const calls = [];
 
@@ -85,7 +90,7 @@ function loadJogControl(robotId = 'R_051') {
   const context = {
     App: {
       activeSlotIndex: 0,
-      robotSlots: [{ robotId, ip: '192.168.20.51', connected: true, ros: {} }],
+      robotSlots: [{ robotId, robotModel, ip: '192.168.20.51', connected: true, ros: {} }],
       toast: jest.fn()
     },
     RosManager: {
@@ -93,7 +98,17 @@ function loadJogControl(robotId = 'R_051') {
       getRobotId: jest.fn(() => robotId)
     },
     ROSLIB: { Service, ServiceRequest },
-    ActionSender: {},
+    RobotCompatibility: {
+      isStlUlsanModel: model => ['stl1000w', 'stl1500w'].includes(String(model || '').toLowerCase()),
+      get: slot => slot.compatibilityProfile || {
+        discovered: true,
+        lift: { interface: 'topic' }
+      }
+    },
+    ActionSender: {
+      sendJogActionToSlot: jest.fn().mockResolvedValue({ result: { success: true } }),
+      cancelTaskOnSlot: jest.fn().mockResolvedValue({ success: true })
+    },
     localStorage: {
       getItem: jest.fn(key => storage.get(key) || null),
       setItem: jest.fn((key, value) => storage.set(key, String(value)))
@@ -130,6 +145,8 @@ function loadJogControl(robotId = 'R_051') {
     liftControl,
     modelIoControl,
     modelIoStatus,
+    stlUlsanControl,
+    turntableStatus,
     commandButtons,
     commandPreview,
     chassisCurrent
@@ -173,6 +190,36 @@ describe('Jog chassis model control', () => {
     expect(liftControl.hidden).toBe(false);
     expect(modelIoControl.hidden).toBe(true);
     expect(chassisCurrent.textContent).toBe('선택 안 함 (기본) · DD');
+  });
+
+  test.each(['stl1000w', 'stl1500w'])('auto-selects stl_ulsan controls only for ROBOT_MODEL %s', robotModel => {
+    const { manager, stlUlsanControl, modelIoControl, chassisCurrent } = loadJogControl(
+      'R_051',
+      robotModel
+    );
+
+    manager._syncChassisModelUi(false);
+
+    expect(manager._getSelectedChassisModel().id).toBe('stl_ulsan');
+    expect(stlUlsanControl.hidden).toBe(false);
+    expect(modelIoControl.hidden).toBe(true);
+    expect(chassisCurrent.textContent).toBe('stl_ulsan · Lift / Turntable · DD');
+  });
+
+  test('sends and cancels a Turntable Jog through the Task input/cancel API', async () => {
+    const { manager, context, turntableStatus } = loadJogControl('R_051', 'stl1500w');
+
+    await manager._runStlTurntableTarget(-90);
+    expect(context.ActionSender.sendJogActionToSlot).toHaveBeenCalledWith(
+      0,
+      0x22,
+      [3, -90, 0],
+      expect.stringMatching(/^easyloop_turntable_/)
+    );
+    expect(turntableStatus.className).toContain('success');
+
+    await manager._cancelStlTurntable();
+    expect(context.ActionSender.cancelTaskOnSlot).toHaveBeenCalledWith(0);
   });
 
   test('defines the requested sr3_ls_1st command codes', () => {

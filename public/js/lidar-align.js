@@ -95,27 +95,8 @@ const LidarAlign = {
 
     // Walk chain from laser frame up to base_link
     const resolveChain = (frameName) => {
-      let x = 0, y = 0, yaw = 0;
       let current = frameName;
       const visited = new Set();
-
-      while (current && frames[current] && !visited.has(current)) {
-        visited.add(current);
-        const f = frames[current];
-        // Apply transform: rotate current accumulated position by this frame's yaw, then add translation
-        const cosY = Math.cos(f.yaw);
-        const sinY = Math.sin(f.yaw);
-        // The child position in parent = parent_rot * child_pos + parent_trans
-        // We're going child→parent, so accumulate inversely:
-        // Actually we want base_link → laser, so accumulate forward:
-        // final = T_parent * T_child
-        // But we're walking child→parent, so we need to compose:
-        // pos_in_parent = rot(parent_yaw) * pos_accumulated + parent_translation
-
-        // Simpler: just accumulate all the transforms from base_link down
-        // Let me reverse the chain first
-        break;
-      }
 
       // Build chain from base_link down to target
       const chain = [];
@@ -309,7 +290,6 @@ const LidarAlign = {
 
   _analyzeRangeComparison(scan1, scan2) {
     const cfg = this._config;
-
     // Convert both scans to {angle_in_base_link → range} maps
     const map1 = this._scanToAngleRangeMap(scan1, cfg.frontX, cfg.frontY || 0, cfg.frontYaw);
     const map2 = this._scanToAngleRangeMap(scan2, cfg.rearX, cfg.rearY || 0, cfg.rearYaw);
@@ -787,8 +767,6 @@ const LidarAlign = {
   _drawOverlapDiffs(ctx, cx, cy, scale) {
     const r = this._lastResult;
     if (!r || !r.diffs) return;
-
-    const cfg = this._config;
 
     // For each overlap angle, draw a line from scan_1 point to scan_2 point
     // Color by diff magnitude: green(small) → yellow → red(large)

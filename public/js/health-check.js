@@ -18,6 +18,8 @@ const HealthCheck = {
   ],
 
   init() {
+    if (this._initialized) return;
+    this._initialized = true;
     this.bindEvents();
   },
 
@@ -102,7 +104,7 @@ const HealthCheck = {
           result.message = result.value ? 'Reachable' : 'Unreachable';
           break;
 
-        case 'ssh':
+        case 'ssh': {
           const output = await this.execSSH(robot, check.cmd);
           result.value = output.trim();
           if (check.threshold !== null) {
@@ -117,6 +119,7 @@ const HealthCheck = {
           }
           result.message = result.value + (check.unit || '');
           break;
+        }
       }
     } catch (e) {
       result.status = 'fail';

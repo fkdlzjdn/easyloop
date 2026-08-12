@@ -4,6 +4,8 @@ const RosManager = {
   ros: null,
   mapRotation: 0,
   lastMapMsg: null,
+  _mapImageCanvas: null,
+  _mapImageSource: null,
   mapZoom: 1.0,
   mapPanX: 0,
   mapPanY: 0,
@@ -50,8 +52,15 @@ const RosManager = {
   _waypointDirectionPending: false,
   _waypointHoverActive: false,
   _waypointSelectionOptions: {},
+  // Freehand path mode (Quick Task curve -> TrajectoryFollowing)
+  _freehandPathMode: false,
+  _freehandPathDrawing: false,
+  _freehandPathOptions: {},
+  _freehandCanvasPoints: [],
+  _freehandWorldPoints: [],
   _quickTaskOverlay: [],
   _activeTaskOverlay: null,
+  _taskPreviewOverlay: null,
   // Topic Hz monitoring
   _hzCounters: { bms: 0, workstate: 0, pose: 0, map: 0, lidar: 0 },
   _hzValues: { bms: 0, workstate: 0, pose: 0, map: 0, lidar: 0 },
@@ -83,6 +92,8 @@ const RosManager = {
   _dockPoseTimeout: null, // auto-clear timer
   // Robot footprint polygon (from costmap)
   _footprintPoints: null, // [{x, y}, ...] in meters relative to base_link
+  _footprintFrame: '',
+  _lastLioFootprintAt: 0,
   // SLAM breadcrumb trail & vertex tracking
   _breadcrumbTrail: [],       // [{x, y, yaw, time}] — full path at ~0.1m intervals
   _breadcrumbMaxPoints: 5000,
@@ -99,9 +110,22 @@ const RosManager = {
   _loopClosureSuccessAt: null,
   _loopClosureNoticeTimer: null,
   _loopClosureNoticeDurationMs: 10000,
+  _loopClosureSignals: {
+    '2d': { confirmed: 0, detected: 0 },
+    '3d': { confirmed: 0, detected: 0 }
+  },
+  _loopClosureLogKeys: new Set(),
+  _loopClosureConfirmation: 'none',
+  _loopClosureSource: '',
+  _mappingSessionSaved: true,
+  _mappingMapCommitted: false,
+  _mappingSavePendingMode: null,
+  _mappingSaveBusy: false,
   // Render throttle for sync
   _renderPending: false,
   _renderThrottleMs: 50,
+  _lastAcceptedMapSignature: '',
+  _lastAcceptedMapAt: 0,
   // Discharge tracking
   _bmsDischargeHistory: [], // [{soc, time}] ring buffer for discharge rate
   _bmsDischargeStartTime: null,
@@ -123,10 +147,39 @@ const RosManager = {
     return App.robotSlots[index].robotId;
   },
 
+  _compatibilityForSlot(index = App.activeSlotIndex) {
+    const slot = App.robotSlots?.[index];
+    if (typeof RobotCompatibility === 'undefined') return null;
+    return RobotCompatibility.get(slot);
+  },
+
+  _discoverCompatibility(index) {
+    const slot = App.robotSlots?.[index];
+    if (!slot?.ros || typeof RobotCompatibility === 'undefined') return Promise.resolve(null);
+    return RobotCompatibility.discover(slot).then(profile => {
+      if (!profile || slot.ros !== this.getRos(index)) return profile;
+      if (index === App.activeSlotIndex) {
+        const modelEl = document.getElementById('robot-model-name');
+        if (modelEl && slot.robotModel) modelEl.textContent = slot.robotModel;
+        const currentMapTopic = slot.subscriptions?.map?.name;
+        if (!this.lastMapMsg && profile.map?.topic && currentMapTopic !== profile.map.topic) {
+          this._subscribeMapForSlot(index, profile.map.topic);
+        }
+        if (typeof JogControl !== 'undefined') JogControl._syncChassisModelUi?.(false);
+      }
+      if (typeof ActionSender !== 'undefined') {
+        delete slot.taskInterface;
+        ActionSender.onCompatibilityProfileChanged?.(index, profile);
+      }
+      return profile;
+    });
+  },
+
   // Connect a specific slot
   connectSlot(index, ip, robotId) {
     if (index < 0 || index >= App.robotSlots.length) return;
     const slot = App.robotSlots[index];
+    if (typeof RobotCompatibility !== 'undefined') RobotCompatibility.clear(slot);
 
     // B9 fix: 수동 재연결 전 auto-reconnect 타이머 해제
     this._clearAutoReconnect(index);
@@ -150,7 +203,6 @@ const RosManager = {
       slot.connected = true;
       slot.connectedAt = Date.now();  // Record connection time for mode detection
       slot.amclActive = false;  // Reset amcl state on new connection
-      if (typeof ConnTimeline !== 'undefined') ConnTimeline.record(robotId, ip, 'connected', url);
       // Clear auto-reconnect on successful connection
       this._clearAutoReconnect(index);
 
@@ -167,6 +219,7 @@ const RosManager = {
         App.updateActiveRobotStatus();
         this.subscribeSlotMonitoring(index);
         this.subscribeActiveSlotUI(index);
+        this._discoverCompatibility(index);
         if (typeof RosInfo !== 'undefined') RosInfo.refreshAll();
         // Start latency monitoring
         this.startLatencyMonitor(index);
@@ -191,7 +244,6 @@ const RosManager = {
       console.log(`ROS slot[${index}] closed`);
       slot.connected = false;
       slot.ros = null;
-      if (typeof ConnTimeline !== 'undefined') ConnTimeline.record(robotId, ip, 'disconnected', 'Connection closed');
 
       if (index === App.activeSlotIndex) {
         this.ros = null;
@@ -229,7 +281,6 @@ const RosManager = {
       console.error(`ROS slot[${index}] error:`, error);
       slot.connected = false;
       if (typeof FleetControl !== 'undefined') FleetControl.onSlotDisconnected(index);
-      if (typeof ConnTimeline !== 'undefined') ConnTimeline.record(robotId, ip, 'error', String(error));
       if (index === App.activeSlotIndex) {
         App.updateActiveRobotStatus();
       }
@@ -282,6 +333,11 @@ const RosManager = {
   unsubscribeSlotData(index, clearCachedData = true) {
     const slot = App.robotSlots[index];
     if (!slot) return;
+
+    if (slot.mapCompressionFallbackTimer) {
+      clearTimeout(slot.mapCompressionFallbackTimer);
+      slot.mapCompressionFallbackTimer = null;
+    }
 
     if (slot.tfTopic) {
       try { slot.tfTopic.unsubscribe(); } catch (e) { /* ignore */ }
@@ -362,6 +418,16 @@ const RosManager = {
       (msg) => this._handleSlamGraph(index, msg)
     );
 
+    // LIO-SAM publishes accepted 3D loop constraints as LINE_LIST markers
+    // with ns=loop_edges. It is independent from slam_toolbox's 2D graph.
+    this._subscribeSlotTopic(
+      index,
+      'lio-loop-constraints',
+      `/${rid}/lio_sam/mapping/loop_closure_constraints`,
+      'visualization_msgs/MarkerArray',
+      (msg) => this._handleLioLoopConstraints(index, msg)
+    );
+
     // Dock pose (docking target detection result)
     this._subscribeSlotTopic(index, 'dock-pose', `/${rid}/dock_pose`, 'geometry_msgs/PoseStamped', (msg) => {
       this._handleDockPose(index, msg);
@@ -376,6 +442,7 @@ const RosManager = {
     this._subscribeSlotTopic(index, 'map-correction-3d', `/${rid}/lio_sam/mapping/map_correction`, 'std_msgs/Float64MultiArray', (msg) => {
       const data = Array.isArray(msg?.data) ? msg.data : [];
       if (data.length < 2) return;
+      this._recordSlamDimension(index, '3d', 'LIO-SAM', '3D map_correction 수신', 90);
       this._handleMapCorrection(index, {
         map_correction: (Number(data[1]) || 0) * 100,
         level: Math.round(Number(data[0]) || 0),
@@ -397,6 +464,7 @@ const RosManager = {
 
     // Also read footprint from ROS parameter as fallback
     this._fetchFootprintParam(index, rid);
+    this._probeSlamDimensions(index);
   },
 
   // Fetch footprint from ROS parameter (move_base footprint param)
@@ -587,7 +655,7 @@ const RosManager = {
     // If this is the active slot, update UI
     if (index === App.activeSlotIndex) {
       if (this._hzCounters) this._hzCounters.pose++;
-      if (App.alarmSystem) App.alarmSystem.recordTopicActivity('pose');
+      if (App.alarmSystem) App.alarmSystem.recordTopicActivity('pose', index);
 
       this.robotPose = { x: pos.x, y: pos.y, yaw: yaw };
       this.displayPose(this.robotPose);
@@ -637,11 +705,7 @@ const RosManager = {
 
     // Map geometry is required to place every overlay. Keep receiving it even when
     // the user hides the Map layer; the checkbox controls drawing, not map data.
-    const mapIndex = index;
-    this._subscribeSlotTopic(index, 'map', `/${rid}/map`, 'nav_msgs/OccupancyGrid', (msg) => {
-      if (mapIndex !== App.activeSlotIndex) return;
-      this.renderMap(msg);
-    });
+    this._subscribeMapForSlot(index, this._compatibilityForSlot(index)?.map?.topic || `/${rid}/map`);
 
     // LiDAR subscription - capture index to verify active slot on callback
     if (document.getElementById('chk-lidar').checked) {
@@ -668,7 +732,14 @@ const RosManager = {
         'footprint',
         `/${rid}/move_base/local_costmap/footprint`,
         'geometry_msgs/PolygonStamped',
-        (msg) => this._handleFootprintMessage(index, msg)
+        (msg) => this._handleFootprintMessage(index, msg, 'move-base')
+      );
+      this._subscribeSlotTopic(
+        index,
+        'footprint-lio',
+        `/${rid}/lio_sam/mapping/footprint`,
+        'geometry_msgs/PolygonStamped',
+        (msg) => this._handleFootprintMessage(index, msg, 'lio')
       );
     }
     if (document.getElementById('chk-local-costmap')?.checked) {
@@ -709,9 +780,16 @@ const RosManager = {
     this._navigationPath = [];
     this._navigationGoal = null;
     this._mappingTopicPath = [];
+    this._breadcrumbTrail = [];
+    this._slamVertices = [];
+    this._slamStartPose = null;
     this.robotPose = null;
     this.mapCorrection = null;
+    this._lastAcceptedMapSignature = '';
+    this._lastAcceptedMapAt = 0;
     this._footprintPoints = null;
+    this._footprintFrame = '';
+    this._lastLioFootprintAt = 0;
     this._renderMapCorrection(null);
 
     // Subscribe UI-bound topics for new active slot
@@ -721,6 +799,7 @@ const RosManager = {
       this.unsubscribeSlotData(index, false);
       this.subscribeSlotMonitoring(index);
       this.subscribeActiveSlotUI(index);
+      this._discoverCompatibility(index);
       this.startLatencyMonitor(index);
 
       if (App.alarmSystem && App.alarmSystem.resetTopicTimes) {
@@ -760,6 +839,7 @@ const RosManager = {
     this._resetLoopClosureSession();
     this._updateSlamButtons();
     this._updateLifelongButtons();
+    this._updateSlamDimensionStatus();
   },
 
   // Reset BMS ETA tracking state (called on slot switch / disconnect)
@@ -789,10 +869,11 @@ const RosManager = {
   // Internal: subscribe a topic for a specific slot
   // Fast topics (pose, lidar) use lower throttle for smoother updates
   _fastTopicKeys: new Set(['robot-pose', 'lidar', 'cam1-color', 'cam2-color']),
+  _unthrottledTopicKeys: new Set(['loop-closure-log']),
   // Depth uses raw Image (heavy) - use separate slower rate
   _depthThrottleRate: 200,
 
-  _subscribeSlotTopic(index, key, name, messageType, callback) {
+  _subscribeSlotTopic(index, key, name, messageType, callback, topicOptions = {}) {
     const slot = App.robotSlots[index];
     if (!slot || !slot.ros) return;
 
@@ -801,18 +882,56 @@ const RosManager = {
     }
 
     const isDepth = key.includes('depth');
-    const rate = isDepth ? this._depthThrottleRate :
+    const rate = this._unthrottledTopicKeys.has(key) ? 0 :
+                 isDepth ? this._depthThrottleRate :
                  this._fastTopicKeys.has(key) ? 50 : this.throttleRate;
 
     const topic = new ROSLIB.Topic({
       ros: slot.ros,
       name: name,
       messageType: messageType,
-      throttle_rate: rate
+      throttle_rate: rate,
+      ...topicOptions
     });
 
     topic.subscribe(callback);
     slot.subscriptions[key] = topic;
+  },
+
+  _subscribeMapForSlot(index, topicName, useCompression = true) {
+    const slot = App.robotSlots[index];
+    if (!slot?.ros) return;
+    if (slot.mapCompressionFallbackTimer) {
+      clearTimeout(slot.mapCompressionFallbackTimer);
+      slot.mapCompressionFallbackTimer = null;
+    }
+    const capturedRos = slot.ros;
+    const options = {
+      queue_length: 1,
+      compression: useCompression ? 'png' : 'none'
+    };
+    this._subscribeSlotTopic(
+      index,
+      'map',
+      topicName,
+      'nav_msgs/OccupancyGrid',
+      msg => {
+        if (index !== App.activeSlotIndex || slot.ros !== capturedRos) return;
+        slot.mapReceivedAt = Date.now();
+        if (slot.mapCompressionFallbackTimer) {
+          clearTimeout(slot.mapCompressionFallbackTimer);
+          slot.mapCompressionFallbackTimer = null;
+        }
+        this.renderMap(msg);
+      },
+      options
+    );
+    if (!useCompression) return;
+    slot.mapCompressionFallbackTimer = setTimeout(() => {
+      if (slot.ros !== capturedRos || index !== App.activeSlotIndex || this.lastMapMsg) return;
+      console.warn(`[Map] ${topicName} PNG compression timeout; retrying without compression`);
+      this._subscribeMapForSlot(index, topicName, false);
+    }, 8000);
   },
 
   _subscribeMapScan(index, key, topicName, target) {
@@ -823,28 +942,46 @@ const RosManager = {
     });
   },
 
-  _handleFootprintMessage(index, msg) {
+  _handleFootprintMessage(index, msg, source = 'move-base') {
     if (index !== App.activeSlotIndex) return;
     const slot = App.robotSlots[index];
     const points = msg?.polygon?.points;
     if (!slot || !Array.isArray(points)) return;
-    const pose = slot.pose || this.robotPose;
-    if (!pose) {
-      this._footprintPoints = points.map(point => ({ x: point.x, y: point.y }));
+    const mapping = this._slamRunning || this._lifelongRunning;
+    if (source === 'lio') {
+      if (!mapping) return;
+      this._lastLioFootprintAt = Date.now();
+    } else if (mapping && Date.now() - this._lastLioFootprintAt < 2500) {
+      return;
+    }
+
+    const rawFrame = String(msg?.header?.frame_id || '');
+    const frame = this._frameKey(rawFrame);
+    const localFrame = frame === 'base_link' || frame === 'base_footprint';
+    if (localFrame) {
+      this._footprintFrame = frame;
+      this._footprintPoints = points.map(point => ({
+        x: Number(point?.x) || 0,
+        y: Number(point?.y) || 0
+      }));
       this.requestRender();
       return;
     }
 
+    const pose = slot.pose || this.robotPose;
+    if (!pose) return;
+
     const cosYaw = Math.cos(-pose.yaw);
     const sinYaw = Math.sin(-pose.yaw);
     this._footprintPoints = points.map(point => {
-      const dx = point.x - pose.x;
-      const dy = point.y - pose.y;
+      const dx = (Number(point?.x) || 0) - pose.x;
+      const dy = (Number(point?.y) || 0) - pose.y;
       return {
         x: cosYaw * dx - sinYaw * dy,
         y: sinYaw * dx + cosYaw * dy
       };
     });
+    this._footprintFrame = frame || 'map';
     this.requestRender();
   },
 
@@ -887,6 +1024,8 @@ const RosManager = {
   _subscribePathLayer(index, key, topicName, targetProperty) {
     this._subscribeSlotTopic(index, key, topicName, 'nav_msgs/Path', (msg) => {
       if (index !== App.activeSlotIndex) return;
+      if (targetProperty === '_mappingTopicPath'
+          && !this._slamRunning && !this._lifelongRunning) return;
       this[targetProperty] = this._pathToMapPoints(msg, index);
       this.requestRender();
     });
@@ -935,7 +1074,7 @@ const RosManager = {
   _handleSlotBmsData(index, msg) {
     if (index === App.activeSlotIndex) {
       this._hzCounters.bms++;
-      if (App.alarmSystem) App.alarmSystem.recordTopicActivity('bms');
+      if (App.alarmSystem) App.alarmSystem.recordTopicActivity('bms', index);
     }
     const slot = App.robotSlots[index];
     if (!slot) return;
@@ -977,6 +1116,124 @@ const RosManager = {
     if (index !== App.activeSlotIndex) return;
     this.mapCorrection = correction;
     this._renderMapCorrection(correction);
+  },
+
+  _slamProfileForSlot(slot) {
+    if (!slot) return { mapping: null, localization: null };
+    if (!slot.slamProfile) {
+      slot.slamProfile = { mapping: null, localization: null };
+    }
+    return slot.slamProfile;
+  },
+
+  _recordSlamDimension(index, dimension, backend, evidence, confidence = 50, context = null) {
+    const slot = App.robotSlots[index];
+    const normalized = String(dimension || '').toLowerCase();
+    if (!slot || !['2d', '3d'].includes(normalized)) return false;
+
+    const mappingActive = ['SLAM', 'LIFELONG'].includes(
+      String(slot.routineMode || '').toUpperCase()
+    ) || (index === App.activeSlotIndex && (this._slamRunning || this._lifelongRunning));
+    const activeContext = context || (mappingActive ? 'mapping' : 'localization');
+    if (!['mapping', 'localization'].includes(activeContext)) return false;
+
+    const profile = this._slamProfileForSlot(slot);
+    const previous = profile[activeContext];
+    const now = Date.now();
+    const stale = !previous || now - Number(previous.updatedAt || 0) > 30000;
+    if (previous && previous.dimension !== normalized
+        && Number(previous.confidence || 0) > confidence && !stale) {
+      return false;
+    }
+
+    profile[activeContext] = {
+      dimension: normalized,
+      backend: String(backend || (normalized === '3d' ? '3D SLAM' : '2D SLAM')),
+      evidence: String(evidence || ''),
+      confidence: Number(confidence) || 0,
+      updatedAt: now
+    };
+    if (index === App.activeSlotIndex) {
+      this._updateSlamDimensionStatus();
+      this._syncLoopClosureSignalForActiveDimension();
+    }
+    return true;
+  },
+
+  _activeSlamDimension(index = App.activeSlotIndex) {
+    const slot = App.robotSlots[index];
+    if (!slot) return '';
+    const profile = this._slamProfileForSlot(slot);
+    const mapping = this._slamRunning || this._lifelongRunning
+      || ['SLAM', 'LIFELONG'].includes(String(slot.routineMode || '').toUpperCase());
+    return String((mapping ? profile.mapping : profile.localization)?.dimension || '');
+  },
+
+  _updateSlamDimensionStatus() {
+    const status = document.getElementById('slam-dimension-status');
+    const activeEl = document.getElementById('slam-active-dimension');
+    const detailEl = document.getElementById('slam-dimension-detail');
+    if (!status || !activeEl || !detailEl) return;
+
+    const slot = App.robotSlots[App.activeSlotIndex];
+    const profile = this._slamProfileForSlot(slot);
+    const mappingActive = this._slamRunning || this._lifelongRunning
+      || ['SLAM', 'LIFELONG'].includes(String(slot?.routineMode || '').toUpperCase());
+    const activeContext = mappingActive ? 'mapping' : 'localization';
+    const active = profile[activeContext];
+    const modeLabel = mappingActive
+      ? (this._lifelongRunning || slot?.routineMode === 'LIFELONG' ? '부분 Mapping' : 'Mapping')
+      : 'Localization';
+    const dimensionLabel = active?.dimension ? active.dimension.toUpperCase() : '판별 중';
+
+    activeEl.textContent = `${modeLabel} · ${dimensionLabel}`;
+    detailEl.textContent = [
+      `Mapping ${profile.mapping?.dimension?.toUpperCase() || '?'}`,
+      `Localization ${profile.localization?.dimension?.toUpperCase() || '?'}`
+    ].join(' · ');
+    status.dataset.dimension = active?.dimension || 'unknown';
+    status.title = active
+      ? `${active.backend} · ${active.evidence || 'ROS topic 기반 자동 판별'}`
+      : '관련 ROS topic publisher 또는 데이터를 기다리고 있습니다';
+  },
+
+  _probeSlamDimensions(index) {
+    const slot = App.robotSlots[index];
+    if (!slot?.ros || typeof ROSLIB === 'undefined'
+        || typeof ROSLIB.Service !== 'function') return;
+
+    const probe = (topic, onDetected) => {
+      const service = new ROSLIB.Service({
+        ros: slot.ros,
+        name: '/rosapi/publishers',
+        serviceType: 'rosapi/Publishers'
+      });
+      const request = typeof ROSLIB.ServiceRequest === 'function'
+        ? new ROSLIB.ServiceRequest({ topic })
+        : { topic };
+      service.callService(request, result => {
+        if (slot.ros && Array.isArray(result?.publishers) && result.publishers.length > 0) {
+          onDetected(result.publishers);
+        }
+      }, () => { /* incoming topic data remains the fallback */ });
+    };
+
+    const rid = slot.robotId;
+    probe(`/${rid}/slam_toolbox/karto_graph_visualization`, () => {
+      this._recordSlamDimension(index, '2d', 'slam_toolbox', '2D graph publisher 확인', 70, 'mapping');
+      if (!['SLAM', 'LIFELONG'].includes(String(slot.routineMode || '').toUpperCase())) {
+        this._recordSlamDimension(index, '2d', 'slam_toolbox', '2D localization graph publisher 확인', 65, 'localization');
+      }
+    });
+    probe(`/${rid}/lio_sam/mapping/loop_closure_constraints`, () => {
+      this._recordSlamDimension(index, '3d', 'LIO-SAM', '3D loop constraint publisher 확인', 75, 'mapping');
+    });
+    probe(`/${rid}/lio_sam/mapping/odometry`, () => {
+      this._recordSlamDimension(index, '3d', 'LIO-SAM', '3D odometry publisher 확인', 75, 'localization');
+    });
+    probe(`/${rid}/amcl_pose`, () => {
+      this._recordSlamDimension(index, '2d', 'AMCL', '2D AMCL publisher 확인', 70, 'localization');
+    });
   },
 
   _renderMapCorrection(correction) {
@@ -1026,15 +1283,9 @@ const RosManager = {
     const state = msg.workstate !== undefined ? msg.workstate : (msg.data !== undefined ? msg.data : msg);
     slot.workState = state;
 
-    // Extract robot model from robot_state.type field (no SSH needed)
-    if (msg.type && !slot.robotModel) {
-      slot.robotModel = msg.type;
-      if (index === App.activeSlotIndex) {
-        const modelEl = document.getElementById('robot-model-name');
-        if (modelEl) modelEl.textContent = msg.type;
-      }
-      console.log(`[RobotModel] ${slot.robotId}: ${msg.type} (from robot_state)`);
-    }
+    // robot_state.type is useful telemetry, but ROBOT_MODEL from the environment
+    // is the authoritative hardware/project discriminator.
+    if (msg.type) slot.reportedRobotType = msg.type;
 
     // Use radius as footprint fallback (generate rectangle from radius)
     if (msg.radius && msg.radius > 0 && !this._footprintPoints && index === App.activeSlotIndex) {
@@ -1056,7 +1307,7 @@ const RosManager = {
 
       if (index === App.activeSlotIndex) {
         this._hzCounters.pose++;
-        if (App.alarmSystem) App.alarmSystem.recordTopicActivity('pose');
+        if (App.alarmSystem) App.alarmSystem.recordTopicActivity('pose', index);
         this.robotPose = pose;
         this.displayPose(pose);
         this.requestRender();
@@ -1086,7 +1337,12 @@ const RosManager = {
     const mode = aliases[rawMode] || rawMode;
     if (!['NAV', 'SLAM', 'LIFELONG'].includes(mode)) return;
     slot.routineMode = mode;
-    if (index !== App.activeSlotIndex || mode === this._currentRoutineMode) return;
+    if (index !== App.activeSlotIndex) return;
+    if (mode === this._currentRoutineMode) {
+      this._updateSlamDimensionStatus();
+      this._syncLoopClosureLogSubscription(index);
+      return;
+    }
 
     const wasMapping = this._slamRunning || this._lifelongRunning;
     this._currentRoutineMode = mode;
@@ -1094,14 +1350,23 @@ const RosManager = {
     this._lifelongRunning = mode === 'LIFELONG';
     this._updateSlamButtons();
     this._updateLifelongButtons();
+    this._updateSlamDimensionStatus();
+    this._syncLoopClosureLogSubscription(index);
 
     if (this._slamRunning || this._lifelongRunning) {
       this._enableMappingPathLayer();
-      if (!wasMapping || !this._slamTrailTimer) this._startSlamTrail();
+      if (!wasMapping || !this._slamTrailTimer) {
+        if (!wasMapping) this._beginMappingSaveSession();
+        this._startSlamTrail(mode === 'LIFELONG');
+      }
     } else if (wasMapping) {
+      this._mappingSessionSaved = true;
+      this._closeMappingSaveConfirm(true);
       this._modeManualSet = false;
       this._stopSlamTrail();
       this._updateLoopClosureStatus();
+      this.requestRender();
+      this._finishMappingMapTransition();
     }
   },
 
@@ -1120,6 +1385,7 @@ const RosManager = {
 
   _handleSlamGraph(index, msg) {
     if (index !== App.activeSlotIndex) return;
+    this._recordSlamDimension(index, '2d', 'slam_toolbox', 'karto graph 데이터 수신', 100);
     const nodes = [];
     const edges = [];
     const loopEdges = [];
@@ -1159,18 +1425,163 @@ const RosManager = {
       }
     }
 
-    const previousCount = this._loopClosureCount;
+    // Lifelong/partial Mapping starts from the previous SLAM graph. Some
+    // implementations briefly publish DELETEALL before the continued graph.
+    // Keep the previous vertices through that empty transition.
+    if (this._lifelongRunning && nodes.length === 0
+        && edges.length === 0 && loopEdges.length === 0) {
+      return;
+    }
+
     this._slamGraphNodes = nodes;
     this._slamGraphEdges = edges;
     this._slamLoopEdges = loopEdges;
-    this._loopClosureCount = Math.max(previousCount, loopEdges.length);
-    this._updateLoopClosureStatus();
     this.requestRender();
 
-    const addedCount = loopEdges.length - previousCount;
-    if (addedCount > 0 && (this._slamRunning || this._lifelongRunning)) {
-      this._announceLoopClosure(addedCount);
+    this._applyLoopClosureSignal('2d', 'confirmed', loopEdges.length, 'slam_toolbox graph');
+  },
+
+  _handleLioLoopConstraints(index, msg) {
+    if (index !== App.activeSlotIndex) return;
+    this._recordSlamDimension(index, '3d', 'LIO-SAM', '3D loop constraint 데이터 수신', 100);
+    const nodes = [];
+    const loopEdges = [];
+    const addEdgePairs = points => {
+      const list = Array.from(points || []);
+      for (let i = 0; i + 1 < list.length; i += 2) {
+        loopEdges.push({
+          x1: Number(list[i]?.x) || 0,
+          y1: Number(list[i]?.y) || 0,
+          x2: Number(list[i + 1]?.x) || 0,
+          y2: Number(list[i + 1]?.y) || 0
+        });
+      }
+    };
+
+    for (const marker of Array.from(msg?.markers || [])) {
+      if (marker?.action === 2 || marker?.action === 3) continue;
+      const namespace = String(marker?.ns || '');
+      if (namespace === 'loop_edges') {
+        addEdgePairs(marker?.points);
+      } else if (namespace === 'loop_nodes') {
+        for (const point of Array.from(marker?.points || [])) {
+          nodes.push({
+            x: Number(point?.x) || 0,
+            y: Number(point?.y) || 0,
+            id: nodes.length
+          });
+        }
+      }
     }
+
+    if (nodes.length > 0) this._slamGraphNodes = nodes;
+    this._slamLoopEdges = loopEdges;
+    this.requestRender();
+    this._applyLoopClosureSignal('3d', 'confirmed', loopEdges.length, 'LIO-SAM graph');
+  },
+
+  _loopClosureSignalState(dimension) {
+    const normalized = String(dimension || '').toLowerCase();
+    if (!this._loopClosureSignals[normalized]) {
+      this._loopClosureSignals[normalized] = { confirmed: 0, detected: 0 };
+    }
+    return this._loopClosureSignals[normalized];
+  },
+
+  _syncLoopClosureSignalForActiveDimension() {
+    let dimension = this._activeSlamDimension();
+    if (!['2d', '3d'].includes(dimension)) {
+      const twoD = this._loopClosureSignalState('2d');
+      const threeD = this._loopClosureSignalState('3d');
+      dimension = Math.max(threeD.confirmed, threeD.detected)
+        > Math.max(twoD.confirmed, twoD.detected) ? '3d' : '2d';
+    }
+    const signal = this._loopClosureSignalState(dimension);
+    this._loopClosureConfirmedCount = signal.confirmed;
+    this._loopClosureDetectedCount = signal.detected;
+    this._loopClosureCount = Math.max(signal.confirmed, signal.detected);
+    this._loopClosureConfirmation = signal.confirmed > 0
+      ? 'graph'
+      : signal.detected > 0 ? 'log' : 'none';
+    this._updateLoopClosureStatus();
+  },
+
+  _applyLoopClosureSignal(dimension, kind, count, source) {
+    const normalized = String(dimension || '').toLowerCase();
+    if (!['2d', '3d'].includes(normalized)
+        || !['confirmed', 'detected'].includes(kind)) return;
+    const signal = this._loopClosureSignalState(normalized);
+    const previousEffective = Math.max(signal.confirmed, signal.detected);
+    signal[kind] = Math.max(Number(signal[kind]) || 0, Math.max(0, Number(count) || 0));
+    const nextEffective = Math.max(signal.confirmed, signal.detected);
+    this._loopClosureSource = String(source || '');
+    this._syncLoopClosureSignalForActiveDimension();
+
+    const addedCount = nextEffective - previousEffective;
+    if (addedCount > 0 && (this._slamRunning || this._lifelongRunning)) {
+      this._announceLoopClosure(addedCount, {
+        confirmation: kind === 'confirmed' ? 'graph' : 'log',
+        dimension: normalized,
+        source
+      });
+    }
+  },
+
+  _handleLoopClosureLog(index, msg) {
+    if (index !== App.activeSlotIndex
+        || (!this._slamRunning && !this._lifelongRunning)) return;
+    const slot = App.robotSlots[index];
+    const expectedNode = `/${slot?.robotId}/slam_toolbox`;
+    const nodeName = String(msg?.name || '');
+    const text = String(msg?.msg || '');
+    const match = text.match(
+      /Loop Closed!\s*\(Response\s*:\s*[^,]+,\s*Vertex\s*:\s*(\d+),\s*Chain\s*:\s*\((\d+)\s*~\s*(\d+)\)\)/i
+    );
+    if (nodeName !== expectedNode || !match) return;
+
+    const stamp = msg?.header?.stamp || {};
+    const key = [
+      slot.robotId,
+      Number(stamp.secs) || 0,
+      Number(stamp.nsecs) || 0,
+      match[1],
+      match[2],
+      match[3]
+    ].join(':');
+    if (this._loopClosureLogKeys.has(key)) return;
+    this._loopClosureLogKeys.add(key);
+
+    this._recordSlamDimension(index, '2d', 'slam_toolbox', 'Loop Closed rosout 감지', 100);
+    const signal = this._loopClosureSignalState('2d');
+    this._applyLoopClosureSignal(
+      '2d',
+      'detected',
+      signal.detected + 1,
+      `slam_toolbox rosout · Vertex ${match[1]}`
+    );
+  },
+
+  _syncLoopClosureLogSubscription(index) {
+    const slot = App.robotSlots[index];
+    if (!slot?.ros) return;
+    const mapping = index === App.activeSlotIndex
+      && (this._slamRunning || this._lifelongRunning);
+    const existing = slot.subscriptions?.['loop-closure-log'];
+    if (!mapping) {
+      if (existing) {
+        try { existing.unsubscribe(); } catch (error) { /* ignore */ }
+        delete slot.subscriptions['loop-closure-log'];
+      }
+      return;
+    }
+    if (existing) return;
+    this._subscribeSlotTopic(
+      index,
+      'loop-closure-log',
+      '/rosout',
+      'rosgraph_msgs/Log',
+      msg => this._handleLoopClosureLog(index, msg)
+    );
   },
 
   _resetLoopClosureSession() {
@@ -1178,6 +1589,15 @@ const RosManager = {
     this._slamGraphEdges = [];
     this._slamLoopEdges = [];
     this._loopClosureCount = 0;
+    this._loopClosureConfirmedCount = 0;
+    this._loopClosureDetectedCount = 0;
+    this._loopClosureSignals = {
+      '2d': { confirmed: 0, detected: 0 },
+      '3d': { confirmed: 0, detected: 0 }
+    };
+    this._loopClosureLogKeys = new Set();
+    this._loopClosureConfirmation = 'none';
+    this._loopClosureSource = '';
     this._loopClosureSuccessAt = null;
     if (this._loopClosureNoticeTimer) {
       clearTimeout(this._loopClosureNoticeTimer);
@@ -1187,16 +1607,36 @@ const RosManager = {
     this._updateLoopClosureStatus();
   },
 
-  _announceLoopClosure(addedCount = 1) {
+  _announceLoopClosure(addedCount = 1, options = {}) {
+    const graphConfirmed = options.confirmation !== 'log';
     this._loopClosureSuccessAt = Date.now();
+    this._loopClosureConfirmation = graphConfirmed ? 'graph' : 'log';
     this._updateLoopClosureStatus();
 
     const notice = document.getElementById('loop-closure-notice');
+    const icon = notice?.querySelector?.('.loop-closure-success-icon');
+    const titleEl = document.getElementById('loop-closure-notice-title');
+    const messageEl = document.getElementById('loop-closure-notice-message');
     const countEl = document.getElementById('loop-closure-notice-count');
+    if (icon) icon.textContent = graphConfirmed ? '✓' : '!';
+    if (titleEl) {
+      titleEl.textContent = graphConfirmed
+        ? 'Loop Closure 성사!'
+        : 'Loop Closure 성사 로그 감지!';
+    }
+    if (messageEl) {
+      messageEl.textContent = graphConfirmed
+        ? '이전에 지나간 위치가 인식되어 맵 연결이 정상적으로 보정되었습니다.'
+        : 'SLAM 성공 로그를 감지했습니다. Pose graph 보정 데이터 확인을 기다리고 있습니다.';
+    }
     if (countEl) {
-      countEl.textContent = `이번 맵핑에서 총 ${this._loopClosureCount}회 연결 보정`;
+      const dimension = String(options.dimension || this._activeSlamDimension() || '?').toUpperCase();
+      countEl.textContent = graphConfirmed
+        ? `${dimension} · 이번 Mapping에서 총 ${this._loopClosureCount}회 그래프 보정 확인`
+        : `${dimension} · 이번 Mapping에서 총 ${this._loopClosureCount}회 성공 로그 감지`;
     }
     if (notice) {
+      notice.classList.toggle('detected', !graphConfirmed);
       notice.hidden = false;
       notice.classList.remove('show');
       requestAnimationFrame(() => notice.classList.add('show'));
@@ -1210,12 +1650,20 @@ const RosManager = {
 
     const additional = addedCount > 1 ? ` (${addedCount}개 동시 감지)` : '';
     if (typeof App !== 'undefined' && App.toast) {
-      App.toast(`Loop Closure 성사! 맵 연결 보정 완료${additional}`, 'success', 8000);
+      App.toast(
+        graphConfirmed
+          ? `Loop Closure 성사! 그래프 보정 확인${additional}`
+          : `Loop Closure 성공 로그 감지 · 그래프 확인 대기${additional}`,
+        graphConfirmed ? 'success' : 'warning',
+        8000
+      );
     }
     if (typeof App !== 'undefined' && App.eventLog?.add) {
       App.eventLog.add(
-        'success',
-        `Loop Closure 성사 · 누적 ${this._loopClosureCount}회${additional}`,
+        graphConfirmed ? 'success' : 'warning',
+        graphConfirmed
+          ? `Loop Closure 그래프 보정 확인 · 누적 ${this._loopClosureCount}회${additional}`
+          : `Loop Closure 성공 로그 감지 · 누적 ${this._loopClosureCount}회${additional}`,
         'mapping'
       );
     }
@@ -1238,22 +1686,33 @@ const RosManager = {
     const title = document.getElementById('loop-closure-status-title');
     const detail = document.getElementById('loop-closure-status-detail');
     const count = document.getElementById('loop-closure-status-count');
-    const success = this._loopClosureCount > 0;
-    status.classList.toggle('waiting', !success);
+    const success = this._loopClosureConfirmedCount > 0;
+    const detected = !success && this._loopClosureDetectedCount > 0;
+    status.classList.toggle('waiting', !success && !detected);
+    status.classList.toggle('detected', detected);
     status.classList.toggle('success', success);
+    const dimension = this._activeSlamDimension().toUpperCase();
 
     if (title) {
-      title.textContent = success ? 'Loop Closure 성사됨' : 'Loop Closure 대기 중';
+      title.textContent = success
+        ? `Loop Closure 성사됨${dimension ? ` · ${dimension}` : ''}`
+        : detected
+          ? `Loop Closure 로그 감지${dimension ? ` · ${dimension}` : ''}`
+          : `Loop Closure 대기 중${dimension ? ` · ${dimension}` : ''}`;
     }
     if (detail) {
       detail.textContent = success
-        ? '맵 연결 보정 완료 · 계속 주행하거나 맵을 저장하세요'
-        : '이전에 지나간 장소를 같은 방향으로 천천히 다시 주행하세요';
+        ? 'Pose graph 연결 보정 확인 · 계속 주행하거나 맵을 저장하세요'
+        : detected
+          ? 'SLAM 성공 로그 수신 · Pose graph 보정 데이터 확인 대기'
+          : '이전에 지나간 장소를 같은 방향으로 천천히 다시 주행하세요';
     }
     if (count) {
       count.textContent = success
-        ? `${this._loopClosureCount}회 성사`
-        : `그래프 노드 ${this._slamGraphNodes.length}개`;
+        ? `${this._loopClosureConfirmedCount}회 그래프 확인`
+        : detected
+          ? `${this._loopClosureDetectedCount}회 로그 감지`
+          : `그래프 노드 ${this._slamGraphNodes.length}개`;
     }
   },
 
@@ -1261,6 +1720,9 @@ const RosManager = {
   _handleSlotPose(index, msg, source = 'amcl') {
     const slot = App.robotSlots[index];
     if (!slot) return;
+    if (source === 'amcl') {
+      this._recordSlamDimension(index, '2d', 'AMCL', 'amcl_pose 데이터 수신', 90, 'localization');
+    }
 
     // If robot_state pose is available, skip amcl
     if (slot.robotStatePoseReceived) return;
@@ -1276,7 +1738,7 @@ const RosManager = {
 
     if (index === App.activeSlotIndex) {
       this._hzCounters.pose++;
-      if (App.alarmSystem) App.alarmSystem.recordTopicActivity('pose');
+      if (App.alarmSystem) App.alarmSystem.recordTopicActivity('pose', index);
     }
 
     const pos = msg.pose.pose.position;
@@ -1346,7 +1808,7 @@ const RosManager = {
     // If this is the active slot, update UI
     if (index === App.activeSlotIndex) {
       if (this._hzCounters) this._hzCounters.pose++;
-      if (App.alarmSystem) App.alarmSystem.recordTopicActivity('pose');
+      if (App.alarmSystem) App.alarmSystem.recordTopicActivity('pose', index);
 
       this.robotPose = { x: pos.x, y: pos.y, yaw: yaw };
       this.displayPose(this.robotPose);
@@ -1361,7 +1823,7 @@ const RosManager = {
   // Display work state on UI (dashboard section + header indicator)
   displayWorkState(state) {
     this._hzCounters.workstate++;
-    if (App.alarmSystem) App.alarmSystem.recordTopicActivity('workstate');
+    if (App.alarmSystem) App.alarmSystem.recordTopicActivity('workstate', App.activeSlotIndex);
     const stateStr = (state !== null && state !== undefined) ? String(state) : '--';
     const label = this.WORK_STATE_LABELS[stateStr] || stateStr;
     const valueEl = document.getElementById('work-state-value');
@@ -1557,6 +2019,19 @@ const RosManager = {
     if (this._checkboxRestored) return;
     this._checkboxRestored = true;
 
+    // Camera image streams are optional and can saturate a remote rosbridge
+    // connection before core telemetry (map, BMS, workstate) is delivered.
+    // Migrate once to a core-topic-first default; users can enable cameras
+    // explicitly from the Camera tab afterwards.
+    const cameraProfileVersion = '20260731-core-topics-first';
+    try {
+      if (localStorage.getItem('amrCameraProfile') !== cameraProfileVersion) {
+        ['chk-cam1-depth', 'chk-cam1-color', 'chk-cam2-depth', 'chk-cam2-color']
+          .forEach(id => localStorage.removeItem('amrChk_' + id));
+        localStorage.setItem('amrCameraProfile', cameraProfileVersion);
+      }
+    } catch (e) { /* ignore storage failures */ }
+
     // Hidden-to-camera-tab checkbox mapping
     const hiddenToCam = {
       'chk-cam1-depth': 'cam1-depth',
@@ -1640,7 +2115,12 @@ const RosManager = {
       {
         id: 'chk-footprint', key: 'footprint',
         topicTemplate: '/{rid}/move_base/local_costmap/footprint', type: 'geometry_msgs/PolygonStamped',
-        handlerFn: (msg, idx) => this._handleFootprintMessage(idx, msg)
+        handlerFn: (msg, idx) => this._handleFootprintMessage(idx, msg, 'move-base'),
+        clearFn: () => {
+          this._footprintPoints = null;
+          this._footprintFrame = '';
+          this._lastLioFootprintAt = 0;
+        }
       },
       {
         id: 'chk-local-costmap', key: 'local-costmap',
@@ -1689,6 +2169,7 @@ const RosManager = {
         topicTemplate: '/{rid}/lio_sam/mapping/path', type: 'nav_msgs/Path',
         handlerFn: (msg, idx) => {
           if (idx !== App.activeSlotIndex) return;
+          if (!this._slamRunning && !this._lifelongRunning) return;
           this._mappingTopicPath = this._pathToMapPoints(msg, idx);
           this.requestRender();
         },
@@ -1720,10 +2201,23 @@ const RosManager = {
           // Create handler that passes current index
           const handler = (msg) => cfg.handlerFn(msg, currentIndex);
           this._subscribeSlotTopic(currentIndex, cfg.key, topic, cfg.type, handler);
+          if (cfg.key === 'footprint') {
+            this._subscribeSlotTopic(
+              currentIndex,
+              'footprint-lio',
+              `/${currentRid}/lio_sam/mapping/footprint`,
+              'geometry_msgs/PolygonStamped',
+              (msg) => this._handleFootprintMessage(currentIndex, msg, 'lio')
+            );
+          }
         } else if (!cfg.displayOnly && currentSlot) {
           if (currentSlot.subscriptions[cfg.key]) {
             currentSlot.subscriptions[cfg.key].unsubscribe();
             delete currentSlot.subscriptions[cfg.key];
+          }
+          if (cfg.key === 'footprint' && currentSlot.subscriptions['footprint-lio']) {
+            currentSlot.subscriptions['footprint-lio'].unsubscribe();
+            delete currentSlot.subscriptions['footprint-lio'];
           }
           if (cfg.clearFn) cfg.clearFn();
         }
@@ -2086,6 +2580,12 @@ const RosManager = {
     const height = msg.info.height;
     const data = msg.data;
 
+    if (this._mapImageCanvas
+        && this._mapImageSource === data
+        && this._mapImageCanvas.width === width
+        && this._mapImageCanvas.height === height) {
+      return this._mapImageCanvas;
+    }
     if (!this._mapImageCanvas) {
       this._mapImageCanvas = document.createElement('canvas');
     }
@@ -2093,32 +2593,29 @@ const RosManager = {
     this._mapImageCanvas.height = height;
     const ctx = this._mapImageCanvas.getContext('2d');
     const imageData = ctx.createImageData(width, height);
+    const pixels = imageData.data;
+    const gray = new Uint8Array(102);
+    gray[0] = 128; // -1: unknown
+    for (let value = 0; value <= 100; value += 1) {
+      gray[value + 1] = value === 0 ? 255 : Math.max(0, 255 - Math.round(value * 2.55));
+    }
 
     for (let y = 0; y < height; y++) {
+      const srcBase = (height - 1 - y) * width;
+      let dstIdx = y * width * 4;
       for (let x = 0; x < width; x++) {
-        const srcIdx = (height - 1 - y) * width + x;
-        const dstIdx = (y * width + x) * 4;
-        const value = data[srcIdx];
-
-        let r, g, b;
-        if (value === -1) {
-          r = g = b = 128;
-        } else if (value === 0) {
-          r = g = b = 255;
-        } else if (value === 100) {
-          r = g = b = 0;
-        } else {
-          r = g = b = 255 + Math.round((value / 100) * -255);
-        }
-
-        imageData.data[dstIdx] = r;
-        imageData.data[dstIdx + 1] = g;
-        imageData.data[dstIdx + 2] = b;
-        imageData.data[dstIdx + 3] = 255;
+        const value = Number(data[srcBase + x]);
+        const color = gray[Math.max(0, Math.min(101, value + 1))];
+        pixels[dstIdx] = color;
+        pixels[dstIdx + 1] = color;
+        pixels[dstIdx + 2] = color;
+        pixels[dstIdx + 3] = 255;
+        dstIdx += 4;
       }
     }
 
     ctx.putImageData(imageData, 0, 0);
+    this._mapImageSource = data;
     return this._mapImageCanvas;
   },
 
@@ -2135,6 +2632,24 @@ const RosManager = {
   // When true, incoming map topic messages are ignored to protect restored/edited map
   _mapLocked: false,
 
+  _mapMessageSignature(msg) {
+    const info = msg?.info || {};
+    const data = msg?.data || [];
+    const length = Number(data.length) || 0;
+    let sample = 2166136261;
+    const stride = Math.max(1, Math.floor(length / 64));
+    for (let index = 0; index < length; index += stride) {
+      sample ^= (Number(data[index]) || 0) + 2;
+      sample = Math.imul(sample, 16777619);
+    }
+    const origin = info.origin?.position || {};
+    return [
+      info.width, info.height, info.resolution,
+      Number(origin.x || 0).toFixed(4), Number(origin.y || 0).toFixed(4),
+      length, sample >>> 0
+    ].join(':');
+  },
+
   renderMap(msg) {
     this._hzCounters.map++;
     // Block map updates while in edit mode (prevent overwriting edits)
@@ -2146,6 +2661,18 @@ const RosManager = {
     if (this._mapLocked) {
       return;
     }
+    // map_server and localization slam_toolbox may both replay the same multi-MB
+    // latched map when a client connects. Drop only the short initial duplicate;
+    // mapping updates (normally seconds apart) remain untouched.
+    const signature = this._mapMessageSignature(msg);
+    const now = Date.now();
+    if (!this._slamRunning && !this._lifelongRunning
+        && signature === this._lastAcceptedMapSignature
+        && now - this._lastAcceptedMapAt < 2500) {
+      return;
+    }
+    this._lastAcceptedMapSignature = signature;
+    this._lastAcceptedMapAt = now;
     this.lastMapMsg = msg;
     // Use throttled render for sync
     this.requestRender();
@@ -2208,9 +2735,13 @@ const RosManager = {
       this._renderPathLayer(ctx, this._navigationPath, width, height, resolution, origin, '#38bdf8', 3);
     }
 
-    if (this._isLayerEnabled('chk-mapping-path')) {
+    const mappingActive = this._slamRunning || this._lifelongRunning;
+    if (mappingActive && this._isLayerEnabled('chk-mapping-path')) {
       if (this._mappingTopicPath.length > 1) {
         this._renderPathLayer(ctx, this._mappingTopicPath, width, height, resolution, origin, '#19ff00', 3.5);
+        // The topic path is the authoritative route, while the local trail
+        // still owns the retained Vertex/start markers used by partial Mapping.
+        this._renderSlamTrail(ctx, width, height, resolution, origin, false);
       } else if (this._breadcrumbTrail.length > 1) {
         this._renderSlamTrail(ctx, width, height, resolution, origin);
       }
@@ -2278,6 +2809,9 @@ const RosManager = {
 
     // Draw the route of the Task currently assigned to the active robot.
     this._drawActiveTaskOverlay(ctx, width, height, resolution, origin);
+
+    // Draw the saved/editing Task selected from the Task tab.
+    this._drawTaskPreviewOverlay(ctx, width, height, resolution, origin);
 
     // Draw the map points currently being composed by Quick Task.
     this._drawQuickTaskOverlay(ctx, width, height, resolution, origin);
@@ -2976,6 +3510,48 @@ const RosManager = {
     this.requestRender();
   },
 
+  // Reset the map camera and transient overlays while preserving the Task
+  // currently assigned to the active robot.
+  resetMapView() {
+    this.mapZoom = 1.0;
+    this.mapPanX = 0;
+    this.mapPanY = 0;
+    this.mapRotation = 0;
+    this._followRobot = false;
+
+    this._taskPreviewOverlay = null;
+    this._quickTaskOverlay = [];
+
+    this._poseMode = false;
+    this._poseDragging = false;
+    this._navGoalMode = false;
+    this._navGoalDragging = false;
+    this._pendingNavGoal = null;
+    this._exitWaypointSelectMode();
+    this._exitFreehandPathMode();
+
+    document.getElementById('btn-follow-robot')?.classList.remove('active');
+    document.getElementById('btn-set-pose-mode')?.classList.remove('active');
+    document.getElementById('btn-nav-goal-mode')?.classList.remove('active');
+    document.getElementById('nav-goal-popup')?.classList.add('hidden');
+    const canvas = document.getElementById('map-canvas');
+    if (canvas) canvas.style.cursor = 'grab';
+
+    const zoomValue = document.getElementById('map-zoom-value');
+    const rotationValue = document.getElementById('map-rotation-value');
+    if (zoomValue) zoomValue.textContent = '100%';
+    if (rotationValue) rotationValue.textContent = '0\u00B0';
+
+    // Keep the Task library/editor selection in sync with the cleared preview.
+    if (typeof ActionSender !== 'undefined') {
+      ActionSender.clearTaskPreview?.();
+    }
+
+    // Intentionally do not change _activeTaskOverlay or layer checkboxes.
+    this.requestRender();
+    App.toast('화면 정리 완료 · 실행 중인 Task 표시는 유지됩니다.', 'info');
+  },
+
   // POI management
   _poiList: [],
   POI_STORAGE_KEY: 'mapPOIs',
@@ -3285,7 +3861,7 @@ const RosManager = {
       this.requestRender();
     }, { passive: false });
 
-    // Mouse down: pan mode, pose mode, nav goal mode, or waypoint select mode
+    // Mouse down: pan mode, pose mode, nav goal mode, waypoint, or freehand path mode
     canvas.addEventListener('mousedown', (e) => {
       // Map edit mode handles its own events
       if (this._mapEditMode) return;
@@ -3293,6 +3869,11 @@ const RosManager = {
       const rect = canvas.getBoundingClientRect();
       const cx = e.clientX - rect.left;
       const cy = e.clientY - rect.top;
+      if (this._freehandPathMode && e.button === 0) {
+        e.preventDefault();
+        this._startFreehandPath(cx, cy, canvas);
+        return;
+      }
       if (this._poseMode) {
         this._poseDragging = true;
         this._poseStartCanvasX = cx;
@@ -3348,6 +3929,13 @@ const RosManager = {
 
     // Mouse move: pan, pose preview, or nav goal preview
     window.addEventListener('mousemove', (e) => {
+      if (this._freehandPathDrawing) {
+        const rect = canvas.getBoundingClientRect();
+        const cx = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+        const cy = Math.max(0, Math.min(rect.height, e.clientY - rect.top));
+        this._appendFreehandPathPoint(cx, cy, canvas);
+        return;
+      }
       if (this._poseDragging) {
         const rect = canvas.getBoundingClientRect();
         this._poseCurrentCanvasX = e.clientX - rect.left;
@@ -3405,6 +3993,14 @@ const RosManager = {
 
     // Mouse up: finish pan, commit pose, commit nav goal, or commit waypoint
     window.addEventListener('mouseup', (e) => {
+      if (this._freehandPathDrawing) {
+        const rect = canvas.getBoundingClientRect();
+        const cx = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+        const cy = Math.max(0, Math.min(rect.height, e.clientY - rect.top));
+        this._appendFreehandPathPoint(cx, cy, canvas, true);
+        this._finishFreehandPath();
+        return;
+      }
       if (this._poseDragging) {
         this._poseDragging = false;
         this._commitClickPose(canvas);
@@ -3436,11 +4032,36 @@ const RosManager = {
 
     canvas.style.cursor = 'grab';
 
+    // Touch drawing follows the same freehand path flow without also panning the map.
+    canvas.addEventListener('touchstart', e => {
+      if (!this._freehandPathMode || e.touches.length !== 1) return;
+      const rect = canvas.getBoundingClientRect();
+      const touch = e.touches[0];
+      e.preventDefault();
+      this._startFreehandPath(touch.clientX - rect.left, touch.clientY - rect.top, canvas);
+    }, { passive: false });
+    canvas.addEventListener('touchmove', e => {
+      if (!this._freehandPathDrawing || e.touches.length !== 1) return;
+      const rect = canvas.getBoundingClientRect();
+      const touch = e.touches[0];
+      e.preventDefault();
+      this._appendFreehandPathPoint(
+        Math.max(0, Math.min(rect.width, touch.clientX - rect.left)),
+        Math.max(0, Math.min(rect.height, touch.clientY - rect.top)),
+        canvas
+      );
+    }, { passive: false });
+    canvas.addEventListener('touchend', e => {
+      if (!this._freehandPathDrawing) return;
+      e.preventDefault();
+      this._finishFreehandPath();
+    }, { passive: false });
+
     // Update cursor when edit mode changes
     this._updateMapCursor = () => {
       if (this._mapEditMode) {
         canvas.style.cursor = 'crosshair';
-      } else if (this._poseMode || this._navGoalMode || this._waypointSelectMode) {
+      } else if (this._poseMode || this._navGoalMode || this._waypointSelectMode || this._freehandPathMode) {
         canvas.style.cursor = 'crosshair';
       } else {
         canvas.style.cursor = 'grab';
@@ -3487,6 +4108,11 @@ const RosManager = {
       });
     }
 
+    const btnViewReset = document.getElementById('btn-map-view-reset');
+    if (btnViewReset) {
+      btnViewReset.addEventListener('click', () => this.resetMapView());
+    }
+
     // COV Reposition button
     const btnCov = document.getElementById('btn-cov-reposition');
     if (btnCov) {
@@ -3501,11 +4127,15 @@ const RosManager = {
     const btnFullscreen = document.getElementById('btn-map-fullscreen');
     const panelMap = document.getElementById('panel-map');
     if (btnFullscreen && panelMap) {
+      const fullscreenIcon = btnFullscreen.querySelector('.map-fullscreen-icon');
+      const fullscreenLabel = btnFullscreen.querySelector('.map-fullscreen-label');
       const enterFullscreen = () => {
         panelMap.classList.add('map-fullscreen');
         btnFullscreen.classList.add('active');
-        btnFullscreen.innerHTML = '✕';
-        btnFullscreen.title = 'Exit fullscreen (ESC)';
+        if (fullscreenIcon) fullscreenIcon.textContent = '✕';
+        if (fullscreenLabel) fullscreenLabel.textContent = '전체화면 종료';
+        btnFullscreen.title = '맵 전체화면 닫기 (ESC)';
+        btnFullscreen.setAttribute('aria-label', '맵 전체화면 닫기');
         setTimeout(() => this.requestRender(), 100);
       };
 
@@ -3513,8 +4143,10 @@ const RosManager = {
         panelMap.classList.add('map-fullscreen-exit');
         panelMap.classList.remove('map-fullscreen');
         btnFullscreen.classList.remove('active');
-        btnFullscreen.innerHTML = '⤢';
-        btnFullscreen.title = 'Map fullscreen (ESC to close)';
+        if (fullscreenIcon) fullscreenIcon.textContent = '⛶';
+        if (fullscreenLabel) fullscreenLabel.textContent = '전체화면';
+        btnFullscreen.title = '맵 전체화면 열기 (ESC로 닫기)';
+        btnFullscreen.setAttribute('aria-label', '맵 전체화면 열기');
         setTimeout(() => {
           panelMap.classList.remove('map-fullscreen-exit');
           this.requestRender();
@@ -3613,7 +4245,6 @@ const RosManager = {
     // Publish
     const x = startWorld.x;
     const y = startWorld.y;
-    const yawDeg = yawRad * 180 / Math.PI;
 
     this._publishInitialPoseValues(x, y, yawRad);
 
@@ -3725,6 +4356,16 @@ const RosManager = {
     this.requestRender();
   },
 
+  setTaskPreviewOverlay(task) {
+    this._taskPreviewOverlay = task
+      ? {
+        ...task,
+        points: Array.from(task.points || []).map(point => ({ ...point }))
+      }
+      : null;
+    this.requestRender();
+  },
+
   _drawActiveTaskOverlay(ctx, mapWidth, mapHeight, resolution, origin) {
     const task = this._activeTaskOverlay;
     const points = task?.showRoute ? Array.from(task.points || []) : [];
@@ -3788,6 +4429,131 @@ const RosManager = {
     ctx.restore();
   },
 
+  _drawTaskPreviewOverlay(ctx, mapWidth, mapHeight, resolution, origin) {
+    const task = this._taskPreviewOverlay;
+    const points = task?.showRoute ? Array.from(task.points || []) : [];
+    if (points.length === 0) return;
+    const scale = Math.max(this.mapZoom || 1, 0.1);
+    const selectedActionIndex = Number.isInteger(task.selectedActionIndex)
+      ? task.selectedActionIndex
+      : null;
+    const hasSelection = selectedActionIndex !== null;
+    const toMap = point => ({
+      x: (point.x - origin.position.x) / resolution - mapWidth / 2,
+      y: mapHeight - (point.y - origin.position.y) / resolution - mapHeight / 2
+    });
+    const colors = {
+      waypoint: '#22d3ee',
+      trajectory: '#fbbf24',
+      'change-map': '#c084fc'
+    };
+
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    for (let index = 1; index < points.length; index += 1) {
+      const previousPoint = points[index - 1];
+      const currentPoint = points[index];
+      const previous = toMap(previousPoint);
+      const current = toMap(currentPoint);
+      const sameAction = Number(previousPoint.actionIndex) === Number(currentPoint.actionIndex);
+      // The segment ending at a point belongs to that point's Action. This keeps
+      // the following Action's outgoing route from being highlighted as well.
+      const selectedSegment = hasSelection
+        && Number(currentPoint.actionIndex) === selectedActionIndex;
+      ctx.beginPath();
+      ctx.setLineDash(sameAction ? [] : [7 / scale, 5 / scale]);
+      ctx.strokeStyle = selectedSegment
+        ? '#f472b6'
+        : (hasSelection ? 'rgba(100, 116, 139, 0.42)' : 'rgba(34, 211, 238, 0.78)');
+      ctx.lineWidth = (selectedSegment ? 5 : 2.75) / scale;
+      ctx.moveTo(previous.x, previous.y);
+      ctx.lineTo(current.x, current.y);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    points.forEach((point, pointIndex) => {
+      const mapPoint = toMap(point);
+      const selected = hasSelection && Number(point.actionIndex) === selectedActionIndex;
+      const dimmed = hasSelection && !selected;
+      const color = selected ? '#f472b6' : (colors[point.kind] || colors.waypoint);
+      const radius = (selected ? 10 : 7.5) / scale;
+      ctx.save();
+      ctx.translate(mapPoint.x, mapPoint.y);
+      ctx.globalAlpha = dimmed ? 0.38 : 1;
+
+      if (selected) {
+        ctx.fillStyle = 'rgba(244, 114, 182, 0.18)';
+        ctx.strokeStyle = 'rgba(244, 114, 182, 0.58)';
+        ctx.lineWidth = 2 / scale;
+        ctx.beginPath();
+        ctx.arc(0, 0, 16 / scale, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+
+      ctx.fillStyle = 'rgba(8, 15, 30, 0.94)';
+      ctx.strokeStyle = color;
+      ctx.lineWidth = (selected ? 4 : 2.5) / scale;
+      ctx.beginPath();
+      ctx.arc(0, 0, radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.save();
+      ctx.rotate(-(Number(point.theta) || 0));
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo((selected ? 19 : 16) / scale, 0);
+      ctx.lineTo(5 / scale, -5 / scale);
+      ctx.lineTo(5 / scale, 5 / scale);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+
+      ctx.fillStyle = '#fff';
+      ctx.font = `700 ${Math.max(7, selected ? 8.5 : 7.5) / scale}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(point.label || pointIndex + 1), 0, 0);
+      ctx.restore();
+    });
+
+    const anchor = toMap(
+      hasSelection
+        ? (points.find(point => Number(point.actionIndex) === selectedActionIndex) || points[0])
+        : points[0]
+    );
+    const taskLabel = String(task.taskName || 'Task');
+    ctx.font = `700 ${10 / scale}px sans-serif`;
+    const labelWidth = Math.min(ctx.measureText?.(taskLabel)?.width || 90 / scale, 220 / scale);
+    const labelX = anchor.x + 14 / scale;
+    const labelY = anchor.y - 28 / scale;
+    ctx.fillStyle = hasSelection ? 'rgba(80, 7, 36, 0.92)' : 'rgba(8, 47, 73, 0.92)';
+    ctx.strokeStyle = hasSelection ? '#f472b6' : '#22d3ee';
+    ctx.lineWidth = 1.5 / scale;
+    ctx.beginPath();
+    if (typeof ctx.roundRect === 'function') {
+      ctx.roundRect(
+        labelX,
+        labelY,
+        labelWidth + 16 / scale,
+        22 / scale,
+        5 / scale
+      );
+    } else {
+      ctx.rect?.(labelX, labelY, labelWidth + 16 / scale, 22 / scale);
+    }
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#f8fafc';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(taskLabel, labelX + 8 / scale, labelY + 11 / scale, labelWidth);
+    ctx.restore();
+  },
+
   _drawQuickTaskOverlay(ctx, mapWidth, mapHeight, resolution, origin) {
     const points = this._quickTaskOverlay || [];
     if (points.length === 0) return;
@@ -3800,7 +4566,9 @@ const RosManager = {
       waypoint: '#22d3ee',
       trajectory: '#facc15',
       'trajectory-draft': '#fb923c',
-      docking: '#c084fc'
+      'trajectory-freehand-draft': '#38bdf8',
+      docking: '#c084fc',
+      'docking-out': '#fb7185'
     };
 
     ctx.save();
@@ -3816,6 +4584,8 @@ const RosManager = {
         : [6 / scale, 5 / scale]);
       ctx.strokeStyle = selectedSegment
         ? '#f472b6'
+        : points[index].kind === 'trajectory-freehand-draft'
+        ? colors['trajectory-freehand-draft']
         : points[index].kind === 'trajectory-draft'
         ? colors['trajectory-draft']
         : 'rgba(34, 211, 238, 0.72)';
@@ -3829,7 +4599,7 @@ const RosManager = {
     points.forEach(point => {
       const mapPoint = toMap(point);
       const color = colors[point.kind] || colors.waypoint;
-      const radius = 8 / scale;
+      const radius = (point.kind === 'trajectory-freehand-draft' ? 4.5 : 8) / scale;
       ctx.save();
       ctx.translate(mapPoint.x, mapPoint.y);
       if (point.selected) {
@@ -3875,6 +4645,7 @@ const RosManager = {
     // Disable other modes
     this._poseMode = false;
     this._navGoalMode = false;
+    this._exitFreehandPathMode();
     const btnPoseMode = document.getElementById('btn-set-pose-mode');
     const btnNavGoal = document.getElementById('btn-nav-goal-mode');
     if (btnPoseMode) btnPoseMode.classList.remove('active');
@@ -3900,6 +4671,67 @@ const RosManager = {
     const canvas = document.getElementById('map-canvas');
     if (canvas) canvas.style.cursor = 'grab';
     this.requestRender();
+  },
+
+  // Enter a press-and-drag curve capture mode for Quick Task.
+  _enterFreehandPathMode(options = {}) {
+    this._poseMode = false;
+    this._navGoalMode = false;
+    this._exitWaypointSelectMode();
+    const btnPoseMode = document.getElementById('btn-set-pose-mode');
+    const btnNavGoal = document.getElementById('btn-nav-goal-mode');
+    if (btnPoseMode) btnPoseMode.classList.remove('active');
+    if (btnNavGoal) btnNavGoal.classList.remove('active');
+
+    this._freehandPathMode = true;
+    this._freehandPathDrawing = false;
+    this._freehandPathOptions = { ...options };
+    this._freehandCanvasPoints = [];
+    this._freehandWorldPoints = [];
+    const canvas = document.getElementById('map-canvas');
+    if (canvas) canvas.style.cursor = 'crosshair';
+  },
+
+  _exitFreehandPathMode() {
+    this._freehandPathMode = false;
+    this._freehandPathDrawing = false;
+    this._freehandPathOptions = {};
+    this._freehandCanvasPoints = [];
+    this._freehandWorldPoints = [];
+    const canvas = document.getElementById('map-canvas');
+    if (canvas && !this._waypointSelectMode) canvas.style.cursor = 'grab';
+    this.requestRender();
+  },
+
+  _startFreehandPath(canvasX, canvasY, canvas) {
+    if (!this._freehandPathMode) return;
+    this._freehandPathDrawing = true;
+    this._freehandCanvasPoints = [];
+    this._freehandWorldPoints = [];
+    this._appendFreehandPathPoint(canvasX, canvasY, canvas, true);
+  },
+
+  _appendFreehandPathPoint(canvasX, canvasY, canvas, force = false) {
+    if (!this._freehandPathDrawing) return false;
+    const last = this._freehandCanvasPoints.at(-1);
+    if (!force && last && Math.hypot(canvasX - last.x, canvasY - last.y) < 3) return false;
+    const world = this._canvasToWorld(canvasX, canvasY, canvas);
+    if (!world || !Number.isFinite(world.x) || !Number.isFinite(world.y)) return false;
+    this._freehandCanvasPoints.push({ x: canvasX, y: canvasY });
+    this._freehandWorldPoints.push({ x: world.x, y: world.y });
+    this._freehandPathOptions.onUpdate?.(
+      this._freehandWorldPoints.map(point => ({ ...point }))
+    );
+    return true;
+  },
+
+  _finishFreehandPath() {
+    if (!this._freehandPathDrawing) return;
+    this._freehandPathDrawing = false;
+    const points = this._freehandWorldPoints.map(point => ({ ...point }));
+    this._freehandCanvasPoints = [];
+    this._freehandWorldPoints = [];
+    this._freehandPathOptions.onComplete?.(points);
   },
 
   _prepareNextWaypointSelection() {
@@ -3942,14 +4774,18 @@ const RosManager = {
       yawRad = canvasAngle - rotRad;
     }
 
-    // Call the callback with coordinates
-    if (this._waypointSelectCallback) {
-      this._waypointSelectCallback(startWorld.x, startWorld.y, yawRad);
-    }
-    if (this._waypointSelectMode && this._waypointSelectionOptions.twoClick) {
+    // Re-arm the position phase before notifying Quick Task. The callback
+    // renders the new point and may change tools, so resetting afterwards can
+    // leave the old point stuck in direction mode when callbacks overlap.
+    const callback = this._waypointSelectCallback;
+    const continuous = this._waypointSelectMode && this._waypointSelectionOptions.twoClick;
+    if (continuous) {
       this._prepareNextWaypointSelection();
     } else {
       this._waypointDirectionPending = false;
+    }
+    if (callback) {
+      callback(startWorld.x, startWorld.y, yawRad);
     }
   },
 
@@ -4032,8 +4868,13 @@ const RosManager = {
 
     // In test mode, simulate navigation
     if (typeof TestMode !== 'undefined' && TestMode.enabled) {
+      const accepted = TestMode.navigateTo(x, y, yawRad, {
+        avoidObstacles: !p.noAvoid,
+        maxVel: p.maxVel,
+        passing: p.passing
+      });
+      if (!accepted) return;
       App.toast(`[Test] Nav Goal: X=${x.toFixed(2)}, Y=${y.toFixed(2)}, Yaw=${(yawRad * 180 / Math.PI).toFixed(1)}° (${paramInfo})`, 'success');
-      TestMode.navigateTo(x, y, yawRad);
       if (typeof App !== 'undefined' && App.eventLog) {
         App.eventLog.add('info', `Nav Goal sent: (${x.toFixed(2)}, ${y.toFixed(2)})`, 'nav');
       }
@@ -4488,14 +5329,25 @@ const RosManager = {
   _tfReceived: false,        // Whether valid TF has been received
 
   setupMappingControls() {
-    // SLAM
-    document.getElementById('btn-slam-start').addEventListener('click', () => this._startSlam());
-    document.getElementById('btn-slam-stop').addEventListener('click', () => this._stopSlam());
-    // Lifelong
-    document.getElementById('btn-lifelong-start').addEventListener('click', () => this._startLifelong());
-    document.getElementById('btn-lifelong-stop').addEventListener('click', () => this._stopLifelong());
-    // Save Map
-    document.getElementById('btn-save-map').addEventListener('click', () => this._saveMap());
+    [
+      ['btn-slam-start', () => this._startSlam()],
+      ['btn-slam-stop', () => this._stopSlam()],
+      ['btn-lifelong-start', () => this._startLifelong()],
+      ['btn-lifelong-stop', () => this._stopLifelong()],
+      ['btn-save-map', () => this._openMappingSaveConfirm('SAVE_ONLY')],
+      ['btn-mapping-save-yes', () => this._confirmMappingSave()],
+      ['btn-mapping-save-no', () => this._discardMappingSaveAndStop()],
+      ['btn-mapping-save-cancel', () => this._closeMappingSaveConfirm()],
+      ['btn-mapping-save-close', () => this._closeMappingSaveConfirm()]
+    ].forEach(([id, handler]) => {
+      document.getElementById(id)?.addEventListener('click', handler);
+    });
+    document.getElementById('mapping-save-confirm-modal')?.addEventListener('click', event => {
+      if (event.target?.id === 'mapping-save-confirm-modal') this._closeMappingSaveConfirm();
+    });
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape') this._closeMappingSaveConfirm();
+    });
     const confirmLoopClosure = document.getElementById('btn-loop-closure-confirm');
     if (confirmLoopClosure) {
       confirmLoopClosure.addEventListener('click', () => this._dismissLoopClosureNotice());
@@ -4509,10 +5361,14 @@ const RosManager = {
     if (!ros || !rid) {
       if (statusEl) statusEl.textContent = 'Not connected';
       App.toast('Robot not connected', 'error');
+      if (callback) callback(false, 'Robot not connected');
       return;
     }
 
-    const fullName = `/${rid}${serviceName}`;
+    const ridPrefix = `/${rid}/`;
+    const fullName = String(serviceName || '').startsWith(ridPrefix)
+      ? serviceName
+      : `/${rid}/${String(serviceName || '').replace(/^\/+/, '')}`;
 
     // Test mode: simulate service response (custom msg types not available in test rosbridge)
     if (typeof TestMode !== 'undefined' && TestMode.enabled) {
@@ -4569,14 +5425,16 @@ const RosManager = {
     if (start) start.disabled = this._slamRunning;
     if (stop) stop.disabled = !this._slamRunning;
     const status = document.getElementById('slam-status');
-    if (!status) return;
-    if (this._slamRunning) {
-      status.textContent = 'Running';
-      status.style.color = '#4ade80';
-    } else {
-      status.textContent = 'Off';
-      status.style.color = '';
+    if (status) {
+      if (this._slamRunning) {
+        status.textContent = '실행 중';
+        status.style.color = '#4ade80';
+      } else {
+        status.textContent = '꺼짐';
+        status.style.color = '';
+      }
     }
+    this._updateMappingToolbarSummary();
   },
 
   _updateLifelongButtons() {
@@ -4585,13 +5443,31 @@ const RosManager = {
     if (start) start.disabled = this._lifelongRunning;
     if (stop) stop.disabled = !this._lifelongRunning;
     const status = document.getElementById('lifelong-status');
-    if (!status) return;
-    if (this._lifelongRunning) {
-      status.textContent = 'Running';
-      status.style.color = '#4ade80';
+    if (status) {
+      if (this._lifelongRunning) {
+        status.textContent = '실행 중';
+        status.style.color = '#4ade80';
+      } else {
+        status.textContent = '꺼짐';
+        status.style.color = '';
+      }
+    }
+    this._updateMappingToolbarSummary();
+  },
+
+  _updateMappingToolbarSummary() {
+    const summary = document.getElementById('map-mapping-summary-state');
+    if (!summary) return;
+
+    if (this._slamRunning) {
+      summary.textContent = 'SLAM';
+      summary.classList.add('active');
+    } else if (this._lifelongRunning) {
+      summary.textContent = '부분';
+      summary.classList.add('active');
     } else {
-      status.textContent = 'Off';
-      status.style.color = '';
+      summary.textContent = '대기';
+      summary.classList.remove('active');
     }
   },
 
@@ -4605,7 +5481,8 @@ const RosManager = {
       return;
     }
 
-    const topicName = `/${rid}/sp_routine`;
+    const profile = this._compatibilityForSlot(slotIndex);
+    const topicName = profile?.mapping?.commandTopic || `/${rid}/sp_routine`;
     if (statusEl) {
       statusEl.textContent = 'Publishing...';
       statusEl.style.color = '#f0ad4e';
@@ -4619,6 +5496,9 @@ const RosManager = {
 
     const msg = new ROSLIB.Message({ data: mode });
     topic.publish(msg);
+    if (typeof TestMode !== 'undefined' && TestMode.enabled) {
+      TestMode.setMappingMode?.(slotIndex, mode);
+    }
     console.log(`[Mapping] Published ${topicName}: "${mode}"`);
 
     if (statusEl) {
@@ -4650,36 +5530,47 @@ const RosManager = {
     const statusEl = document.getElementById('slam-status');
     this._publishRoutineMode('SLAM', statusEl, 'Running', (ok) => {
       if (ok) {
+        this._beginMappingSaveSession();
         this._slamRunning = true;
         this._currentRoutineMode = 'SLAM';
         const slot = App.robotSlots[App.activeSlotIndex];
         if (slot) slot.routineMode = 'SLAM';
         this._modeManualSet = true;  // Disable auto mode detection
         this._updateSlamButtons();
+        this._updateSlamDimensionStatus();
+        this._syncLoopClosureLogSubscription(App.activeSlotIndex);
         this._subscribeSlamPose();
         this._enableMappingPathLayer();
         // Clear map cache for fresh SLAM map
         this._mapImageCanvas = null;
-        this._startSlamTrail();
+        this._mappingTopicPath = [];
+        this._startSlamTrail(false);
       }
     });
   },
 
-  _stopSlam() {
+  _stopSlam(skipSavePrompt = false) {
+    if (!skipSavePrompt && this._slamRunning && !this._mappingSessionSaved) {
+      this._openMappingSaveConfirm('SLAM');
+      return;
+    }
     const statusEl = document.getElementById('slam-status');
     this._publishRoutineMode('NAV', statusEl, 'Off', (ok) => {
       if (ok) {
+        this._mappingSessionSaved = true;
         this._slamRunning = false;
         this._currentRoutineMode = 'NAV';
         const slot = App.robotSlots[App.activeSlotIndex];
         if (slot) slot.routineMode = 'NAV';
         this._modeManualSet = false;  // Re-enable auto mode detection
         this._updateSlamButtons();
+        this._updateSlamDimensionStatus();
+        this._syncLoopClosureLogSubscription(App.activeSlotIndex);
         this._unsubscribeSlamPose();
         this._stopSlamTrail();
         this._updateLoopClosureStatus();
-        this._killSlamToolbox();
-        this._restorePreMapModeBackup();
+        this.requestRender();
+        this._finishMappingMapTransition();
       }
     });
   },
@@ -4705,12 +5596,16 @@ const RosManager = {
 
   // ── SLAM Trail Recording ──
 
-  _startSlamTrail() {
-    this._breadcrumbTrail = [];
-    this._slamVertices = [];
-    this._slamStartPose = this.robotPose ? { ...this.robotPose } : null;
+  _startSlamTrail(preserveExisting = false) {
+    if (!preserveExisting) {
+      this._breadcrumbTrail = [];
+      this._slamVertices = [];
+      this._slamStartPose = this.robotPose ? { ...this.robotPose } : null;
+      this._resetLoopClosureSession();
+    } else if (!this._slamStartPose && this.robotPose) {
+      this._slamStartPose = { ...this.robotPose };
+    }
     this._slamLastVertexDist = 0;
-    this._resetLoopClosureSession();
 
     // Record trail at 5Hz (200ms)
     if (this._slamTrailTimer) clearInterval(this._slamTrailTimer);
@@ -4723,7 +5618,7 @@ const RosManager = {
       clearInterval(this._slamTrailTimer);
       this._slamTrailTimer = null;
     }
-    // Keep trail data for user to review — only clear on next SLAM start
+    // Keep data for a future Lifelong session, but NAV rendering is gated off.
     console.log(`[SLAM Trail] Stopped. ${this._breadcrumbTrail.length} points, ${this._slamVertices.length} vertices`);
   },
 
@@ -4769,7 +5664,7 @@ const RosManager = {
 
   // ── SLAM Trail Rendering (called from _doRenderMap) ──
 
-  _renderSlamTrail(ctx, width, height, resolution, origin) {
+  _renderSlamTrail(ctx, width, height, resolution, origin, drawPath = true) {
     const trail = this._breadcrumbTrail;
     if (!trail || trail.length < 2) return;
     if (!this._slamRunning && !this._lifelongRunning && trail.length === 0) return;
@@ -4781,31 +5676,33 @@ const RosManager = {
 
     const lw = Math.max(1, 1.5 / this.mapZoom);
 
-    // ── Draw trail path with gradient (blue → red) ──
-    for (let i = 1; i < trail.length; i++) {
-      const p0 = toMapPx(trail[i - 1]);
-      const p1 = toMapPx(trail[i]);
-      const t = i / trail.length; // 0 = oldest, 1 = newest
+    if (drawPath) {
+      // ── Draw trail path with gradient (blue → red) ──
+      for (let i = 1; i < trail.length; i++) {
+        const p0 = toMapPx(trail[i - 1]);
+        const p1 = toMapPx(trail[i]);
+        const t = i / trail.length; // 0 = oldest, 1 = newest
 
-      // Blue(0) → Cyan(0.33) → Yellow(0.66) → Red(1)
-      let r, g, b;
-      if (t < 0.33) {
-        const s = t / 0.33;
-        r = 0; g = Math.round(s * 255); b = Math.round((1 - s) * 255);
-      } else if (t < 0.66) {
-        const s = (t - 0.33) / 0.33;
-        r = Math.round(s * 255); g = 255; b = 0;
-      } else {
-        const s = (t - 0.66) / 0.34;
-        r = 255; g = Math.round((1 - s) * 255); b = 0;
+        // Blue(0) → Cyan(0.33) → Yellow(0.66) → Red(1)
+        let r, g, b;
+        if (t < 0.33) {
+          const s = t / 0.33;
+          r = 0; g = Math.round(s * 255); b = Math.round((1 - s) * 255);
+        } else if (t < 0.66) {
+          const s = (t - 0.33) / 0.33;
+          r = Math.round(s * 255); g = 255; b = 0;
+        } else {
+          const s = (t - 0.66) / 0.34;
+          r = 255; g = Math.round((1 - s) * 255); b = 0;
+        }
+
+        ctx.beginPath();
+        ctx.moveTo(p0.x, p0.y);
+        ctx.lineTo(p1.x, p1.y);
+        ctx.strokeStyle = `rgba(${r},${g},${b},0.7)`;
+        ctx.lineWidth = lw * 2;
+        ctx.stroke();
       }
-
-      ctx.beginPath();
-      ctx.moveTo(p0.x, p0.y);
-      ctx.lineTo(p1.x, p1.y);
-      ctx.strokeStyle = `rgba(${r},${g},${b},0.7)`;
-      ctx.lineWidth = lw * 2;
-      ctx.stroke();
     }
 
     // ── Draw vertices ──
@@ -4986,21 +5883,24 @@ const RosManager = {
     this._mapImageCanvas = null;
 
     // Re-subscribe — this will get the latched message from map_server
-    const capturedIndex = slotIndex;
-    this._subscribeSlotTopic(slotIndex, 'map', `/${rid}/map`, 'nav_msgs/OccupancyGrid', (msg) => {
-      if (capturedIndex !== App.activeSlotIndex) return;
-      this.renderMap(msg);
-    });
+    const topicName = this._compatibilityForSlot(slotIndex)?.map?.topic || `/${rid}/map`;
+    this._subscribeMapForSlot(slotIndex, topicName);
     console.log('[Map] Re-subscribed to map topic');
   },
 
   // Kill slam_toolbox node to stop it from publishing stale map data.
   // Tries both namespaced (/${rid}/slam_toolbox) and global (/slam_toolbox).
   async _killSlamToolbox() {
+    if (typeof TestMode !== 'undefined' && TestMode.enabled) return;
     const slotIndex = App.activeSlotIndex;
     const rid = this.getRobotId(slotIndex);
     const slot = App.robotSlots[slotIndex];
     if (!slot?.ip || !rid) return;
+    const profile = this._compatibilityForSlot(slotIndex);
+    if (profile?.map?.managesRosNodes) {
+      console.log(`[SLAM] ${profile.id}: robot core owns slam_toolbox lifecycle; skip node kill`);
+      return;
+    }
 
     const setupCmd = '. /opt/ros/noetic/setup.bash 2>/dev/null; . ~/catkin_ws/devel/setup.bash 2>/dev/null';
     try {
@@ -5036,6 +5936,23 @@ const RosManager = {
     }
   },
 
+  _finishMappingMapTransition() {
+    const committed = this._mappingMapCommitted;
+    this._mappingMapCommitted = false;
+    Promise.resolve(this._killSlamToolbox()).finally(() => {
+      if (committed) {
+        // The raster map and pose graph were committed as one canonical map set.
+        // Drop the Mapping latch and wait for NAV's namespaced map publisher so
+        // map_server (/map) cannot leave the UI on a different revision.
+        this._preMapModeBackup = null;
+        this._mapLocked = false;
+        this._resubscribeMapTopic();
+      } else {
+        this._restorePreMapModeBackup();
+      }
+    });
+  },
+
 
   _startLifelong() {
     if (this._slamRunning) {
@@ -5055,71 +5972,244 @@ const RosManager = {
     const statusEl = document.getElementById('lifelong-status');
     this._publishRoutineMode('LIFELONG', statusEl, 'Running', (ok) => {
       if (ok) {
+        this._beginMappingSaveSession();
         this._lifelongRunning = true;
         this._currentRoutineMode = 'LIFELONG';
         const slot = App.robotSlots[App.activeSlotIndex];
         if (slot) slot.routineMode = 'LIFELONG';
         this._modeManualSet = true;  // Disable auto mode detection
         this._updateLifelongButtons();
+        this._updateSlamDimensionStatus();
+        this._syncLoopClosureLogSubscription(App.activeSlotIndex);
         this._subscribeSlamPose();
         this._enableMappingPathLayer();
         // Clear map cache for fresh mapping
         this._mapImageCanvas = null;
-        this._startSlamTrail();
+        this._startSlamTrail(true);
       }
     });
   },
 
-  _stopLifelong() {
+  _stopLifelong(skipSavePrompt = false) {
+    if (!skipSavePrompt && this._lifelongRunning && !this._mappingSessionSaved) {
+      this._openMappingSaveConfirm('LIFELONG');
+      return;
+    }
     const statusEl = document.getElementById('lifelong-status');
     this._publishRoutineMode('NAV', statusEl, 'Off', (ok) => {
       if (ok) {
+        this._mappingSessionSaved = true;
         this._lifelongRunning = false;
         this._currentRoutineMode = 'NAV';
         const slot = App.robotSlots[App.activeSlotIndex];
         if (slot) slot.routineMode = 'NAV';
         this._modeManualSet = false;  // Re-enable auto mode detection
         this._updateLifelongButtons();
+        this._updateSlamDimensionStatus();
+        this._syncLoopClosureLogSubscription(App.activeSlotIndex);
         this._unsubscribeSlamPose();
         this._stopSlamTrail();
         this._updateLoopClosureStatus();
-        this._killSlamToolbox();
-        this._restorePreMapModeBackup();
+        this.requestRender();
+        this._finishMappingMapTransition();
       }
     });
   },
 
-  _saveMap() {
-    const mapName = document.getElementById('save-map-name').value.trim();
-    if (!mapName) {
-      App.toast('Please enter map name', 'error');
+  _beginMappingSaveSession() {
+    this._mappingSessionSaved = false;
+    this._mappingMapCommitted = false;
+    const status = document.getElementById('save-map-status');
+    if (status) {
+      status.textContent = '';
+      status.style.color = '';
+    }
+  },
+
+  _openMappingSaveConfirm(mode = 'SAVE_ONLY') {
+    const modal = document.getElementById('mapping-save-confirm-modal');
+    if (!modal) {
+      App.toast('맵 저장 화면을 열 수 없습니다.', 'error');
       return;
     }
+
+    const exitMode = mode === 'SLAM' || mode === 'LIFELONG';
+    this._mappingSavePendingMode = exitMode ? mode : 'SAVE_ONLY';
+    const modeName = mode === 'LIFELONG' ? '부분맵핑' : '맵핑';
+    const title = document.getElementById('mapping-save-confirm-title');
+    const message = document.getElementById('mapping-save-confirm-message');
+    const noButton = document.getElementById('btn-mapping-save-no');
+    const yesButton = document.getElementById('btn-mapping-save-yes');
+    const status = document.getElementById('save-map-status');
+
+    if (title) title.textContent = exitMode ? '맵을 저장하시겠습니까?' : '현재 맵 저장';
+    if (message) {
+      message.textContent = exitMode
+        ? `이번 ${modeName} 결과가 아직 저장되지 않았습니다. 저장 후 NAV 모드로 종료할 수 있습니다.`
+        : '현재 Mapping 결과를 ~/ROS_DB/map/map.pgm과 pose graph로 저장합니다.';
+    }
+    if (noButton) noButton.hidden = !exitMode;
+    if (yesButton) yesButton.textContent = exitMode ? '예, 저장 후 종료' : '맵 저장';
+    if (status) {
+      status.textContent = '';
+      status.style.color = '';
+    }
+    this._setMappingSaveBusy(false);
+    modal.classList.add('show');
+  },
+
+  _closeMappingSaveConfirm(force = false) {
+    if (this._mappingSaveBusy && !force) return;
+    document.getElementById('mapping-save-confirm-modal')?.classList.remove('show');
+    this._mappingSavePendingMode = null;
+    this._setMappingSaveBusy(false);
+  },
+
+  _setMappingSaveBusy(busy) {
+    this._mappingSaveBusy = Boolean(busy);
+    [
+      'btn-mapping-save-yes',
+      'btn-mapping-save-no',
+      'btn-mapping-save-cancel',
+      'btn-mapping-save-close'
+    ].forEach(id => {
+      const element = document.getElementById(id);
+      if (element) element.disabled = this._mappingSaveBusy;
+    });
+  },
+
+  _confirmMappingSave() {
+    if (this._mappingSaveBusy) return;
+    const pendingMode = this._mappingSavePendingMode;
+    this._setMappingSaveBusy(true);
+    this._saveMap({
+      onSuccess: () => {
+        this._mappingSessionSaved = true;
+        this._closeMappingSaveConfirm(true);
+        if (pendingMode === 'SLAM') this._stopSlam(true);
+        else if (pendingMode === 'LIFELONG') this._stopLifelong(true);
+      },
+      onFailure: () => this._setMappingSaveBusy(false)
+    });
+  },
+
+  _discardMappingSaveAndStop() {
+    if (this._mappingSaveBusy) return;
+    const pendingMode = this._mappingSavePendingMode;
+    this._closeMappingSaveConfirm(true);
+    if (pendingMode === 'SLAM') this._stopSlam(true);
+    else if (pendingMode === 'LIFELONG') this._stopLifelong(true);
+  },
+
+  _mappingBackupSuffix() {
+    const now = new Date();
+    const pad = value => String(value).padStart(2, '0');
+    return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
+      + `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+      + `_${String(now.getMilliseconds()).padStart(3, '0')}`;
+  },
+
+  async _backupCanonicalMap(profile, options = {}) {
+    if (typeof TestMode !== 'undefined' && TestMode.enabled) return null;
+    const slot = App.robotSlots?.[App.activeSlotIndex];
+    if (!slot?.ip) throw new Error('Robot SSH connection information is unavailable');
+    const mapDirectory = profile?.map?.directory || '/home/syscon/ROS_DB/map';
+    const suffix = this._mappingBackupSuffix();
+    const backupDirectory = `${mapDirectory}_${suffix}`;
+    const markerPath = options.trackSave === false
+      ? null
+      : `/tmp/easyloop_map_save_${suffix}.marker`;
+    const markerCommand = markerPath ? ` && touch ${markerPath}` : '';
+    const command = `if ls ${mapDirectory}/map.* >/dev/null 2>&1; then mkdir -p ${backupDirectory} && cp -p ${mapDirectory}/map.* ${backupDirectory}/; fi${markerCommand}`;
+    const result = await this._mapExec(command);
+    if (!result?.success
+        || (result.exitCode !== undefined && Number(result.exitCode) !== 0)) {
+      throw new Error(result?.message || result?.error || '기존 map 파일 백업 실패');
+    }
+    return { backupDirectory, markerPath };
+  },
+
+  async _waitForCanonicalMapSet(profile, markerPath) {
+    if (!markerPath) return;
+    const mapDirectory = profile?.map?.directory || '/home/syscon/ROS_DB/map';
+    const poseGraphChecks = profile?.map?.poseGraphSaveService
+      ? ` && [ ${mapDirectory}/map.posegraph -nt ${markerPath} ] && [ ${mapDirectory}/map.data -nt ${markerPath} ]`
+      : '';
+    const command = `i=0; while [ $i -lt 100 ]; do if [ ${mapDirectory}/map.pgm -nt ${markerPath} ] && [ ${mapDirectory}/map.yaml -nt ${markerPath} ]${poseGraphChecks}; then rm -f ${markerPath}; exit 0; fi; i=$((i+1)); sleep 0.1; done; rm -f ${markerPath}; exit 1`;
+    const result = await this._mapExec(command);
+    if (!result?.success
+        || (result.exitCode !== undefined && Number(result.exitCode) !== 0)) {
+      throw new Error('map.pgm과 pose graph 파일 세트 저장 완료를 확인하지 못했습니다.');
+    }
+  },
+
+  async _saveMap(options = {}) {
+    const mapName = 'map';
+    const slot = App.robotSlots?.[App.activeSlotIndex];
     const statusEl = document.getElementById('save-map-status');
-    this._callMappingService(
-      '/save_map', 'syscon_msgs/String_srv', { data: mapName },
-      statusEl, 'Saved', 'Save failed',
-      (ok, result) => {
-        if (ok) {
-          // Check service response for success
-          if (result && result.success === false) {
-            App.toast(`Map save failed: ${result.message || 'Unknown error'}`, 'error');
-            if (statusEl) {
-              statusEl.textContent = 'Failed';
-              statusEl.style.color = '#ff6b6b';
-            }
-          } else {
-            App.toast(`Map "${mapName}" saved`, 'success');
-            if (statusEl) {
-              statusEl.textContent = 'Saved';
-              statusEl.style.color = '#4ade80';
-            }
-          }
-        } else {
-          App.toast(`Map save failed: ${result || 'Service call error'}`, 'error');
-        }
+    try {
+      if (!slot?.ros) throw new Error('Robot not connected');
+      if (statusEl) statusEl.textContent = '맵 인터페이스 확인 중...';
+      if (typeof RobotCompatibility !== 'undefined'
+          && !slot.compatibilityProfile?.discovered) {
+        await RobotCompatibility.discover(slot);
       }
-    );
+      const profile = this._compatibilityForSlot(App.activeSlotIndex);
+
+      if (typeof TestMode !== 'undefined' && TestMode.enabled) {
+        if (!TestMode.saveActiveMap?.()) throw new Error('저장할 Mapping 결과가 없습니다.');
+      } else {
+        if (statusEl) statusEl.textContent = '기존 map 파일 백업 중...';
+        const backup = await this._backupCanonicalMap(profile);
+
+        const poseGraphService = profile?.map?.poseGraphSaveService;
+        if (poseGraphService) {
+          if (statusEl) statusEl.textContent = 'Pose graph 저장 중...';
+          const poseGraphArgs = typeof RobotCompatibility !== 'undefined'
+            ? RobotCompatibility.mapPoseGraphSaveRequest(profile)
+            : { filename: '/home/syscon/ROS_DB/map/map' };
+          await this._callRosServicePromise(
+            slot.ros,
+            poseGraphService,
+            profile?.map?.poseGraphSaveType || 'slam_toolbox_msgs/SerializePoseGraph',
+            poseGraphArgs
+          );
+        }
+
+        if (statusEl) statusEl.textContent = 'map.pgm 저장 중...';
+        const saveService = profile?.map?.saveService || `/${slot.robotId}/save_map`;
+        const saveType = profile?.map?.saveType || 'syscon_msgs/String_srv';
+        const saveArgs = typeof RobotCompatibility !== 'undefined'
+          ? RobotCompatibility.mapSaveRequest(profile)
+          : { data: mapName };
+        const result = await this._callRosServicePromise(
+          slot.ros, saveService, saveType, saveArgs
+        );
+        if (result?.success === false) {
+          throw new Error(result.message || 'Map save service failed');
+        }
+        if (statusEl) statusEl.textContent = '저장 파일 동기화 확인 중...';
+        await this._waitForCanonicalMapSet(profile, backup?.markerPath);
+      }
+
+      this._mappingSessionSaved = true;
+      this._mappingMapCommitted = true;
+      App.toast('맵 저장 완료: ~/ROS_DB/map/map.pgm + pose graph', 'success');
+      if (statusEl) {
+        statusEl.textContent = '저장 완료';
+        statusEl.style.color = '#4ade80';
+      }
+      options.onSuccess?.();
+    } catch (error) {
+      const message = error?.message || String(error || 'Save failed');
+      console.error('[Mapping] Canonical map save failed:', error);
+      App.toast(`Map save failed: ${message}`, 'error');
+      if (statusEl) {
+        statusEl.textContent = '저장 실패';
+        statusEl.style.color = '#ff6b6b';
+      }
+      options.onFailure?.(message);
+    }
   },
 
   // Service call (uses active slot's ROS)
@@ -5258,7 +6348,14 @@ const RosManager = {
 
     btn.classList.toggle('active', enabled);
     btn.classList.toggle('reconnecting', reconnecting && enabled);
-    btn.title = `Auto Reconnect: ${enabled ? 'ON' : 'OFF'}`;
+    btn.setAttribute('aria-pressed', String(enabled));
+    btn.setAttribute(
+      'aria-label',
+      reconnecting && enabled ? '자동 재연결 시도 중' : `자동 재연결 ${enabled ? '켜짐' : '꺼짐'}`
+    );
+    btn.title = reconnecting && enabled
+      ? '자동 재연결 시도 중'
+      : `자동 재연결: ${enabled ? '켜짐' : '꺼짐'}`;
   },
 
   toggleAutoReconnect() {
@@ -5275,7 +6372,7 @@ const RosManager = {
     }
 
     this._updateAutoReconnectUI(false);
-    App.toast(`Auto reconnect: ${ar.enabled ? 'ON' : 'OFF'}`, 'info');
+    App.toast(`자동 재연결 ${ar.enabled ? '켜짐' : '꺼짐'}`, 'info');
   },
 
   setupAutoReconnectButton() {
@@ -6185,6 +7282,7 @@ free_thresh: 0.196
       App.toast('Robot is not connected', 'error');
       return;
     }
+    const profile = this._compatibilityForSlot(App.activeSlotIndex);
 
     // Fixed map name for robot
     const mapName = 'map';
@@ -6208,26 +7306,9 @@ free_thresh: 0.196
         throw new Error(connResult.message || 'SSH connection failed');
       }
 
-      // Auto-backup current map before overwriting
+      // Back up only the existing canonical map set before overwriting it.
       if (statusEl) statusEl.textContent = 'Backing up...';
-      try {
-        const now = new Date();
-        const ts = now.getFullYear().toString() +
-          String(now.getMonth() + 1).padStart(2, '0') +
-          String(now.getDate()).padStart(2, '0') + '_' +
-          String(now.getHours()).padStart(2, '0') +
-          String(now.getMinutes()).padStart(2, '0') +
-          String(now.getSeconds()).padStart(2, '0');
-        const backupCmd = `mkdir -p ~/ROS_DB/map_${ts} && cp ~/ROS_DB/map/* ~/ROS_DB/map_${ts}/`;
-        const backupResult = await this._mapExec(backupCmd);
-        if (backupResult.success) {
-          console.log(`[MapEdit] Backup created: map_${ts}`);
-        } else {
-          console.warn('[MapEdit] Backup failed:', backupResult.message);
-        }
-      } catch (backupErr) {
-        console.warn('[MapEdit] Backup error (continuing with save):', backupErr);
-      }
+      await this._backupCanonicalMap(profile, { trackSave: false });
 
       if (statusEl) statusEl.textContent = 'Saving...';
 
@@ -6278,23 +7359,6 @@ free_thresh: 0.196
         throw new Error('YAML upload failed: ' + (yamlResult.message || 'Unknown error'));
       }
 
-      // Backup the newly saved map as well
-      try {
-        const now2 = new Date();
-        const ts2 = now2.getFullYear().toString() +
-          String(now2.getMonth() + 1).padStart(2, '0') +
-          String(now2.getDate()).padStart(2, '0') + '_' +
-          String(now2.getHours()).padStart(2, '0') +
-          String(now2.getMinutes()).padStart(2, '0') +
-          String(now2.getSeconds()).padStart(2, '0');
-        const postBackupResult = await this._mapExec(`mkdir -p ~/ROS_DB/map_${ts2}_saved && cp ~/ROS_DB/map/* ~/ROS_DB/map_${ts2}_saved/`);
-        if (postBackupResult.success) {
-          console.log(`[MapEdit] Post-save backup created: map_${ts2}_saved`);
-        }
-      } catch (e) {
-        console.warn('[MapEdit] Post-save backup error:', e);
-      }
-
       if (statusEl) statusEl.textContent = 'Saved';
       App.toast(`Map saved: ${mapName}`, 'success');
 
@@ -6327,42 +7391,56 @@ free_thresh: 0.196
       return;
     }
 
-    // Get current robot pose for map change
+    const slot = App.robotSlots[slotIndex];
+    const profile = this._compatibilityForSlot(slotIndex);
+    const yamlPath = `/home/syscon/ROS_DB/map/${mapName}.yaml`;
     const currentPose = this.robotPose || { x: 0, y: 0, yaw: 0 };
-
-    // Step 1: Call amcl/change_map to update AMCL
-    const service = new ROSLIB.Service({
-      ros: ros,
-      name: `/${rid}/amcl/change_map`,
-      serviceType: 'syscon_msgs/ChangeMap'
-    });
-
-    const request = new ROSLIB.ServiceRequest({
-      path: `/home/syscon/ROS_DB/map/${mapName}.yaml`,
-      pose: {
-        x: currentPose.x,
-        y: currentPose.y,
-        theta: currentPose.yaw
-      }
-    });
-
     App.toast('Applying map...', 'info');
-
-    service.callService(request, (result) => {
-      if (result.success) {
-        App.toast('AMCL map updated', 'success');
-        console.log('[MapEdit] AMCL map applied successfully');
-      } else {
-        App.toast(`AMCL map apply failed (error_code: ${result.error_code})`, 'error');
-        console.error('[MapEdit] AMCL map apply failed, error_code:', result.error_code);
-      }
-    }, (error) => {
-      console.error('[MapEdit] AMCL change_map service error:', error);
-    });
-
-    // Step 2: Kill map_server so it respawns with the new map file
     try {
-      const slot = App.robotSlots[slotIndex];
+      // Newer/Melodic cores expose map_server/LoadMap. Prefer it because the core
+      // owns map_server/slam_toolbox and killing either node races NAV startup.
+      if (profile?.map?.reloadService) {
+        const reloadArgs = typeof RobotCompatibility !== 'undefined'
+          ? RobotCompatibility.mapReloadRequest(profile, yamlPath)
+          : { map_url: yamlPath };
+        const reloadResult = await this._callRosServicePromise(
+          ros,
+          profile.map.reloadService,
+          profile.map.reloadType || 'map_server/LoadMap',
+          reloadArgs
+        );
+        if (reloadResult?.result !== undefined && Number(reloadResult.result) !== 0) {
+          throw new Error(`map_server LoadMap result=${reloadResult.result}`);
+        }
+
+        const amclResult = await this._callRosServicePromise(
+          ros,
+          profile.map.amclChangeService || `/${rid}/amcl/change_map`,
+          profile.map.amclChangeType || 'syscon_msgs/ChangeMap',
+          {
+            path: yamlPath,
+            pose: { x: currentPose.x, y: currentPose.y, theta: currentPose.yaw }
+          }
+        );
+        if (amclResult?.success === false) {
+          throw new Error(`AMCL change_map error_code=${amclResult.error_code ?? '-'}`);
+        }
+        this._mapLocked = false;
+        this._resubscribeMapTopic();
+        App.toast('Map server and AMCL updated', 'success');
+        return;
+      }
+
+      // Existing robots without a reload service keep the historical restart path.
+      await this._callRosServicePromise(
+        ros,
+        `/${rid}/amcl/change_map`,
+        'syscon_msgs/ChangeMap',
+        {
+          path: yamlPath,
+          pose: { x: currentPose.x, y: currentPose.y, theta: currentPose.yaw }
+        }
+      );
       if (!slot?.ip) {
         console.warn('[MapEdit] No robot IP for map_server restart');
         return;
@@ -6386,6 +7464,21 @@ free_thresh: 0.196
       console.error('[MapEdit] map_server restart error:', err);
       App.toast('map_server restart failed (map will apply on next robot reboot)', 'warning');
     }
+  },
+
+  _callRosServicePromise(ros, name, serviceType, args = {}) {
+    return new Promise((resolve, reject) => {
+      try {
+        const service = new ROSLIB.Service({ ros, name, serviceType });
+        service.callService(
+          new ROSLIB.ServiceRequest(args),
+          resolve,
+          error => reject(new Error(String(error || `${name} call failed`)))
+        );
+      } catch (error) {
+        reject(error);
+      }
+    });
   },
 
   // Dedicated SSH exec session (separate from FileTransfer's SFTP session)
@@ -6600,7 +7693,7 @@ free_thresh: 0.196
 
     const width = readNum();
     const height = readNum();
-    const maxVal = readNum();
+    readNum();
     offset++;
 
     if (width === 0 || height === 0) {
@@ -6824,7 +7917,7 @@ free_thresh: 0.196
     if (!newName || newName === folderName) return;
 
     // Validate: only allow safe characters
-    if (!/^[a-zA-Z0-9_\-]+$/.test(newName)) {
+    if (!/^[a-zA-Z0-9_-]+$/.test(newName)) {
       App.toast('Invalid name. Use only letters, numbers, _ and -', 'error');
       return;
     }
@@ -7311,7 +8404,7 @@ free_thresh: 0.196
       const ros = slot.ros;
 
       // Use getTopics as a ping mechanism
-      ros.getTopics((result) => {
+      ros.getTopics((_result) => {
         const rtt = Math.round(performance.now() - startTime);
         this._latencyMs = rtt;
 
@@ -7325,7 +8418,7 @@ free_thresh: 0.196
             latencyEl.className = 'ros-latency bad';
           }
         }
-      }, (error) => {
+      }, (_error) => {
         if (latencyEl) {
           latencyEl.textContent = 'ERR';
           latencyEl.className = 'ros-latency bad';
@@ -7350,31 +8443,68 @@ free_thresh: 0.196
   async _fetchRobotModel(index) {
     const slot = App.robotSlots[index];
     if (!slot || !slot.ip) return;
+    if (slot.robotModelFetchPromise) return slot.robotModelFetchPromise;
 
     const modelEl = document.getElementById('robot-model-name');
     if (modelEl) modelEl.textContent = '...';
-
-    try {
-      const res = await fetchWithTimeout('/api/ssh/exec', {
+    const sessionId = `robot_model_${index}_${Date.now()}`;
+    const request = async (url, body) => {
+      const response = await fetchWithTimeout(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          host: slot.ip,
-          user: 'syscon',
-          password: slot.sshPassword || 'syscon',
-          command: 'echo $ROBOT_MODEL'
-        })
+        body: JSON.stringify(body)
       });
-      const data = await res.json();
-      const model = data.success ? (data.stdout || '').trim() : '';
+      return response.json();
+    };
 
-      slot.robotModel = model || null;
-      if (modelEl) modelEl.textContent = model || '';
-      if (model) console.log(`[RobotModel] ${slot.robotId}: ${model}`);
-    } catch (e) {
-      if (modelEl) modelEl.textContent = '';
-      console.warn('[RobotModel] Failed to fetch:', e.message);
-    }
+    const fetchPromise = (async () => {
+      try {
+        const connection = await request('/api/ssh/connect', {
+          host: slot.ip,
+          port: slot.sshPort || 22,
+          username: slot.sshUser || 'syscon',
+          password: slot.sshPassword || 'syscon',
+          sessionId
+        });
+        if (!connection?.success) {
+          throw new Error(connection?.message || 'SSH 연결 실패');
+        }
+        const data = await request('/api/ssh/exec', {
+          sessionId,
+          command: 'printenv ROBOT_MODEL'
+        });
+        const model = data?.success ? String(data.stdout || '').trim() : '';
+        if (!data?.success) throw new Error(data?.message || 'ROBOT_MODEL 조회 실패');
+
+        const previousModel = slot.robotModel || '';
+        slot.robotModel = model || null;
+        if (index === App.activeSlotIndex && modelEl) modelEl.textContent = model || '';
+        if (model) console.log(`[RobotModel] ${slot.robotId}: ${model}`);
+
+        if (previousModel !== (slot.robotModel || '')) {
+          if (typeof RobotCompatibility !== 'undefined') RobotCompatibility.clear(slot);
+          if (slot.ros) await this._discoverCompatibility(index);
+          document.dispatchEvent(new CustomEvent('amr:robot-model-changed', {
+            detail: { slotIndex: index, robotId: slot.robotId, robotModel: slot.robotModel }
+          }));
+          App.saveRobotSlots?.();
+        }
+        return slot.robotModel;
+      } catch (e) {
+        if (index === App.activeSlotIndex && modelEl) modelEl.textContent = slot.robotModel || '';
+        console.warn('[RobotModel] Failed to fetch:', e.message);
+        return slot.robotModel || null;
+      } finally {
+        try {
+          await request('/api/ssh/disconnect', { sessionId });
+        } catch (error) {
+          console.warn('[RobotModel] SSH cleanup failed:', error.message);
+        }
+        delete slot.robotModelFetchPromise;
+      }
+    })();
+    slot.robotModelFetchPromise = fetchPromise;
+    return fetchPromise;
   }
 };
 

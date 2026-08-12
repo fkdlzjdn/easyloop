@@ -44,6 +44,8 @@ const ErrorCodeDB = {
   _customCodes: {},
 
   init() {
+    if (this._initialized) return;
+    this._initialized = true;
     this.loadCustomCodes();
     this.bindEvents();
     this.renderCodes();

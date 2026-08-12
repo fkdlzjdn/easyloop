@@ -20,7 +20,6 @@ const SmartAlarm = {
     // Save rules when alarm settings save
     const saveBtn = document.getElementById('btn-alarm-save');
     if (saveBtn) {
-      const origClick = saveBtn.onclick;
       saveBtn.addEventListener('click', () => {
         this.saveRules();
       });

@@ -141,6 +141,54 @@ describe('fleet control map', () => {
     manager.deactivate();
   });
 
+  test('prefers the pose-graph namespaced map over an earlier root map', () => {
+    jest.useFakeTimers();
+    const { manager, topics } = loadFleetControl(1);
+    manager.activate();
+    const mapTopics = topics.filter(topic =>
+      topic.options.messageType === 'nav_msgs/OccupancyGrid'
+    );
+    const rootTopic = mapTopics.find(topic => topic.options.name === '/map');
+    const namespacedTopic = mapTopics.find(topic => topic.options.name === '/R_001/map');
+    const pgmMap = makeMap([0, 0, 0, -1]);
+    const poseGraphMap = makeMap([0, 100, 0, -1]);
+
+    rootTopic.emit(pgmMap);
+    namespacedTopic.emit(poseGraphMap);
+
+    expect(manager._referenceMap).toBe(poseGraphMap);
+    manager.deactivate();
+    jest.useRealTimers();
+  });
+
+  test('switching the active robot prioritizes and promotes that robot map', () => {
+    const { manager, App, topics, elements } = loadFleetControl(2);
+    elements['fleet-active-map-source'] = {
+      textContent: '',
+      classList: { toggle: jest.fn() }
+    };
+    manager._active = true;
+    manager._acceptMap(0, makeMap());
+    App.activeSlotIndex = 1;
+
+    expect(manager.syncActiveRobotMap(false, 1)).toBe(true);
+    expect(manager._selectedSlotIndex).toBe(1);
+    expect(manager._activeMapSyncIndex).toBe(1);
+
+    const activeMapTopic = topics.find(topic =>
+      topic.options.messageType === 'nav_msgs/OccupancyGrid'
+      && topic.options.name === '/R_002/map'
+    );
+    const activeMap = makeMap([0, 100, 0, -1]);
+    activeMapTopic.emit(activeMap);
+
+    expect(manager._referenceMap).toBe(activeMap);
+    expect(manager._referenceSlotIndex).toBe(1);
+    expect(manager._activeMapSyncIndex).toBe(-1);
+    manager._renderStatus();
+    expect(elements['fleet-active-map-source'].textContent).toContain('002번 활성 맵');
+  });
+
   test('falls back to namespaced static_map service when latched map topic is silent', () => {
     jest.useFakeTimers();
     const { manager, services } = loadFleetControl(1);
@@ -185,6 +233,104 @@ describe('fleet control map', () => {
     expect(manager._selectedSlotIndex).toBe(1);
     expect(App.activeSlotIndex).toBe(0);
     manager.deactivate();
+  });
+
+  test('Ctrl+number in mini control opens the matching sorted Task for the selected robot', () => {
+    const { manager, context } = loadFleetControl(2);
+    context.ActionSender = {
+      getSavedQueues: jest.fn(() => ({
+        Zebra: { queue: [{}] },
+        Alpha: { queue: [{}] },
+        Middle: { queue: [{}] }
+      }))
+    };
+    manager._active = true;
+    manager._selectedSlotIndex = 1;
+    manager._requestShortcutTask = jest.fn();
+    const event = {
+      key: '2',
+      ctrlKey: true,
+      metaKey: false,
+      altKey: false,
+      shiftKey: false,
+      repeat: false,
+      preventDefault: jest.fn(),
+      stopImmediatePropagation: jest.fn()
+    };
+
+    expect(manager._handleTaskShortcut(event)).toBe(true);
+
+    expect(manager._requestShortcutTask).toHaveBeenCalledWith('Middle', 2);
+    expect(event.preventDefault).toHaveBeenCalled();
+    expect(event.stopImmediatePropagation).toHaveBeenCalled();
+  });
+
+  test('Ctrl+number does nothing outside mini control', () => {
+    const { manager } = loadFleetControl(1);
+    manager._requestShortcutTask = jest.fn();
+
+    expect(manager._handleTaskShortcut({
+      key: '1',
+      ctrlKey: true,
+      preventDefault: jest.fn()
+    })).toBe(false);
+    expect(manager._requestShortcutTask).not.toHaveBeenCalled();
+  });
+
+  test('confirmed shortcut sends the selected Task without a second confirmation', async () => {
+    const { manager, App, context, elements } = loadFleetControl(1);
+    elements['fleet-shortcut-task-modal'] = {
+      classList: { remove: jest.fn() }
+    };
+    manager._pendingShortcutTask = {
+      taskName: 'Alpha',
+      shortcutNumber: 1,
+      slotIndex: 0,
+      robotId: App.robotSlots[0].robotId,
+      loopCount: 3
+    };
+    manager._selectedTaskName = 'Alpha';
+    manager._runSelectedTask = jest.fn().mockResolvedValue();
+
+    await manager._confirmShortcutTask();
+
+    expect(manager._runSelectedTask).toHaveBeenCalledWith(true, 3);
+    expect(elements['fleet-shortcut-task-modal'].classList.remove).toHaveBeenCalledWith('show');
+    expect(context.confirm).toBeUndefined();
+  });
+
+  test('Enter confirms the open shortcut Task window and consumes the key', () => {
+    const { manager } = loadFleetControl(1);
+    manager._pendingShortcutTask = { taskName: 'Alpha' };
+    manager._confirmShortcutTask = jest.fn();
+    const event = {
+      key: 'Enter',
+      preventDefault: jest.fn(),
+      stopImmediatePropagation: jest.fn()
+    };
+
+    expect(manager._handleShortcutTaskModalKey(event)).toBe(true);
+    expect(manager._confirmShortcutTask).toHaveBeenCalledTimes(1);
+    expect(event.preventDefault).toHaveBeenCalled();
+    expect(event.stopImmediatePropagation).toHaveBeenCalled();
+  });
+
+  test('Escape cancels the open shortcut Task window and IME input is ignored', () => {
+    const { manager } = loadFleetControl(1);
+    manager._pendingShortcutTask = { taskName: 'Alpha' };
+    manager._closeShortcutTaskConfirm = jest.fn();
+    const escapeEvent = {
+      key: 'Escape',
+      preventDefault: jest.fn(),
+      stopImmediatePropagation: jest.fn()
+    };
+
+    expect(manager._handleShortcutTaskModalKey(escapeEvent)).toBe(true);
+    expect(manager._closeShortcutTaskConfirm).toHaveBeenCalledTimes(1);
+    expect(manager._handleShortcutTaskModalKey({
+      key: 'Enter',
+      isComposing: true
+    })).toBe(false);
   });
 
   test('one shared robot icon size is adjustable and clamped to the supported range', () => {

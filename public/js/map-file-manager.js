@@ -219,7 +219,7 @@ const MapFileManager = {
     const dirPath = document.getElementById('map-dir-path').value.trim();
 
     try {
-      const result = await SSHTerminal.execCommand(`rm -rf ${dirPath}/${mapName}`);
+      await SSHTerminal.execCommand(`rm -rf ${dirPath}/${mapName}`);
       App.toast(`Map "${mapName}" deleted`, 'success');
       this.refreshMapList();
     } catch (e) {
@@ -237,8 +237,6 @@ const MapFileManager = {
       try {
         if (typeof FileTransfer !== 'undefined') {
           // Create folder if uploading pgm/yaml pair
-          const baseName = file.name.replace(/\.(pgm|yaml|png)$/i, '');
-
           // Upload to temp then move
           const connResult = await FileTransfer.ensureConnection();
           if (!connResult.success) {

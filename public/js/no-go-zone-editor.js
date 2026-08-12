@@ -250,12 +250,12 @@ const NoGoZoneEditor = {
     }
   },
 
-  onMouseUp(e) {
+  onMouseUp(_e) {
     this._draggingPoint = false;
     this._hoveredPoint = null;
   },
 
-  onDoubleClick(e) {
+  onDoubleClick(_e) {
     if (!this._editMode) return;
     if (this._currentZone && this._currentZone.points.length >= 3) {
       this.finishCurrentZone();
@@ -412,7 +412,7 @@ const NoGoZoneEditor = {
 
     // Draw points in edit mode
     if (this._editMode && (isSelected || isDrawing)) {
-      canvasPts.forEach((pt, i) => {
+    canvasPts.forEach((pt) => {
         ctx.beginPath();
         ctx.arc(pt.x, pt.y, 5, 0, Math.PI * 2);
         ctx.fillStyle = '#ffffff';

@@ -1,8 +1,10 @@
+/* exported MapContextMenu */
 /**
  * Map Context Menu Component
  * Provides right-click context menu for map interactions
  */
 
+// eslint-disable-next-line no-unused-vars -- classic-script global consumed by ros-manager.js
 const MapContextMenu = {
   menuElement: null,
   clickedCanvasX: 0,
