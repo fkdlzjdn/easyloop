@@ -1,4 +1,6 @@
+/* exported CanRobotView */
 // ==================== CAN Robot Top View Renderer ====================
+// eslint-disable-next-line no-unused-vars -- classic-script global consumed by can-diagnostics.js
 const CanRobotView = {
   // Node layout configuration
   // 로봇 상면도 기준 (위=전방)

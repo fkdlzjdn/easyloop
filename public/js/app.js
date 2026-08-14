@@ -1,3 +1,4 @@
+/* global DriveSimulationLab */
 // ==================== Global Utilities ====================
 
 // S3 fix: XSS 방지용 HTML 이스케이프
@@ -61,29 +62,56 @@ const App = {
   discoveredRobots: [],
   activeSlotIndex: -1,
   SLOTS_STORAGE_KEY: 'amrRobotSlots',
+  MANUAL_ROBOTS_STORAGE_KEY: 'easyloopManualRobots',
   LAST_ACTIVE_ROBOT_KEY: 'easyloopLastActiveRobot',
   _loginAutoScanStarted: false,
   _isUnloading: false, // Flag to track page unload
+  _coreInitialized: false,
+  _initializationResults: {},
+  _mapToolMenusInitialized: false,
 
   init() {
-    this.initToastSystem();
-    if (typeof TestMode !== 'undefined') TestMode.init();
-    this.setupPasswordAuth();
-    this.setupTabs();
-    this.setupHeader();
-    this.setupThemeToggle();
-    this.setupMapControls();
-    this.setupRobotManager();
-    // Robot presence is session-only. A successful login scan rebuilds this list.
-    try { localStorage.removeItem(this.SLOTS_STORAGE_KEY); } catch (e) { /* ignore */ }
-    this.loadRobots();
-    this._setupBeforeUnload();
+    if (this._coreInitialized) return;
+    this._coreInitialized = true;
 
-    // Auto cleanup old logs
-    this.cleanupOldLogs();
+    const steps = [
+      ['toast', () => this.initToastSystem()],
+      ['test-mode', () => {
+        if (typeof TestMode !== 'undefined') TestMode.init();
+      }],
+      ['workspace-tabs', () => this.setupTabs()],
+      ['header', () => this.setupHeader()],
+      ['theme', () => this.setupThemeToggle()],
+      ['map-controls', () => this.setupMapControls()],
+      ['robot-manager', () => this.setupRobotManager()],
+      ['robot-session', () => {
+        // Old full-session records are discarded. Explicitly added robots are
+        // restored from their separate persistent configuration.
+        try { localStorage.removeItem(this.SLOTS_STORAGE_KEY); } catch (e) { /* ignore */ }
+        this.restoreRobotSlots();
+        this.loadRobots();
+      }],
+      ['unload-cleanup', () => this._setupBeforeUnload()],
+      ['event-log-cleanup', () => this.cleanupOldLogs()],
+      ['multi-robot-ui', () => this.updateMultiRobotButtons()]
+    ];
 
-    // Initial multi-robot buttons visibility
-    this.updateMultiRobotButtons();
+    steps.forEach(([name, initialize]) => {
+      try {
+        initialize();
+        this._initializationResults[name] = true;
+      } catch (error) {
+        this._initializationResults[name] = false;
+        console.error(`[EasyLoop Init] ${name} 초기화 실패:`, error);
+      }
+    });
+
+    document.documentElement.dataset.easyloopCoreReady = 'true';
+    if (typeof CustomEvent !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('easyloop:core-ready', {
+        detail: { ...this._initializationResults }
+      }));
+    }
   },
 
   // Update multi-robot buttons visibility (show when 2+ robots)
@@ -112,6 +140,9 @@ const App = {
           clearInterval(RosManager._hzInterval);
           RosManager._hzInterval = null;
         }
+      }
+      if (typeof TestMode !== 'undefined' && (TestMode.enabled || TestMode._starting)) {
+        navigator.sendBeacon('/api/testmode/stop', '{}');
       }
     });
   },
@@ -182,7 +213,7 @@ const App = {
   getStorageUsage() {
     let total = 0;
     for (const key in localStorage) {
-      if (localStorage.hasOwnProperty(key) && key.startsWith('amr')) {
+      if (Object.prototype.hasOwnProperty.call(localStorage, key) && key.startsWith('amr')) {
         total += (localStorage.getItem(key) || '').length;
       }
     }
@@ -200,7 +231,7 @@ const App = {
     }
     const keys = [];
     for (const key in localStorage) {
-      if (localStorage.hasOwnProperty(key) && key.startsWith('amr')) {
+      if (Object.prototype.hasOwnProperty.call(localStorage, key) && key.startsWith('amr')) {
         keys.push(key);
       }
     }
@@ -374,16 +405,24 @@ const App = {
 
   // Password Authentication
   setupPasswordAuth() {
+    if (this._passwordAuthInitialized) return;
+
     const overlay = document.getElementById('password-overlay');
     const input = document.getElementById('password-input');
     const submit = document.getElementById('password-submit');
     const error = document.getElementById('password-error');
     const mainContent = document.getElementById('main-content');
     const logoutBtn = document.getElementById('btn-logout');
+    if (!overlay || !input || !submit || !error || !mainContent || !logoutBtn) {
+      console.error('로그인 UI 요소를 찾을 수 없습니다.');
+      return;
+    }
+    this._passwordAuthInitialized = true;
+    let loginInProgress = false;
 
     const showMainContent = (role) => {
       overlay.style.display = 'none';
-      mainContent.style.display = 'block';
+      mainContent.style.display = 'flex';
       error.style.display = 'none';
       this._userRole = role || 'user';
       this._applyRoleRestrictions();
@@ -420,12 +459,19 @@ const App = {
     };
 
     const checkPassword = async () => {
+      if (loginInProgress) return;
       const password = input.value;
       if (!password) {
         setError('비밀번호를 입력하세요');
         input.focus();
         return;
       }
+
+      loginInProgress = true;
+      const originalLabel = submit.textContent;
+      submit.disabled = true;
+      submit.textContent = '로그인 중...';
+      error.style.display = 'none';
 
       try {
         // B12 fix: fetch 타임아웃 적용
@@ -442,22 +488,54 @@ const App = {
           return;
         }
 
-        setError(data.message || '로그인 실패');
+        if (res.status === 429) {
+          setError('로그인 시도가 많습니다. 1분 후 다시 시도하세요.');
+        } else if (res.status === 401) {
+          setError('비밀번호가 올바르지 않습니다.');
+        } else if (res.status === 400) {
+          setError('비밀번호를 입력하세요.');
+        } else if (res.status === 503) {
+          setError(data.message || '서버 로그인 설정을 확인하세요.');
+        } else {
+          setError(data.message || '로그인에 실패했습니다.');
+        }
       } catch (e) {
         console.error('Login failed:', e);
-        setError('로그인 실패');
+        setError('서버에 연결할 수 없습니다. EasyLoop 서버 실행 상태를 확인하세요.');
+      } finally {
+        loginInProgress = false;
+        submit.disabled = false;
+        submit.textContent = originalLabel;
       }
 
       input.value = '';
       input.focus();
     };
 
-    submit.addEventListener('click', checkPassword);
-    input.addEventListener('keypress', (e) => {
-      if (e.key === 'Enter') checkPassword();
+    submit.addEventListener('click', (event) => {
+      event.preventDefault();
+      return checkPassword();
+    });
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        return checkPassword();
+      }
     });
 
     logoutBtn.addEventListener('click', async () => {
+      if (typeof TestMode !== 'undefined' && (TestMode.enabled || TestMode._starting)) {
+        TestMode.stop();
+        try {
+          await fetchWithTimeout('/api/testmode/stop', {
+            method: 'POST',
+            credentials: 'same-origin'
+          }, 5000);
+        } catch (e) {
+          console.warn('Test Mode cleanup during logout failed:', e);
+        }
+      }
+
       try {
         // B12 fix: fetch 타임아웃 적용
         await fetchWithTimeout('/api/auth/logout', {
@@ -523,72 +601,100 @@ const App = {
     // Show role badge in header
     const logoutBtn = document.getElementById('btn-logout');
     if (logoutBtn) {
-      logoutBtn.textContent = isEngineer ? '엔지니어 로그아웃' : '로그아웃';
-      logoutBtn.title = `Logged in as ${this._userRole}`;
+      logoutBtn.textContent = '나가기';
+      logoutBtn.title = `${isEngineer ? '엔지니어' : '일반 사용자'} 로그아웃`;
     }
 
     // Add body class for CSS-based hiding
     document.body.classList.toggle('role-user', !isEngineer);
     document.body.classList.toggle('role-engineer', isEngineer);
+    if (typeof DriveSimulationLab !== 'undefined') {
+      DriveSimulationLab.refreshAvailability();
+    }
   },
 
   // Tab Navigation
   setupTabs() {
     const tabs = document.querySelectorAll('.tab-btn');
     const contents = document.querySelectorAll('.tab-content');
+    const miniControlBtn = document.getElementById('btn-mini-control');
+    const miniControlLabel = document.getElementById('mini-control-button-label');
+    let previousWorkspaceTabId = 'tab-dashboard';
+
+    const activateWorkspace = targetId => {
+      const targetContent = document.getElementById(targetId);
+      if (!targetContent) return;
+      const fleetControlActive = targetId === 'tab-fleet-control';
+
+      tabs.forEach(t => t.classList.remove('active'));
+      contents.forEach(c => c.classList.remove('active'));
+
+      const targetTab = document.querySelector(`.tab-btn[data-tab="${targetId}"]`);
+      if (targetTab) targetTab.classList.add('active');
+      targetContent.classList.add('active');
+
+      if (!fleetControlActive) previousWorkspaceTabId = targetId;
+      if (miniControlBtn) {
+        miniControlBtn.classList.toggle('active', fleetControlActive);
+        miniControlBtn.setAttribute('aria-pressed', String(fleetControlActive));
+        miniControlBtn.title = fleetControlActive
+          ? '직전에 보던 작업 화면으로 돌아가기'
+          : '연결된 로봇을 한 화면에서 보는 미니관제로 전환';
+      }
+      if (miniControlLabel) {
+        miniControlLabel.textContent = fleetControlActive ? '작업화면' : '미니관제';
+      }
+
+      // Save active workspace to session
+      _safeSetItem('amrActiveTab', targetId);
+
+      // Resize terminal when switching to SSH tab
+      if (targetId === 'tab-ssh' && SSHTerminal.terminal) {
+        setTimeout(() => SSHTerminal.fit(), 100);
+      }
+
+      // Render graphs when switching to Docking tab
+      if (targetId === 'tab-docking' && typeof DockingTest !== 'undefined') {
+        setTimeout(() => DockingTest.renderGraphs(), 100);
+      }
+
+      // Re-render monitoring cards when switching to monitoring tab
+      if (targetId === 'tab-monitoring') {
+        this.renderMonitoringCards();
+      }
+
+      document.getElementById('main-layout')?.classList.toggle('fleet-control-mode', fleetControlActive);
+      if (typeof FleetControl !== 'undefined') {
+        if (fleetControlActive) FleetControl.activate();
+        else FleetControl.deactivate();
+      }
+
+      // Notify Diagnostics module when tab is activated
+      if (targetId === 'tab-diagnostics' && typeof Diagnostics !== 'undefined') {
+        Diagnostics.onTabActivated();
+      }
+
+      // Notify CAN Diagnostics module when tab is activated
+      if (targetId === 'tab-can-diag' && typeof CanDiag !== 'undefined') {
+        CanDiag.onTabActivated();
+      }
+    };
 
     tabs.forEach(tab => {
-      tab.addEventListener('click', () => {
-        const targetId = tab.dataset.tab;
+      tab.addEventListener('click', () => activateWorkspace(tab.dataset.tab));
+    });
 
-        tabs.forEach(t => t.classList.remove('active'));
-        contents.forEach(c => c.classList.remove('active'));
-
-        tab.classList.add('active');
-        document.getElementById(targetId).classList.add('active');
-
-        // Save active tab to session
-        _safeSetItem('amrActiveTab', targetId);
-
-        // Resize terminal when switching to SSH tab
-        if (targetId === 'tab-ssh' && SSHTerminal.terminal) {
-          setTimeout(() => SSHTerminal.fit(), 100);
-        }
-
-        // Render graphs when switching to Docking tab
-        if (targetId === 'tab-docking' && typeof DockingTest !== 'undefined') {
-          setTimeout(() => DockingTest.renderGraphs(), 100);
-        }
-
-        // Re-render monitoring cards when switching to monitoring tab
-        if (targetId === 'tab-monitoring') {
-          this.renderMonitoringCards();
-        }
-
-        const fleetControlActive = targetId === 'tab-fleet-control';
-        document.getElementById('main-layout')?.classList.toggle('fleet-control-mode', fleetControlActive);
-        if (typeof FleetControl !== 'undefined') {
-          if (fleetControlActive) FleetControl.activate();
-          else FleetControl.deactivate();
-        }
-
-        // Notify Diagnostics module when tab is activated
-        if (targetId === 'tab-diagnostics' && typeof Diagnostics !== 'undefined') {
-          Diagnostics.onTabActivated();
-        }
-
-        // Notify CAN Diagnostics module when tab is activated
-        if (targetId === 'tab-can-diag' && typeof CanDiag !== 'undefined') {
-          CanDiag.onTabActivated();
-        }
-      });
+    miniControlBtn?.addEventListener('click', () => {
+      const fleetControlActive = document.getElementById('main-layout')
+        ?.classList.contains('fleet-control-mode');
+      activateWorkspace(fleetControlActive ? previousWorkspaceTabId : 'tab-fleet-control');
     });
 
     // Restore last active tab
     const savedTab = localStorage.getItem('amrActiveTab');
     if (savedTab) {
       const tabBtn = document.querySelector(`.tab-btn[data-tab="${savedTab}"]`);
-      if (tabBtn) tabBtn.click();
+      if (tabBtn || savedTab === 'tab-fleet-control') activateWorkspace(savedTab);
     }
 
     // Camera tab checkbox handlers
@@ -607,7 +713,27 @@ const App = {
   setupMobileSidebar() {
     const btn = document.getElementById('btn-mobile-sidebar');
     const sidebar = document.querySelector('.sidebar');
-    if (!btn || !sidebar) return;
+    const mapPanel = document.getElementById('panel-map');
+    const mapCollapseBtn = document.getElementById('btn-map-panel-collapse');
+    const mapExpandBtn = document.getElementById('btn-map-panel-expand');
+    if (!btn) return;
+
+    // EasyLoop has no legacy sidebar. On compact screens this button toggles
+    // the persistent map so the operator can give the active tab more room.
+    if (!sidebar) {
+      btn.textContent = '🗺';
+      btn.title = '지도 패널 표시/숨김';
+      btn.setAttribute('aria-label', '지도 패널 표시/숨김');
+      btn.addEventListener('click', () => {
+        if (!mapPanel) return;
+        if (mapPanel.classList.contains('collapsed')) {
+          mapExpandBtn?.click();
+        } else {
+          mapCollapseBtn?.click();
+        }
+      });
+      return;
+    }
 
     btn.addEventListener('click', () => {
       sidebar.classList.toggle('mobile-open');
@@ -729,25 +855,117 @@ const App = {
   setupHeader() {
     // Active robot selector
     const activeSelect = document.getElementById('active-robot-select');
-    activeSelect.addEventListener('change', () => {
-      const idx = parseInt(activeSelect.value, 10);
-      if (!isNaN(idx) && idx >= 0 && idx < this.robotSlots.length) {
-        this.switchActiveRobot(idx);
-      }
-    });
-
-    // BMS charging toggle in test mode — click on the gauge container
-    const bmsGaugeEl = document.querySelector('.bms-gauge');
-    if (bmsGaugeEl) {
-      bmsGaugeEl.style.cursor = 'pointer';
-      bmsGaugeEl.addEventListener('click', () => {
-        if (typeof TestMode !== 'undefined' && TestMode.enabled) {
-          TestMode._bmsCharging = !TestMode._bmsCharging;
-          TestMode._bmsChargingManual = true; // prevent setWorkState from overriding
-          this.toast(TestMode._bmsCharging ? 'Charging started (test)' : 'Charging stopped (test)', 'info');
+    if (activeSelect) {
+      activeSelect.addEventListener('change', () => {
+        const idx = parseInt(activeSelect.value, 10);
+        if (!isNaN(idx) && idx >= 0 && idx < this.robotSlots.length) {
+          this.switchActiveRobot(idx);
         }
       });
     }
+
+    this.setupHeaderPopovers();
+    this.setupBmsDetails();
+  },
+
+  setupHeaderPopovers() {
+    if (this._headerPopoversInitialized) return;
+    this._headerPopoversInitialized = true;
+
+    const popovers = [
+      {
+        trigger: document.getElementById('btn-connection-summary'),
+        panel: document.getElementById('connection-popover')
+      },
+      {
+        trigger: document.getElementById('btn-test-mode-menu'),
+        panel: document.getElementById('test-mode-popover')
+      }
+    ].filter(item => item.trigger && item.panel);
+
+    const moreButton = document.getElementById('btn-hdr-more');
+    const moreMenu = document.getElementById('hdr-more-menu');
+
+    const closeAll = except => {
+      popovers.forEach(({ trigger, panel }) => {
+        if (panel === except) return;
+        panel.hidden = true;
+        trigger.setAttribute('aria-expanded', 'false');
+      });
+      if (moreMenu && moreMenu !== except) {
+        moreMenu.classList.remove('open');
+        moreButton?.setAttribute('aria-expanded', 'false');
+      }
+    };
+
+    popovers.forEach(({ trigger, panel }) => {
+      trigger.addEventListener('click', event => {
+        event.stopPropagation();
+        const willOpen = panel.hidden;
+        closeAll(willOpen ? panel : null);
+        panel.hidden = !willOpen;
+        trigger.setAttribute('aria-expanded', String(willOpen));
+      });
+      panel.addEventListener('click', event => event.stopPropagation());
+    });
+
+    if (moreButton && moreMenu) {
+      moreButton.addEventListener('click', event => {
+        event.stopPropagation();
+        const willOpen = !moreMenu.classList.contains('open');
+        closeAll(willOpen ? moreMenu : null);
+        moreMenu.classList.toggle('open', willOpen);
+        moreButton.setAttribute('aria-expanded', String(willOpen));
+      });
+      moreMenu.addEventListener('click', event => event.stopPropagation());
+      moreMenu.querySelectorAll('.hdr-tool-grid .hdr-menu-item, .hdr-menu-backup .hdr-menu-item')
+        .forEach(item => {
+          item.addEventListener('click', () => closeAll());
+        });
+    }
+
+    document.addEventListener('click', () => closeAll());
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape') closeAll();
+    });
+  },
+
+  setupBmsDetails() {
+    if (this._bmsDetailsInitialized) return;
+    this._bmsDetailsInitialized = true;
+
+    const detailButton = document.getElementById('btn-bms-detail');
+    const modal = document.getElementById('bms-detail-modal');
+    const closeButton = document.getElementById('btn-bms-modal-close');
+    const targetButton = document.getElementById('btn-bms-set-target');
+    const testChargeButton = document.getElementById('btn-bms-test-charge');
+
+    detailButton?.addEventListener('click', () => modal?.classList.add('show'));
+    closeButton?.addEventListener('click', () => modal?.classList.remove('show'));
+    modal?.addEventListener('click', event => {
+      if (event.target === modal) modal.classList.remove('show');
+    });
+
+    targetButton?.addEventListener('click', () => {
+      const input = document.getElementById('bms-charge-target-input');
+      const value = parseInt(input?.value, 10);
+      if (value >= 1 && value <= 100) {
+        RosManager._bmsTargetSoc = value;
+        this.toast(`충전 목표를 ${value}%로 설정했습니다.`, 'success');
+      } else {
+        this.toast('1~100 사이의 값을 입력하세요.', 'error');
+      }
+    });
+
+    testChargeButton?.addEventListener('click', () => {
+      if (typeof TestMode === 'undefined' || !TestMode.enabled) {
+        this.toast('Test Mode에서만 충전 상태를 변경할 수 있습니다.', 'info');
+        return;
+      }
+      const charging = TestMode.toggleActiveCharging();
+      testChargeButton.textContent = charging ? 'Test 충전 중지' : 'Test 충전 시작';
+      this.toast(charging ? 'Test Mode 충전을 시작했습니다.' : 'Test Mode 충전을 중지했습니다.', 'info');
+    });
   },
 
   // Format robot ID: "1" -> "R_001", "44" -> "R_044", "R_005" stays
@@ -778,7 +996,14 @@ const App = {
 
     if (headerScanBtn) {
       headerScanBtn.addEventListener('click', () => {
-        this.runNetworkScan({ autoConnect: true, background: true, replaceCurrent: true });
+        this.runNetworkScan({
+          autoConnect: true,
+          background: true,
+          replaceCurrent: true,
+          discoveryMode: 'rosbridge',
+          scanPort: Number(localStorage.getItem('easyloopRosbridgeScanPort')) || 9090,
+          persistPreferences: false
+        });
       });
     }
 
@@ -815,7 +1040,9 @@ const App = {
       // Extract number from robotId for tunnel local IP
       const robotNumber = parseInt(rawId) || parseInt(robotId.replace(/\D/g, '')) || 1;
 
-      this.addRobotSlot(ip, robotId, sshPort, tunnelMode, sshPassword, robotNumber);
+      this.addRobotSlot(ip, robotId, sshPort, tunnelMode, sshPassword, robotNumber, null, {
+        manualAdded: true
+      });
       ipInput.value = '';
       idInput.value = '';
       if (sshPortInput) sshPortInput.value = '';
@@ -854,11 +1081,34 @@ const App = {
   setupNetworkScan() {
     const scanBtn = document.getElementById('btn-rm-scan');
     const subnetInput = document.getElementById('rm-scan-subnet');
+    const modeInput = document.getElementById('rm-scan-mode');
+    const portInput = document.getElementById('rm-scan-port');
 
     if (!scanBtn) return;
 
     const savedSubnet = localStorage.getItem('easyloopScanSubnet');
     if (savedSubnet) subnetInput.value = savedSubnet;
+    const savedMode = localStorage.getItem('easyloopScanMode');
+    if (modeInput && ['rosbridge', 'ssh'].includes(savedMode)) modeInput.value = savedMode;
+    const initialMode = modeInput?.value === 'ssh' ? 'ssh' : 'rosbridge';
+    let savedPort = Number(localStorage.getItem(
+      initialMode === 'ssh' ? 'easyloopSshScanPort' : 'easyloopRosbridgeScanPort'
+    ));
+    // 이전 버전의 단일 포트 설정은 당시 선택되어 있던 검색 방식에만 귀속시킨다.
+    if (!(savedPort >= 1 && savedPort <= 65535) && savedMode === initialMode) {
+      savedPort = Number(localStorage.getItem('easyloopScanPort'));
+    }
+    if (portInput && savedPort >= 1 && savedPort <= 65535) portInput.value = String(savedPort);
+    modeInput?.addEventListener('change', () => {
+      if (!portInput) return;
+      const mode = modeInput.value === 'ssh' ? 'ssh' : 'rosbridge';
+      const modePort = Number(localStorage.getItem(
+        mode === 'ssh' ? 'easyloopSshScanPort' : 'easyloopRosbridgeScanPort'
+      ));
+      portInput.value = String(
+        modePort >= 1 && modePort <= 65535 ? modePort : (mode === 'ssh' ? 22 : 9090)
+      );
+    });
 
     scanBtn.addEventListener('click', () => this.runNetworkScan({ autoConnect: true, replaceCurrent: true }));
     subnetInput.addEventListener('keydown', (event) => {
@@ -880,14 +1130,26 @@ const App = {
     this.runNetworkScan({
       autoConnect: true,
       background: true,
-      replaceCurrent: true
+      replaceCurrent: true,
+      discoveryMode: 'rosbridge',
+      scanPort: Number(localStorage.getItem('easyloopRosbridgeScanPort')) || 9090,
+      persistPreferences: false
     });
   },
 
-  async runNetworkScan({ autoConnect = false, background = false, replaceCurrent = false } = {}) {
+  async runNetworkScan({
+    autoConnect = false,
+    background = false,
+    replaceCurrent = false,
+    discoveryMode: requestedMode = null,
+    scanPort: requestedPort = null,
+    persistPreferences = true
+  } = {}) {
     const scanBtn = document.getElementById('btn-rm-scan');
     const headerScanBtn = document.getElementById('btn-robot-scan');
     const subnetInput = document.getElementById('rm-scan-subnet');
+    const modeInput = document.getElementById('rm-scan-mode');
+    const portInput = document.getElementById('rm-scan-port');
     const statusEl = document.getElementById('rm-scan-status');
     const resultsEl = document.getElementById('rm-scan-results');
     const listEl = document.getElementById('rm-scan-list');
@@ -896,18 +1158,34 @@ const App = {
     const enteredSubnet = subnetInput.value.trim() || '192.168.20';
     // 마지막 점은 사용자가 IP를 이어 입력하던 습관에서 자주 남으므로 자동 보정한다.
     const subnet = enteredSubnet.replace(/\.$/, '');
+    const discoveryMode = requestedMode === 'ssh' || requestedMode === 'rosbridge'
+      ? requestedMode
+      : (modeInput?.value === 'ssh' ? 'ssh' : 'rosbridge');
+    const scanPort = Number(requestedPort ?? portInput?.value)
+      || (discoveryMode === 'ssh' ? 22 : 9090);
+    if (!Number.isInteger(scanPort) || scanPort < 1 || scanPort > 65535) {
+      this.toast('검색 포트는 1~65535 범위로 입력하세요.', 'error');
+      return;
+    }
     subnetInput.value = subnet;
+    if (portInput && requestedPort === null) portInput.value = String(scanPort);
     scanBtn.disabled = true;
     if (headerScanBtn) headerScanBtn.disabled = true;
-    if (background && headerScanBtn) headerScanBtn.textContent = '스캔 중...';
-    statusEl.textContent = '자동 검색 중...';
+    if (background && headerScanBtn) {
+      headerScanBtn.classList.add('scanning');
+      headerScanBtn.setAttribute('aria-busy', 'true');
+      headerScanBtn.title = '로봇 검색 중';
+    }
+    statusEl.textContent = discoveryMode === 'ssh'
+      ? `${subnet}.0/24:${scanPort} 포트포워딩 검색 중...`
+      : `${subnet}.0/24:${scanPort} ROS Bridge 검색 중...`;
     statusEl.className = 'rm-scan-status scanning';
     resultsEl.style.display = 'block';
     listEl.innerHTML = '<span class="rm-scan-empty">ROS Bridge와 RID를 확인하고 있습니다...</span>';
 
     try {
       const response = await fetchWithTimeout(
-        `/api/robots/scan-subnet?base=${encodeURIComponent(subnet)}`,
+        `/api/robots/scan-subnet?base=${encodeURIComponent(subnet)}&port=${scanPort}&mode=${discoveryMode}`,
         {},
         30000
       );
@@ -915,26 +1193,53 @@ const App = {
       if (!response.ok) throw new Error(data.message || 'Scan failed');
 
       localStorage.setItem('easyloopScanSubnet', data.subnet || subnet);
+      if (persistPreferences) {
+        localStorage.setItem('easyloopScanMode', discoveryMode);
+        localStorage.setItem('easyloopScanPort', String(scanPort));
+        localStorage.setItem(
+          discoveryMode === 'ssh' ? 'easyloopSshScanPort' : 'easyloopRosbridgeScanPort',
+          String(scanPort)
+        );
+      }
       subnetInput.value = data.subnet || subnet;
-      this.discoveredRobots = Array.isArray(data.hosts) ? data.hosts : [];
+      const manualConfigs = this._readManualRobotConfigs();
+      this.discoveredRobots = (Array.isArray(data.hosts) ? data.hosts : []).map(host => {
+        if (!host.portForwarded) return host;
+        const manual = manualConfigs.find(config =>
+          config.ip === host.ip && Number(config.sshPort || 22) === Number(host.sshPort || host.port)
+        );
+        return {
+          ...host,
+          robotId: host.robotId || manual?.robotId || null,
+          robotNumber: manual?.robotNumber,
+          tunnelMode: true,
+          manualMatch: Boolean(manual)
+        };
+      });
 
       let stageSummary = { addedCount: 0, connectCount: 0 };
-      if (autoConnect && (replaceCurrent || this.discoveredRobots.length > 0)) {
+      const identifiedCount = this.discoveredRobots.filter(host => host.robotId).length;
+      const shouldReplace = replaceCurrent && discoveryMode === 'rosbridge';
+      // SSH 포트가 열렸다는 사실만으로 터널까지 자동 연결하지 않는다.
+      // 포트포워딩 검색 결과는 사용자가 항목을 선택했을 때 연결한다.
+      const shouldAutoConnect = autoConnect && discoveryMode === 'rosbridge';
+      if (shouldAutoConnect && (shouldReplace || identifiedCount > 0)) {
         stageSummary = this.stageDiscoveredRobots(this.discoveredRobots, {
           silent: background,
-          replaceCurrent
+          replaceCurrent: shouldReplace
         });
       }
 
       listEl.innerHTML = '';
 
-      if (!data.hosts || data.hosts.length === 0) {
+      if (this.discoveredRobots.length === 0) {
         listEl.innerHTML = '<span class="rm-scan-empty">발견된 로봇이 없습니다. 대역과 ROS Bridge 상태를 확인하세요.</span>';
         statusEl.textContent = `0대 발견 · ${data.fixedTarget} 확인 완료`;
       } else {
-        data.hosts.forEach(host => {
-          const existingIndex = this.robotSlots.findIndex(slot => slot.ip === host.ip);
+        this.discoveredRobots.forEach(host => {
+          const existingIndex = this._findDiscoveredSlotIndex(host);
           const alreadyExists = existingIndex >= 0;
+          const existingSlot = alreadyExists ? this.robotSlots[existingIndex] : null;
           const item = document.createElement('button');
           item.type = 'button';
           item.className = 'rm-scan-item';
@@ -948,8 +1253,15 @@ const App = {
 
           const ip = document.createElement('span');
           ip.className = 'scan-ip';
-          ip.textContent = host.ip;
+          ip.textContent = host.portForwarded ? `${host.ip}:${host.sshPort || host.port}` : host.ip;
           item.appendChild(ip);
+
+          if (host.portForwarded) {
+            const forwarded = document.createElement('span');
+            forwarded.className = 'scan-forwarded';
+            forwarded.textContent = host.manualMatch ? '포워딩 · 저장됨' : '포워딩';
+            item.appendChild(forwarded);
+          }
 
           if (host.fixed) {
             const fixed = document.createElement('span');
@@ -960,24 +1272,30 @@ const App = {
 
           const action = document.createElement('span');
           action.className = alreadyExists ? 'scan-registered' : 'scan-select';
-          action.textContent = host.robotId
-            ? (existingIndex === this.activeSlotIndex ? '수신 중' : '활성화')
-            : 'RID 필요';
+          action.textContent = host.portForwarded && host.robotId
+            ? (existingSlot?.connected ? '터널 연결됨' : '터널 연결')
+            : host.robotId
+              ? (existingIndex === this.activeSlotIndex ? '수신 중' : '활성화')
+            : (host.portForwarded ? '수동 정보 입력' : 'RID 필요');
           item.appendChild(action);
 
-          item.disabled = !host.robotId;
+          item.disabled = !host.robotId && !host.portForwarded;
           item.addEventListener('click', async () => {
             listEl.querySelectorAll('.rm-scan-item').forEach(row => row.classList.remove('selected'));
             item.classList.add('selected');
+            if (!host.robotId && host.portForwarded) {
+              this.prefillForwardedRobot(host);
+              return;
+            }
             await this.selectDiscoveredRobot(host);
           });
           listEl.appendChild(item);
         });
 
-        const identified = data.hosts.filter(host => host.robotId).length;
-        statusEl.textContent = autoConnect
-          ? `${data.hosts.length}대 발견 · ${identified}대 연결 시작 · ${stageSummary.activeRobotId || '활성 로봇'} 데이터 수신`
-          : `${data.hosts.length}대 발견 · RID ${identified}대 확인`;
+        const identified = this.discoveredRobots.filter(host => host.robotId).length;
+        statusEl.textContent = shouldAutoConnect
+          ? `${this.discoveredRobots.length}대 발견 · ${identified}대 식별 · ${stageSummary.activeRobotId || '활성 로봇'} 데이터 수신`
+          : `${this.discoveredRobots.length}대 발견 · RID ${identified}대 확인`;
       }
       statusEl.className = 'rm-scan-status complete';
 
@@ -999,8 +1317,38 @@ const App = {
     } finally {
       scanBtn.disabled = false;
       if (headerScanBtn) headerScanBtn.disabled = false;
-      if (background && headerScanBtn) headerScanBtn.textContent = '로봇 스캔';
+      if (background && headerScanBtn) {
+        headerScanBtn.classList.remove('scanning');
+        headerScanBtn.removeAttribute('aria-busy');
+        headerScanBtn.title = '로봇 다시 검색';
+      }
     }
+  },
+
+  prefillForwardedRobot(host) {
+    const ipInput = document.getElementById('rm-new-ip');
+    const idInput = document.getElementById('rm-new-id');
+    const sshPortInput = document.getElementById('rm-new-ssh-port');
+    const tunnelModeInput = document.getElementById('rm-new-tunnel-mode');
+    if (ipInput) ipInput.value = host?.ip || '';
+    if (sshPortInput) sshPortInput.value = String(host?.sshPort || host?.port || 22);
+    if (tunnelModeInput) tunnelModeInput.checked = true;
+    idInput?.focus();
+    this.toast('포트포워딩 장비를 찾았습니다. 로봇 번호(RID)를 입력한 뒤 수동 추가하세요.', 'info');
+  },
+
+  _findDiscoveredSlotIndex(host) {
+    if (!host?.ip) return -1;
+    if (!host.portForwarded) {
+      return this.robotSlots.findIndex(slot => slot.ip === host.ip);
+    }
+
+    const forwardedPort = Number(host.sshPort || host.port || 22);
+    return this.robotSlots.findIndex(slot =>
+      slot.ip === host.ip
+      && Boolean(slot.tunnelMode)
+      && Number(slot.sshPort || 22) === forwardedPort
+    );
   },
 
   // Resume one active robot with data; keep every other discovered robot connection-only.
@@ -1008,8 +1356,24 @@ const App = {
     let addedCount = 0;
     let connectCount = 0;
 
+    // A login-time background scan can finish after Test Mode has replaced the
+    // real fleet. Never let that late response clear the virtual fleet.
+    if (typeof TestMode !== 'undefined' && (TestMode._starting || TestMode.enabled)) {
+      return {
+        addedCount,
+        connectCount,
+        activeSlotIndex: this.activeSlotIndex,
+        activeRobotId: this.robotSlots[this.activeSlotIndex]?.robotId || null,
+        testModePreserved: true
+      };
+    }
+
     if (replaceCurrent) {
+      // Keep user-entered IP/port/tunnel settings even though automatically
+      // discovered session slots are rebuilt from the latest scan.
+      this.saveRobotSlots();
       this.clearCurrentRobotSlots();
+      this.restoreManualRobotSlots();
     }
 
     const identifiedHosts = hosts
@@ -1023,15 +1387,25 @@ const App = {
       });
 
     identifiedHosts.forEach(host => {
-      let slotIndex = this.robotSlots.findIndex(slot => slot.ip === host.ip);
+      let slotIndex = this._findDiscoveredSlotIndex(host);
       if (slotIndex < 0) {
         const robotNumber = this._robotNumberFromIdentity(host);
-        this.addRobotSlot(host.ip, host.robotId, 22, false, '', robotNumber, null, {
+        this.addRobotSlot(
+          host.ip,
+          host.robotId,
+          Number(host.sshPort) || 22,
+          Boolean(host.portForwarded || host.tunnelMode),
+          '',
+          robotNumber,
+          null,
+          {
           activateFirst: false,
           deferRender: true,
-          silent: true
-        });
-        slotIndex = this.robotSlots.findIndex(slot => slot.ip === host.ip);
+          silent: true,
+          wsPort: Number(host.wsPort) || 9090
+          }
+        );
+        slotIndex = this._findDiscoveredSlotIndex(host);
         addedCount += 1;
       }
     });
@@ -1145,7 +1519,7 @@ const App = {
 
     this.robotSlots.length = 0;
     this.activeSlotIndex = -1;
-    this.saveRobotSlots();
+    this.saveRobotSlots({ preserveManual: true });
     this.renderActiveRobotSelector();
     this.renderRobotManagerList();
     this.renderMonitoringCards();
@@ -1160,13 +1534,22 @@ const App = {
       return;
     }
 
-    let slotIndex = this.robotSlots.findIndex(slot => slot.ip === host.ip);
+    let slotIndex = this._findDiscoveredSlotIndex(host);
     if (slotIndex < 0) {
       const ridNumber = parseInt(String(host.robotId).replace(/\D/g, ''), 10);
       const ipNumber = parseInt(String(host.ip).split('.').pop(), 10);
       const robotNumber = Number.isFinite(ridNumber) ? ridNumber : (Number.isFinite(ipNumber) ? ipNumber : 1);
-      this.addRobotSlot(host.ip, host.robotId, 22, false, '', robotNumber);
-      slotIndex = this.robotSlots.findIndex(slot => slot.ip === host.ip);
+      this.addRobotSlot(
+        host.ip,
+        host.robotId,
+        Number(host.sshPort) || 22,
+        Boolean(host.portForwarded || host.tunnelMode),
+        '',
+        robotNumber,
+        null,
+        { wsPort: Number(host.wsPort) || 9090 }
+      );
+      slotIndex = this._findDiscoveredSlotIndex(host);
     }
 
     if (slotIndex < 0) {
@@ -1325,12 +1708,13 @@ const App = {
     return true;
   },
 
-  addRobotSlot(ip, robotId, sshPort, tunnelMode, sshPassword, robotNumber, template = null, options = {}) {
-    const templateConfig = template ? this.ROBOT_TEMPLATES[template] : null;
+  addRobotSlot(ip, robotId, sshPort, tunnelMode, sshPassword, robotNumber, _template = null, options = {}) {
+    const manualAdded = options.manualAdded === true || options.source === 'manual';
     this.robotSlots.push({
       ip: ip,
       robotId: robotId,
       sshPort: sshPort || 22,
+      wsPort: Number(options.wsPort) || 9090,
       tunnelMode: tunnelMode || false,
       sshPassword: sshPassword || '',
       robotNumber: robotNumber || 1,
@@ -1344,7 +1728,9 @@ const App = {
       pose: null,
       mapCorrection: null,
       chargeRelayOn: null,
-      chargeRelayReceivedAt: 0
+      chargeRelayReceivedAt: 0,
+      manualAdded,
+      source: manualAdded ? 'manual' : (options.source || 'discovered')
     });
 
     // Auto-select first slot if none active
@@ -1354,7 +1740,7 @@ const App = {
       this.updateActiveRobotStatus();
     }
 
-    this.saveRobotSlots();
+    if (!options.skipSave) this.saveRobotSlots();
     if (!options.deferRender) {
       this.renderActiveRobotSelector();
       this.renderRobotManagerList();
@@ -1471,9 +1857,15 @@ const App = {
     if (index < 0 || index >= this.robotSlots.length) return;
     if (index === this.activeSlotIndex) return;
 
+    if (typeof OpMode !== 'undefined' && OpMode.isAuto) {
+      OpMode.forceManual('활성 로봇 전환 시 안전을 위해 자동 실행을 중지했습니다.');
+    }
+
     const previousIndex = this.activeSlotIndex;
     this.activeSlotIndex = index;
-    this._rememberActiveRobot(this.robotSlots[index]);
+    if (!this.robotSlots[index].virtualTestRobot) {
+      this._rememberActiveRobot(this.robotSlots[index]);
+    }
     this.updateActiveRobotStatus();
     this.renderActiveRobotSelector();
 
@@ -1510,12 +1902,9 @@ const App = {
 
     this.toast(`활성 로봇 전환: ${this.robotSlots[index].robotId}`, 'info');
 
-    // B4 fix: TestMode.start()에 password 전달 (비밀번호 프롬프트로 받아서 전달)
+    // Test Mode virtual robots share one local bridge and can switch instantly.
     if (typeof TestMode !== 'undefined' && TestMode.enabled) {
-      TestMode.stop();
-      TestMode._promptPassword().then(password => {
-        if (password !== null) TestMode.start(password);
-      });
+      TestMode.onActiveRobotChanged(index);
     }
   },
 
@@ -1526,13 +1915,13 @@ const App = {
       const slot = this.robotSlots[this.activeSlotIndex];
       if (labelEl) labelEl.textContent = `${slot.robotId} (${slot.ip})`;
       if (statusEl) {
-        statusEl.textContent = slot.connected ? '연결됨(데이터수신)' : '미연결';
+        statusEl.textContent = slot.connected ? '수신' : '오프';
         statusEl.className = 'action-target-status' + (slot.connected ? ' connected' : '');
       }
     } else {
       if (labelEl) labelEl.textContent = '--';
       if (statusEl) {
-        statusEl.textContent = '미연결';
+        statusEl.textContent = '오프';
         statusEl.className = 'action-target-status';
       }
     }
@@ -1584,19 +1973,44 @@ const App = {
   // Update active robot connection status in header
   updateActiveRobotStatus() {
     const statusEl = document.getElementById('active-robot-status');
+    const summaryButton = document.getElementById('btn-connection-summary');
+    const detailState = document.getElementById('connection-detail-state');
+    const detailRobot = document.getElementById('connection-detail-robot');
+    const detailIp = document.getElementById('connection-detail-ip');
+    const detailModel = document.getElementById('robot-model-name');
+    const detailLatency = document.getElementById('ros-latency');
+    let shortState = '대기';
+    let fullState = '로봇 선택 대기';
+    let state = 'idle';
+    let slot = null;
+
     if (this.activeSlotIndex >= 0 && this.activeSlotIndex < this.robotSlots.length) {
-      const slot = this.robotSlots[this.activeSlotIndex];
+      slot = this.robotSlots[this.activeSlotIndex];
       if (slot.connected) {
-        statusEl.textContent = '연결됨(데이터수신)';
-        statusEl.classList.add('connected');
+        shortState = '수신';
+        fullState = '연결됨 · 데이터 수신 중';
+        state = 'live';
+      } else if (slot.ros) {
+        shortState = '연결 중';
+        fullState = 'ROS Bridge 연결 중';
+        state = 'connecting';
       } else {
-        statusEl.textContent = '미연결';
-        statusEl.classList.remove('connected');
+        shortState = '오프';
+        fullState = '연결되지 않음';
+        state = 'offline';
       }
-    } else {
-      statusEl.textContent = '미연결';
-      statusEl.classList.remove('connected');
     }
+    if (statusEl) statusEl.textContent = shortState;
+    if (summaryButton) {
+      summaryButton.dataset.state = state;
+      summaryButton.title = fullState;
+      summaryButton.setAttribute('aria-label', `로봇 연결 상태: ${fullState}`);
+    }
+    if (detailState) detailState.textContent = fullState;
+    if (detailRobot) detailRobot.textContent = slot?.robotId || '선택 안 됨';
+    if (detailIp) detailIp.textContent = slot?.ip || '--';
+    if (detailModel) detailModel.textContent = slot?.robotModel || '--';
+    if (detailLatency && state !== 'live') detailLatency.textContent = '--';
     this.updateActionTargetLabel();
   },
 
@@ -1606,14 +2020,14 @@ const App = {
     select.innerHTML = '';
 
     if (this.robotSlots.length === 0) {
-      select.innerHTML = '<option value="">-- 로봇 없음 --</option>';
+      select.innerHTML = '<option value="">로봇 없음</option>';
       return;
     }
 
     if (this.activeSlotIndex < 0) {
       const placeholder = document.createElement('option');
       placeholder.value = '';
-      placeholder.textContent = '-- 데이터 수신할 로봇 선택 --';
+      placeholder.textContent = '로봇 선택';
       placeholder.selected = true;
       select.appendChild(placeholder);
     }
@@ -1622,10 +2036,11 @@ const App = {
       const opt = document.createElement('option');
       opt.value = index;
       const connLabel = slot.connected
-        ? (index === this.activeSlotIndex ? '연결됨(데이터수신)' : '연결됨(대기)')
-        : (slot.ros ? '연결 중' : '미연결');
+        ? (index === this.activeSlotIndex ? '수신' : '대기')
+        : (slot.ros ? '연결 중' : '오프');
       const unitLabel = Number.isFinite(unitNumber) ? String(unitNumber).padStart(3, '0') : '---';
-      opt.textContent = `${unitLabel} | ${slot.robotId} (${slot.ip}) - ${connLabel}`;
+      opt.textContent = `${unitLabel} · ${slot.robotId} · ${connLabel}`;
+      opt.title = `${slot.robotId} · ${slot.ip} · ${connLabel}`;
       if (index === this.activeSlotIndex) opt.selected = true;
       select.appendChild(opt);
     });
@@ -1646,8 +2061,8 @@ const App = {
       const connClass = slot.connected ? 'connected' : 'disconnected';
       const isActive = index === this.activeSlotIndex;
       const connText = slot.connected
-        ? (isActive ? '연결됨(데이터수신)' : '연결됨(대기)')
-        : (slot.ros ? '연결 중' : '미연결');
+        ? (isActive ? '수신' : '대기')
+        : (slot.ros ? '연결 중' : '오프');
       const connDot = slot.connected ? '\u25CF' : '\u25CB';
       const sshPortDisplay = (slot.sshPort && slot.sshPort !== 22) ? slot.sshPort : '<span style="color:#666;">22</span>';
       const unitLabel = Number.isFinite(unitNumber) ? String(unitNumber).padStart(3, '0') : '---';
@@ -1667,17 +2082,21 @@ const App = {
       tr.innerHTML = `
         <td>${unitLabel}${isActive ? ' <b style="color:#e94560;">*</b>' : ''}</td>
         <td>${_escapeHtml(slot.ip)}</td>
-        <td>${_escapeHtml(slot.robotId)}</td>
+        <td>${_escapeHtml(slot.robotId)}${slot.manualAdded
+          ? ' <span class="manual-robot-badge" title="브라우저에 저장된 수동 등록 로봇">수동 저장</span>'
+          : ''}</td>
         <td>${sshPortDisplay}</td>
         <td>${tunnelDisplay}</td>
         <td><span class="rm-status-dot ${connClass}">${connDot}</span>${connText}</td>
         <td>
-          ${slot.connected
+          ${slot.virtualTestRobot
+            ? '<span class="test-robot-badge">Test Mode 임시 로봇</span>'
+            : slot.connected
             ? `<button class="btn btn-small btn-danger" onclick="App.disconnectSlot(${index}); App.renderRobotManagerList();">연결 해제</button>`
             : `<button class="btn btn-small btn-primary" onclick="App.connectSlot(${index}); App.renderRobotManagerList();">연결</button>`
           }
           <button class="btn btn-small" onclick="App.switchActiveRobot(${index}); App.renderRobotManagerList();" ${isActive ? 'disabled' : ''}>활성화</button>
-          <button class="btn btn-small btn-danger" onclick="App.removeRobotSlot(${index});">삭제</button>
+          ${slot.virtualTestRobot ? '' : `<button class="btn btn-small btn-danger" onclick="App.removeRobotSlot(${index});">삭제</button>`}
         </td>
       `;
       tbody.appendChild(tr);
@@ -1716,8 +2135,8 @@ const App = {
       const connDot = slot.connected ? '\u25CF' : '\u25CB';
       const connClass = slot.connected ? 'connected' : 'disconnected';
       const connText = slot.connected
-        ? (index === this.activeSlotIndex ? '연결됨(데이터수신)' : '연결됨(대기)')
-        : (slot.ros ? '연결 중' : '미연결');
+        ? (index === this.activeSlotIndex ? '수신' : '대기')
+        : (slot.ros ? '연결 중' : '오프');
 
       // Work state
       let wsText = '--';
@@ -1764,9 +2183,33 @@ const App = {
     });
   },
 
-  // Robot slots are intentionally session-only; remove data written by older versions.
-  saveRobotSlots() {
+  _readManualRobotConfigs() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(this.MANUAL_ROBOTS_STORAGE_KEY) || '[]');
+      return Array.isArray(saved) ? saved.filter(robot => robot?.ip && robot?.robotId) : [];
+    } catch (error) {
+      console.warn('수동 로봇 설정 읽기 실패:', error.message);
+      return [];
+    }
+  },
+
+  saveRobotSlots({ preserveManual = false } = {}) {
     try { localStorage.removeItem(this.SLOTS_STORAGE_KEY); } catch (e) { /* ignore */ }
+    if (preserveManual
+        || (typeof TestMode !== 'undefined' && (TestMode._starting || TestMode.enabled))) {
+      return;
+    }
+    const manualRobots = this.robotSlots
+      .filter(slot => slot?.manualAdded && !slot.virtualTestRobot)
+      .map(slot => ({
+        ip: slot.ip,
+        robotId: slot.robotId,
+        sshPort: slot.sshPort || 22,
+        tunnelMode: Boolean(slot.tunnelMode),
+        sshPassword: _obfuscatePassword(slot.sshPassword || ''),
+        robotNumber: slot.robotNumber || this._robotNumberFromIdentity(slot)
+      }));
+    _safeSetItem(this.MANUAL_ROBOTS_STORAGE_KEY, JSON.stringify(manualRobots));
   },
 
   // Get session info for display
@@ -1775,7 +2218,46 @@ const App = {
   },
 
   restoreRobotSlots() {
-    this.saveRobotSlots();
+    const restored = this.restoreManualRobotSlots();
+    if (restored > 0 && this.activeSlotIndex < 0) {
+      this.activeSlotIndex = this._chooseStartupActiveSlot();
+      if (this.activeSlotIndex >= 0) {
+        this._rememberActiveRobot(this.robotSlots[this.activeSlotIndex]);
+      }
+      this.renderActiveRobotSelector();
+      this.renderRobotManagerList();
+      this.renderMonitoringCards();
+      this.updateActiveRobotStatus();
+      this.updateMultiRobotButtons();
+    }
+    return restored;
+  },
+
+  restoreManualRobotSlots() {
+    let restored = 0;
+    this._readManualRobotConfigs().forEach(config => {
+      if (this.robotSlots.some(slot => slot.ip === config.ip || (
+        slot.robotId === config.robotId && slot.ip === config.ip
+      ))) return;
+      this.addRobotSlot(
+        config.ip,
+        config.robotId,
+        Number(config.sshPort) || 22,
+        Boolean(config.tunnelMode),
+        _deobfuscatePassword(config.sshPassword || ''),
+        Number(config.robotNumber) || this._robotNumberFromIdentity(config),
+        null,
+        {
+          manualAdded: true,
+          activateFirst: false,
+          deferRender: true,
+          silent: true,
+          skipSave: true
+        }
+      );
+      restored += 1;
+    });
+    return restored;
   },
 
   // Select IP from dropdown (legacy scan dropdown)
@@ -1915,16 +2397,47 @@ const App = {
     if (this.isDarkMode) {
       // Currently dark mode, button shows option to switch to day
       iconEl.textContent = '\u2600\uFE0F';
-      textEl.textContent = 'Day';
+      textEl.textContent = '라이트 모드';
     } else {
       // Currently light mode, button shows option to switch to night
       iconEl.textContent = '\uD83C\uDF19';
-      textEl.textContent = 'Night';
+      textEl.textContent = '다크 모드';
     }
+  },
+
+  setupMapToolMenus() {
+    if (this._mapToolMenusInitialized) return;
+
+    const menus = Array.from(document.querySelectorAll('.map-tool-menu'));
+    if (menus.length === 0) return;
+    this._mapToolMenusInitialized = true;
+
+    const closeAll = (except = null) => {
+      menus.forEach(menu => {
+        if (menu !== except) menu.open = false;
+      });
+    };
+
+    menus.forEach(menu => {
+      menu.addEventListener('toggle', () => {
+        if (menu.open) closeAll(menu);
+      });
+    });
+
+    document.addEventListener('click', event => {
+      const clickedInsideMenu = menus.some(menu => menu.contains(event.target));
+      if (!clickedInsideMenu) closeAll();
+    });
+
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape') closeAll();
+    });
   },
 
   // Map Controls (Rotation + Zoom)
   setupMapControls() {
+    this.setupMapToolMenus();
+
     const rotateLeftBtn = document.getElementById('btn-map-rotate-left');
     const rotateRightBtn = document.getElementById('btn-map-rotate-right');
     const rotateResetBtn = document.getElementById('btn-map-rotate-reset');
@@ -2007,46 +2520,6 @@ const App = {
       }).observe(mapCanvas.parentElement);
     }
 
-    // BMS Detail modal
-    const bmsDetailBtn = document.getElementById('btn-bms-detail');
-    const bmsModal = document.getElementById('bms-detail-modal');
-    const bmsModalClose = document.getElementById('btn-bms-modal-close');
-
-    if (bmsDetailBtn && bmsModal) {
-      bmsDetailBtn.addEventListener('click', () => {
-        bmsModal.classList.add('show');
-      });
-    }
-
-    if (bmsModalClose && bmsModal) {
-      bmsModalClose.addEventListener('click', () => {
-        bmsModal.classList.remove('show');
-      });
-    }
-
-    // Close modal when clicking outside
-    if (bmsModal) {
-      bmsModal.addEventListener('click', (e) => {
-        if (e.target === bmsModal) {
-          bmsModal.classList.remove('show');
-        }
-      });
-    }
-
-    // BMS charge target setting
-    const bmsSetTargetBtn = document.getElementById('btn-bms-set-target');
-    if (bmsSetTargetBtn) {
-      bmsSetTargetBtn.addEventListener('click', () => {
-        const input = document.getElementById('bms-charge-target-input');
-        const val = parseInt(input.value, 10);
-        if (val >= 1 && val <= 100) {
-          RosManager._bmsTargetSoc = val;
-          App.toast(`Charge target set to ${val}%`, 'success');
-        } else {
-          App.toast('Enter a value between 1-100', 'error');
-        }
-      });
-    }
   },
 
   // Monitoring auto-refresh timer
@@ -2072,15 +2545,87 @@ const App = {
 
 // Initialize app when DOM is loaded
 document.addEventListener('DOMContentLoaded', () => {
+  // 번역이나 다른 기능 초기화 상태와 무관하게 로그인 조작부터 활성화한다.
+  try {
+    App.setupPasswordAuth();
+    App._initializationResults.authentication = true;
+  } catch (error) {
+    App._initializationResults.authentication = false;
+    console.error('[EasyLoop Init] authentication 초기화 실패:', error);
+  }
+  // 핵심 UI는 네트워크/번역 요청을 기다리지 않고 즉시 연결한다.
   App.init();
-  // Start monitoring refresh timer
-  App.startMonitoringRefresh();
 
-  // Initialize C2, C3, D1
-  ActionHistory.init();
-  ConnTimeline.init();
-  OpMode.init();
-  MissionScheduler.init();
+  // HTML 자체가 한국어 기본값이므로 번역 파일은 비동기로 보강한다.
+  if (typeof I18n !== 'undefined') {
+    I18n.init().catch(error => {
+      console.warn('한국어 번역 파일을 불러오지 못했습니다:', error);
+    });
+  }
+
+  // Start monitoring refresh timer
+  try {
+    App.startMonitoringRefresh();
+    App._initializationResults['monitoring-refresh'] = true;
+  } catch (error) {
+    App._initializationResults['monitoring-refresh'] = false;
+    console.error('[EasyLoop Init] monitoring-refresh 초기화 실패:', error);
+  }
+
+  // Initialize optional dashboard features
+  [
+    ['action-history', () => ActionHistory.init()],
+    ['operation-mode', () => OpMode.init()],
+    ['mission-scheduler', () => MissionScheduler.init()]
+  ].forEach(([name, initialize]) => {
+    try {
+      initialize();
+      App._initializationResults[name] = true;
+    } catch (error) {
+      App._initializationResults[name] = false;
+      console.error(`[EasyLoop Init] ${name} 초기화 실패:`, error);
+    }
+  });
+
+  // Header tools are initialized centrally so the menu never depends on the
+  // registration order of each module's DOMContentLoaded listener.
+  [
+    ['initial-setup', 'btn-init-setup', () => {
+      if (typeof InitSetup === 'undefined') throw new Error('InitSetup module unavailable');
+      InitSetup.init();
+    }],
+    ['error-code-db', 'btn-error-codes', () => {
+      if (typeof ErrorCodeDB === 'undefined') throw new Error('ErrorCodeDB module unavailable');
+      ErrorCodeDB.init();
+    }],
+    ['health-check', 'btn-health-check', () => {
+      if (typeof HealthCheck === 'undefined') throw new Error('HealthCheck module unavailable');
+      HealthCheck.init();
+    }],
+    ['diagnostic-tree', 'btn-diagnostic', () => {
+      if (typeof DiagnosticTree === 'undefined') throw new Error('DiagnosticTree module unavailable');
+      DiagnosticTree.init();
+    }],
+    ['incident-report', 'btn-incident-report', () => {
+      if (typeof IncidentReport === 'undefined') throw new Error('IncidentReport module unavailable');
+      IncidentReport.init();
+    }]
+  ].forEach(([name, buttonId, initialize]) => {
+    const button = document.getElementById(buttonId);
+    try {
+      initialize();
+      App._initializationResults[name] = true;
+      if (button) button.dataset.toolReady = 'true';
+    } catch (error) {
+      App._initializationResults[name] = false;
+      if (button) {
+        button.disabled = true;
+        button.dataset.toolReady = 'false';
+        button.title = '이 기능을 초기화하지 못했습니다.';
+      }
+      console.error(`[EasyLoop Init] ${name} 초기화 실패:`, error);
+    }
+  });
 
   // Event Log Panel
   App.eventLog = {
@@ -2156,6 +2701,12 @@ document.addEventListener('DOMContentLoaded', () => {
   App.alarmSystem = {
     STORAGE_KEY: 'alarmSettings',
     _lastTopicTime: { bms: Date.now(), workstate: Date.now(), pose: Date.now() },
+    // Topic health is kept per robot slot.  A single global timestamp made a
+    // passive robot (or a slot switch) look like the active robot had stopped
+    // publishing, which produced false "topic dropped" alarms.
+    _topicHealth: {},
+    _topicDropAlarmed: {},
+    _lastTopicResubscribeAt: {},
     _alarmActive: false,
 
     getSettings() {
@@ -2268,15 +2819,35 @@ document.addEventListener('DOMContentLoaded', () => {
       setInterval(() => this.check(), 2000);
     },
 
-    recordTopicActivity(topic) {
-      if (this._lastTopicTime[topic] !== undefined) {
-        this._lastTopicTime[topic] = Date.now();
+    recordTopicActivity(topic, slotIndex) {
+      if (slotIndex === undefined || slotIndex === null) slotIndex = App.activeSlotIndex;
+      if (slotIndex === undefined || slotIndex === null || slotIndex < 0) return;
+      if (!this._topicHealth[slotIndex]) {
+        this._topicHealth[slotIndex] = {};
+      }
+      this._topicHealth[slotIndex][topic] = {
+        lastAt: Date.now(),
+        seen: true
+      };
+      // Keep this field for backwards compatibility with diagnostics/tests.
+      if (slotIndex === App.activeSlotIndex && this._lastTopicTime[topic] !== undefined) {
+        this._lastTopicTime[topic] = this._topicHealth[slotIndex][topic].lastAt;
       }
     },
 
-    resetTopicTimes() {
+    resetTopicTimes(slotIndex = App.activeSlotIndex) {
       const now = Date.now();
       this._lastTopicTime = { bms: now, workstate: now, pose: now };
+      if (slotIndex !== undefined && slotIndex !== null && slotIndex >= 0) {
+        this._topicHealth[slotIndex] = {
+          bms: { lastAt: now, seen: false },
+          workstate: { lastAt: now, seen: false },
+          pose: { lastAt: now, seen: false }
+        };
+        Object.keys(this._topicDropAlarmed)
+          .filter(key => key.startsWith(`${slotIndex}:`))
+          .forEach(key => { delete this._topicDropAlarmed[key]; });
+      }
     },
 
     _playBeep() {
@@ -2290,7 +2861,7 @@ document.addEventListener('DOMContentLoaded', () => {
       } catch (e) {}
     },
 
-    _fireAlarm(msg, type) {
+    _fireAlarm(msg, _type) {
       App.toast(msg, 'error');
       if (App.eventLog) App.eventLog.add('error', msg, 'alarm');
       const s = this.getSettings();
@@ -2325,13 +2896,49 @@ document.addEventListener('DOMContentLoaded', () => {
       // Also skip grace period after initial connection (wait for first data to arrive)
       if (s.topicDropEn && !(typeof TestMode !== 'undefined' && (TestMode._starting || (slot.ip === '127.0.0.1' && !TestMode.enabled)))) {
         const now = Date.now();
-        const threshold = s.topicDropSec * 1000;
+        const configuredThreshold = s.topicDropSec * 1000;
+        // A remote/tunnel ROSBridge can return a topics ping later than the
+        // local default. Add a bounded RTT allowance without disabling drop
+        // detection when the connection is genuinely stalled.
+        const rtt = Number(typeof RosManager !== 'undefined' ? RosManager._latencyMs : 0);
+        const rttAllowance = Number.isFinite(rtt) && rtt > 150
+          ? Math.min(15000, Math.round(rtt * 4))
+          : 0;
+        const threshold = configuredThreshold + rttAllowance;
         const gracePeriod = threshold + 5000; // extra 5s after connection before checking drops
         if (slot.connectedAt && (now - slot.connectedAt) > gracePeriod) {
-          ['bms', 'workstate'].forEach(k => {
-            if (now - this._lastTopicTime[k] > threshold) {
+          const index = App.activeSlotIndex;
+          const health = this._topicHealth[index] || {};
+          const staleTopics = ['bms', 'workstate'].filter(k => {
+            const topicHealth = health[k];
+            const lastAt = topicHealth?.lastAt || this._lastTopicTime[k] || now;
+            return now - lastAt > threshold;
+          });
+          // A reconnect or a rapid active-robot switch can leave the socket
+          // open while monitoring subscriptions have already been removed.
+          // Restore only missing subscriptions; re-subscribing every stale
+          // topic can amplify a congested remote rosbridge connection.
+          const hasMonitoringSubscriptions = Boolean(
+            slot.dataSubscribed && slot.subscriptions &&
+            slot.subscriptions.bms && slot.subscriptions['work-state']
+          );
+          const lastResubscribe = this._lastTopicResubscribeAt[index] || 0;
+          if (!hasMonitoringSubscriptions && slot.ros && now - lastResubscribe > threshold) {
+            this._lastTopicResubscribeAt[index] = now;
+            if (typeof RosManager !== 'undefined') {
+              RosManager.subscribeSlotMonitoring(index);
+              RosManager.subscribeActiveSlotUI(index);
+            }
+          }
+          staleTopics.forEach(k => {
+            const alarmKey = `${index}:${k}`;
+            if (!this._topicDropAlarmed[alarmKey]) {
+              this._topicDropAlarmed[alarmKey] = true;
               this._fireAlarm(`Topic dropped: ${k} (${s.topicDropSec}s no response, ${slot.robotId})`);
             }
+          });
+          ['bms', 'workstate'].filter(k => !staleTopics.includes(k)).forEach(k => {
+            this._topicDropAlarmed[`${index}:${k}`] = false;
           });
         }
       }
@@ -2752,7 +3359,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Space = emergency stop
     if (key === ' ') {
       e.preventDefault();
-      const stopBtn = document.getElementById('btn-jog-stop');
+      const stopBtn = document.getElementById('jog-stop');
       if (stopBtn) stopBtn.click();
       App.toast('Emergency stop', 'error');
       return;
@@ -2762,7 +3369,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (key === 'Enter') {
       const actionTab = document.getElementById('tab-action');
       if (actionTab && !actionTab.classList.contains('hidden') && actionTab.classList.contains('active')) {
-        const sendBtn = document.getElementById('btn-action-send');
+        const sendBtn = document.getElementById('btn-send-action');
         if (sendBtn) sendBtn.click();
       }
       return;
@@ -2791,11 +3398,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // ============ Initialize New UX Components ============
 
-  // I18n - initialize with saved preference or default to English
-  if (typeof I18n !== 'undefined') {
-    I18n.init();
-  }
-
   // Floating Widget - BMS/WorkState
   const floatingWidget = document.getElementById('floating-widget');
   if (floatingWidget) {
@@ -2822,9 +3424,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Update floating widget data periodically
     setInterval(() => {
-      const bmsEl = document.getElementById('fw-bms-value');
-      const wsEl = document.getElementById('fw-work-state');
-      const srcBms = document.getElementById('bms-soc');
+      const bmsEl = document.getElementById('fw-bms-soc');
+      const wsEl = document.getElementById('fw-work-state-text');
+      const srcBms = document.getElementById('bms-gauge-text');
       const srcWs = document.getElementById('work-state-value');
       if (bmsEl && srcBms) bmsEl.textContent = srcBms.textContent;
       if (wsEl && srcWs) wsEl.textContent = srcWs.textContent;
@@ -2860,23 +3462,6 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // "More (···)" dropdown toggle
-  const btnMore = document.getElementById('btn-hdr-more');
-  const moreMenu = document.getElementById('hdr-more-menu');
-  if (btnMore && moreMenu) {
-    btnMore.addEventListener('click', (e) => {
-      e.stopPropagation();
-      moreMenu.classList.toggle('open');
-    });
-    document.addEventListener('click', (e) => {
-      if (!moreMenu.contains(e.target) && e.target !== btnMore) {
-        moreMenu.classList.remove('open');
-      }
-    });
-    moreMenu.querySelectorAll('.hdr-menu-item').forEach(item => {
-      item.addEventListener('click', () => moreMenu.classList.remove('open'));
-    });
-  }
 });
 
 // ============ C2: Action History + Re-execute ============
@@ -2974,64 +3559,6 @@ const ActionHistory = {
   }
 };
 
-// ============ C3: Connection Timeline ============
-const ConnTimeline = {
-  STORAGE_KEY: 'connTimeline',
-  MAX: 100,
-
-  init() {
-    this.render();
-    const clearBtn = document.getElementById('btn-clear-conn-timeline');
-    if (clearBtn) clearBtn.addEventListener('click', () => { this.clear(); });
-  },
-
-  getAll() {
-    try { return JSON.parse(localStorage.getItem(this.STORAGE_KEY)) || []; }
-    catch (e) { return []; }
-  },
-
-  saveAll(list) {
-    _safeSetItem(this.STORAGE_KEY, JSON.stringify(list));
-  },
-
-  record(robotId, ip, event, detail) {
-    const list = this.getAll();
-    list.unshift({ robotId, ip, event, detail, at: Date.now() });
-    if (list.length > this.MAX) list.length = this.MAX;
-    this.saveAll(list);
-    this.render();
-  },
-
-  clear() {
-    this.saveAll([]);
-    this.render();
-  },
-
-  render() {
-    const listEl = document.getElementById('conn-timeline-list');
-    if (!listEl) return;
-    const list = this.getAll();
-
-    if (list.length === 0) {
-      listEl.innerHTML = '<span class="conn-timeline-empty">No events</span>';
-      return;
-    }
-
-    listEl.innerHTML = list.slice(0, 30).map(entry => {
-      const time = new Date(entry.at).toLocaleTimeString();
-      const cls = entry.event === 'connected' ? 'conn-evt-ok' :
-                  entry.event === 'disconnected' ? 'conn-evt-err' :
-                  entry.event === 'error' ? 'conn-evt-err' : 'conn-evt-info';
-      return `<div class="conn-timeline-item ${cls}">
-        <span class="conn-timeline-time">${time}</span>
-        <span class="conn-timeline-robot">${entry.robotId || '--'}</span>
-        <span class="conn-timeline-event">${entry.event}</span>
-        <span class="conn-timeline-detail">${entry.detail || ''}</span>
-      </div>`;
-    }).join('');
-  }
-};
-
 // ============ Operation Mode (Auto/Manual) ============
 const OpMode = {
   MODE_KEY: 'opMode',
@@ -3039,7 +3566,10 @@ const OpMode = {
   _listeners: [],
 
   init() {
-    this._mode = localStorage.getItem(this.MODE_KEY) || 'manual';
+    // AUTO is a session-only safety state. Never restore it after a page
+    // refresh or a new login, even if an older build persisted the flag.
+    this._mode = 'manual';
+    try { localStorage.removeItem(this.MODE_KEY); } catch (e) { /* ignore */ }
     this._updateUI();
 
     const btn = document.getElementById('btn-op-mode');
@@ -3077,6 +3607,16 @@ const OpMode = {
     }
   },
 
+  forceManual(reason = '활성 로봇이 변경되었습니다.') {
+    if (this._mode === 'manual') return false;
+    this._mode = 'manual';
+    try { localStorage.removeItem(this.MODE_KEY); } catch (e) { /* ignore */ }
+    this._updateUI();
+    this._notify();
+    App.toast(`MANUAL 전환: ${reason}`, 'warning');
+    return true;
+  },
+
   onChange(fn) {
     this._listeners.push(fn);
   },
@@ -3090,6 +3630,11 @@ const OpMode = {
     if (btn) {
       btn.textContent = this._mode.toUpperCase();
       btn.className = 'btn btn-small btn-op-mode ' + this._mode;
+      const description = this._mode === 'auto'
+        ? 'AUTO: Scheduler의 예약 Task를 자동 실행합니다. 클릭하면 MANUAL로 전환합니다.'
+        : 'MANUAL: Task를 직접 실행합니다. 클릭하면 비밀번호 확인 후 AUTO로 전환합니다.';
+      btn.title = description;
+      btn.setAttribute('aria-label', `운영 모드 ${this._mode.toUpperCase()}: ${description}`);
     }
     const badge = document.getElementById('scheduler-mode-badge');
     if (badge) {
@@ -3103,8 +3648,10 @@ const OpMode = {
 const MissionScheduler = {
   STORAGE_KEY: 'missionScheduler',
   LOG_KEY: 'missionSchedulerLog',
+  BATTERY_LATCH_VERSION: 2,
   _timers: {},
   _batteryCheckTimer: null,
+  _editingMissionId: null,
 
   init() {
     this.render();
@@ -3116,9 +3663,25 @@ const MissionScheduler = {
     const clearBtn = document.getElementById('btn-scheduler-clear');
     const clearLogBtn = document.getElementById('btn-scheduler-clear-log');
 
-    if (addBtn) addBtn.addEventListener('click', () => this.addMission());
+    if (addBtn) addBtn.addEventListener('click', () => this.openAddMissionModal());
     if (clearBtn) clearBtn.addEventListener('click', () => { this.clearAll(); });
     if (clearLogBtn) clearLogBtn.addEventListener('click', () => { this.clearLog(); });
+
+    document.getElementById('btn-scheduler-cancel')?.addEventListener('click', () => this.closeAddMissionModal());
+    document.getElementById('btn-scheduler-save')?.addEventListener('click', () => this.saveMissionFromModal());
+    document.getElementById('scheduler-execution-mode')?.addEventListener('change', () => this.updateAddMissionForm());
+    document.getElementById('scheduler-queue-name')?.addEventListener('change', () => this.updateSelectedTaskHelp());
+    document.getElementById('scheduler-battery-condition')?.addEventListener('change', () => this.updateAddMissionForm());
+    document.getElementById('scheduler-add-modal')?.addEventListener('click', event => {
+      if (event.target.id === 'scheduler-add-modal') this.closeAddMissionModal();
+    });
+    document.addEventListener('keydown', event => {
+      const modal = document.getElementById('scheduler-add-modal');
+      if (event.key === 'Escape' && modal?.classList.contains('show')) {
+        event.preventDefault();
+        this.closeAddMissionModal();
+      }
+    });
 
     // Re-render when mode changes
     OpMode.onChange(() => {
@@ -3157,57 +3720,157 @@ const MissionScheduler = {
     this.renderLog();
   },
 
-  addMission() {
-    const name = prompt('Mission name:', `Mission_${this.getAll().length + 1}`);
-    if (!name) return;
+  openAddMissionModal(missionId = null) {
+    const modal = document.getElementById('scheduler-add-modal');
+    const queueSelect = document.getElementById('scheduler-queue-name');
+    const empty = document.getElementById('scheduler-queue-empty');
+    if (!modal || !queueSelect) return;
+    const editing = missionId === null
+      ? null
+      : this.getAll().find(mission => mission.id === missionId);
+    this._editingMissionId = editing?.id ?? null;
 
-    const queueName = prompt('Queue name (saved Action Queue):', 'default');
-    if (!queueName) return;
+    const saved = typeof ActionSender !== 'undefined' && ActionSender.getSavedQueues
+      ? ActionSender.getSavedQueues()
+      : {};
+    const names = Object.keys(saved)
+      .filter(name => saved[name]?.queue?.length)
+      .sort((a, b) => a.localeCompare(b));
+    queueSelect.innerHTML = '<option value="">저장된 Task를 선택하세요</option>';
+    names.forEach(name => {
+      const option = document.createElement('option');
+      option.value = name;
+      option.textContent = `${name} (${saved[name].queue.length} Actions)`;
+      option.title = saved[name].queue
+        .map(action => action.name || action.actionType || 'Action')
+        .join(' → ');
+      queueSelect.appendChild(option);
+    });
+    if (empty) empty.hidden = names.length > 0;
+    this.updateSelectedTaskHelp();
 
-    const mode = prompt('Execution mode (once / interval / cron / battery):', 'once');
-    if (!mode) return;
-
-    let intervalSec = 0;
-    let cronTime = '';
-    let batteryThreshold = 0;
-    let batteryCondition = 'below';
-    if (mode === 'interval') {
-      const sec = prompt('Repeat interval (seconds):', '60');
-      intervalSec = parseInt(sec) || 60;
-    } else if (mode === 'cron') {
-      cronTime = prompt('Execution time (HH:MM):', '09:00') || '09:00';
-    } else if (mode === 'battery') {
-      const thresh = prompt('Battery threshold (%):', '20');
-      batteryThreshold = parseInt(thresh) || 20;
-      batteryCondition = 'below';
+    const nameInput = document.getElementById('scheduler-mission-name');
+    if (nameInput) nameInput.value = editing?.name || `Mission_${this.getAll().length + 1}`;
+    const mode = document.getElementById('scheduler-execution-mode');
+    if (mode) mode.value = editing?.mode || 'battery';
+    const condition = document.getElementById('scheduler-battery-condition');
+    if (condition) condition.value = editing?.batteryCondition === 'above' ? 'above' : 'below';
+    const threshold = document.getElementById('scheduler-battery-threshold');
+    if (threshold) threshold.value = String(editing?.batteryThreshold ?? 20);
+    const interval = document.getElementById('scheduler-interval-sec');
+    if (interval) interval.value = String(editing?.intervalSec || 300);
+    const cron = document.getElementById('scheduler-cron-time');
+    if (cron) cron.value = editing?.cronTime || '09:00';
+    if (editing) {
+      const option = Array.from(queueSelect.options).find(item => item.value === editing.queueName);
+      if (option) queueSelect.value = editing.queueName;
     }
+    const title = document.getElementById('scheduler-add-title');
+    if (title) title.textContent = editing ? 'Scheduler 미션 수정' : 'Scheduler 미션 추가';
+    const saveButton = document.getElementById('btn-scheduler-save');
+    if (saveButton) saveButton.textContent = editing ? '변경 저장' : '미션 저장';
+    this.updateAddMissionForm();
+    modal.classList.add('show');
+    nameInput?.focus();
+  },
 
-    // Optional battery trigger for interval/cron modes too
-    if (mode === 'interval' || mode === 'cron') {
-      const addBattery = prompt('Add battery condition? (y/n):', 'n');
-      if (addBattery && addBattery.toLowerCase() === 'y') {
-        const thresh = prompt('Battery threshold (%) - execute when below:', '20');
-        batteryThreshold = parseInt(thresh) || 0;
-        batteryCondition = 'below';
-      }
+  closeAddMissionModal() {
+    document.getElementById('scheduler-add-modal')?.classList.remove('show');
+    this._editingMissionId = null;
+  },
+
+  updateSelectedTaskHelp() {
+    const select = document.getElementById('scheduler-queue-name');
+    const help = document.getElementById('scheduler-task-help');
+    if (!select || !help) return;
+    const saved = typeof ActionSender !== 'undefined' && ActionSender.getSavedQueues
+      ? ActionSender.getSavedQueues()
+      : {};
+    const entry = saved[select.value];
+    if (!entry?.queue?.length) {
+      help.textContent = '선택한 Task에 저장된 Action 순서대로 실행됩니다.';
+      return;
+    }
+    const names = entry.queue.map(action => action.name || action.actionType || 'Action');
+    help.textContent = `실행 순서: ${names.join(' → ')}${entry.loopFlag !== undefined ? ` · 반복 ${entry.loopFlag === 0 ? '무한' : `${entry.loopFlag}회`}` : ''}`;
+  },
+
+  updateAddMissionForm() {
+    const mode = document.getElementById('scheduler-execution-mode')?.value;
+    const batteryRow = document.getElementById('scheduler-battery-row');
+    const intervalRow = document.getElementById('scheduler-interval-row');
+    const cronRow = document.getElementById('scheduler-cron-row');
+    if (batteryRow) batteryRow.hidden = mode === 'once' || mode === 'cron' || mode === 'interval';
+    if (intervalRow) intervalRow.hidden = mode !== 'interval';
+    if (cronRow) cronRow.hidden = mode !== 'cron';
+    const help = document.getElementById('scheduler-condition-help');
+    if (help) {
+      const condition = document.getElementById('scheduler-battery-condition')?.value === 'above' ? '이상' : '이하';
+      help.textContent = mode === 'battery'
+        ? `배터리가 임계값 ${condition}가 되면 저장 Task를 실행합니다.`
+        : mode === 'interval'
+          ? '설정한 간격마다 저장 Task를 반복 실행합니다.'
+          : mode === 'cron'
+            ? '매일 선택한 시각에 저장 Task를 한 번 실행합니다.'
+            : '저장 후 미션의 실행 버튼으로 한 번 실행할 수 있습니다.';
+    }
+  },
+
+  saveMissionFromModal() {
+    const name = document.getElementById('scheduler-mission-name')?.value.trim();
+    const queueName = document.getElementById('scheduler-queue-name')?.value;
+    const mode = document.getElementById('scheduler-execution-mode')?.value;
+    const intervalSec = Math.max(1, parseInt(document.getElementById('scheduler-interval-sec')?.value, 10) || 300);
+    const cronTime = document.getElementById('scheduler-cron-time')?.value || '09:00';
+    const batteryRaw = parseInt(document.getElementById('scheduler-battery-threshold')?.value, 10);
+    const batteryThreshold = Number.isFinite(batteryRaw) ? batteryRaw : 0;
+    const batteryCondition = document.getElementById('scheduler-battery-condition')?.value === 'above'
+      ? 'above'
+      : 'below';
+
+    if (!name) {
+      App.toast('미션 이름을 입력하세요.', 'error');
+      return false;
+    }
+    if (!queueName) {
+      App.toast('실행할 저장 Task를 선택하세요.', 'error');
+      return false;
+    }
+    if (mode === 'battery' && (batteryThreshold < 0 || batteryThreshold > 100)) {
+      App.toast('배터리 임계값을 0~100%로 입력하세요.', 'error');
+      return false;
     }
 
     const missions = this.getAll();
-    missions.push({
-      id: Date.now(),
+    const editingIndex = this._editingMissionId === null
+      ? -1
+      : missions.findIndex(mission => mission.id === this._editingMissionId);
+    const previous = editingIndex >= 0 ? missions[editingIndex] : null;
+    const mission = {
+      ...(previous || {}),
+      id: previous?.id || Date.now(),
       name,
       queueName,
       mode,
-      intervalSec,
-      cronTime,
-      batteryThreshold,
+      intervalSec: mode === 'interval' ? intervalSec : 0,
+      cronTime: mode === 'cron' ? cronTime : '',
+      batteryThreshold: mode === 'battery' ? batteryThreshold : 0,
       batteryCondition,
-      enabled: true,
-      lastRun: null
-    });
+      batteryArmed: true,
+      batteryLatchVersion: this.BATTERY_LATCH_VERSION,
+      batteryWaitLogged: false,
+      enabled: previous?.enabled ?? true,
+      lastRun: previous?.lastRun ?? null
+    };
+    if (editingIndex >= 0) missions[editingIndex] = mission;
+    else missions.push(mission);
     this.saveAll(missions);
+    if (previous) this._stopTimer(previous.id);
+    this.closeAddMissionModal();
     this.render();
-    App.toast(`Mission added: ${name}`, 'success');
+    if (OpMode.isAuto) this._restoreTimers();
+    App.toast(previous ? `Mission "${name}"을 수정했습니다.` : `Mission added: ${name}`, 'success');
+    return true;
   },
 
   removeMission(id) {
@@ -3215,6 +3878,10 @@ const MissionScheduler = {
     const missions = this.getAll().filter(m => m.id !== id);
     this.saveAll(missions);
     this.render();
+  },
+
+  editMission(id) {
+    this.openAddMissionModal(id);
   },
 
   toggleMission(id) {
@@ -3233,16 +3900,49 @@ const MissionScheduler = {
 
   _getCurrentBatterySoc() {
     const slot = App.robotSlots && App.robotSlots[App.activeSlotIndex];
-    if (slot && slot.bms && slot.bms.soc > 0) return slot.bms.soc;
+    if (slot && slot.bms && Number.isFinite(Number(slot.bms.soc)) && Number(slot.bms.soc) >= 0) {
+      return Number(slot.bms.soc);
+    }
     return -1;
   },
 
   _checkBatteryCondition(m) {
-    if (!m.batteryThreshold || m.batteryThreshold <= 0) return true;
+    if (m.mode !== 'battery' && (!m.batteryThreshold || m.batteryThreshold <= 0)) return true;
     const soc = this._getCurrentBatterySoc();
     if (soc < 0) return true; // no data, skip check
-    if (m.batteryCondition === 'below') return soc <= m.batteryThreshold;
+    if (m.batteryCondition === 'above' || m.batteryCondition === 'gte') return soc >= m.batteryThreshold;
+    if (m.batteryCondition === 'below' || m.batteryCondition === 'lte' || !m.batteryCondition) {
+      return soc <= m.batteryThreshold;
+    }
     return true;
+  },
+
+  _batteryConditionMatches(m, soc) {
+    if (m.batteryCondition === 'above' || m.batteryCondition === 'gte') {
+      return soc >= Number(m.batteryThreshold);
+    }
+    return soc <= Number(m.batteryThreshold);
+  },
+
+  _isActiveRobotCharging() {
+    const slot = App.robotSlots && App.robotSlots[App.activeSlotIndex];
+    return slot?.bms?.charging === true;
+  },
+
+  _isDockingOutEntry(entry) {
+    const first = entry?.queue?.[0];
+    if (!first) return false;
+    const rawType = first.actionType ?? first.action_type;
+    const typeText = String(rawType ?? '').toLowerCase();
+    return typeText === '0x10'
+      || Number(rawType) === 16
+      || /docking\s*out|도킹\s*아웃/i.test(String(first.name || first.action_id || ''));
+  },
+
+  _isDockingOutMission(mission) {
+    if (typeof ActionSender === 'undefined' || !ActionSender.getSavedQueues) return false;
+    const saved = ActionSender.getSavedQueues();
+    return this._isDockingOutEntry(saved[mission?.queueName]);
   },
 
   executeMission(id, isManualRun) {
@@ -3259,7 +3959,8 @@ const MissionScheduler = {
     // Battery condition check
     if (!this._checkBatteryCondition(m)) {
       const soc = this._getCurrentBatterySoc();
-      this.addLog(`[${m.name}] Skipped - Battery ${soc.toFixed(0)}% (condition: below ${m.batteryThreshold}%)`);
+      const operator = m.batteryCondition === 'above' || m.batteryCondition === 'gte' ? '>=' : '<=';
+      this.addLog(`[${m.name}] Skipped - Battery ${soc.toFixed(0)}% (condition: ${operator} ${m.batteryThreshold}%)`);
       return;
     }
 
@@ -3276,15 +3977,35 @@ const MissionScheduler = {
       return;
     }
 
-    // Load queue and send
-    ActionSender.actionQueue = JSON.parse(JSON.stringify(entry.queue));
-    ActionSender.renderQueue();
-    ActionSender.sendAction();
+    // DockingOut is the one safe exception: it releases the robot from the
+    // charger. Other movement/work Tasks remain blocked while charging.
+    const allowDockingOut = this._isDockingOutEntry(entry);
+    if (this._isActiveRobotCharging() && !allowDockingOut) {
+      this.addLog(`[${m.name}] Blocked - 로봇이 충전 중이라 Task를 전송하지 않았습니다.`);
+      App.toast('충전 중에는 Scheduler Task를 실행하지 않습니다.', 'warning');
+      return;
+    }
 
-    m.lastRun = Date.now();
-    this.saveAll(missions);
-    this.addLog(`[${m.name}] Executed with queue "${m.queueName}" (${entry.queue.length} actions)`);
-    this.render();
+    // Use the saved-task sender so target slot, loop count and mission IDs are
+    // preserved. The previous generic sendAction path could report success in
+    // the scheduler before the actual saved queue request failed.
+    const slotIndex = App.activeSlotIndex;
+    Promise.resolve(ActionSender.sendSavedQueueToSlot(
+      m.queueName,
+      slotIndex,
+      entry.loopFlag ?? 1,
+      m.queueName
+    )).then(sent => {
+      m.lastRun = Date.now();
+      this.saveAll(missions);
+      this.addLog(`[${m.name}] Executed with queue "${m.queueName}" (${sent.actionCount || entry.queue.length} actions)`);
+      this.render();
+    }).catch(error => {
+      const reason = error?.message || String(error);
+      this.addLog(`[${m.name}] Failed - ${reason}`);
+      App.toast(`Scheduler 실행 실패: ${reason}`, 'error');
+      this.render();
+    });
   },
 
   _startTimer(m) {
@@ -3338,12 +4059,52 @@ const MissionScheduler = {
       missions.forEach(m => {
         if (!m.enabled) return;
         if (m.mode !== 'battery') return;
-        if (!m.batteryThreshold || m.batteryThreshold <= 0) return;
-        // Only trigger once per threshold crossing (cooldown 5min)
-        if (m.lastRun && Date.now() - m.lastRun < 300000) return;
-        if (soc <= m.batteryThreshold) {
-          this.executeMission(m.id, false);
+        if (m.batteryThreshold === undefined || m.batteryThreshold === null
+            || m.batteryThreshold < 0 || m.batteryThreshold > 100) return;
+        if (m.batteryLatchVersion !== this.BATTERY_LATCH_VERSION) {
+          m.batteryArmed = true;
+          m.batteryLatchVersion = this.BATTERY_LATCH_VERSION;
+          this.saveAll(missions);
         }
+        const matches = this._batteryConditionMatches(m, soc);
+        // A battery mission is edge-triggered: it is re-armed only after the
+        // SOC leaves the configured condition. Missing legacy state defaults
+        // to armed so existing missions still work on first evaluation.
+        if (!matches) {
+          if (m.batteryArmed === false) {
+            m.batteryArmed = true;
+            this.saveAll(missions);
+          }
+          if (m.batteryWaitLogged) {
+            m.batteryWaitLogged = false;
+            this.saveAll(missions);
+            this.render();
+          }
+          return;
+        }
+        if (m.batteryArmed === false) return;
+        // Never send a movement/docking task while the robot reports active
+        // charging. Keep it armed so it can be evaluated after charge ends.
+        const dockingOutAllowed = this._isDockingOutMission(m);
+        if (this._isActiveRobotCharging() && !dockingOutAllowed) {
+          if (!m.batteryWaitLogged) {
+            m.batteryWaitLogged = true;
+            this.saveAll(missions);
+            this.addLog(`[${m.name}] Waiting - 충전 중이라 조건 충족 Task 전송을 대기합니다.`);
+            this.render();
+          }
+          return;
+        }
+        if (m.batteryWaitLogged) {
+          m.batteryWaitLogged = false;
+          this.saveAll(missions);
+        }
+        m.batteryArmed = false;
+        this.saveAll(missions);
+        // The edge-trigger latch already prevents repeats while the condition
+        // remains true. Do not add a time cooldown here: after the opposite
+        // threshold mission runs, a new crossing must be handled immediately.
+        this.executeMission(m.id, false);
       });
     }, 10000);
   },
@@ -3380,14 +4141,18 @@ const MissionScheduler = {
       const lastStr = m.lastRun ? new Date(m.lastRun).toLocaleTimeString() : '--';
       const modeStr = m.mode === 'interval' ? `${m.intervalSec}s repeat` :
                       m.mode === 'cron' ? `Daily ${m.cronTime}` :
-                      m.mode === 'battery' ? `Battery ≤${m.batteryThreshold}%` : 'Once';
+                      m.mode === 'battery'
+                        ? `Battery ${(m.batteryCondition === 'above' || m.batteryCondition === 'gte') ? '≥' : '≤'}${m.batteryThreshold}%`
+                        : 'Once';
       const statusCls = m.enabled ? 'sched-enabled' : 'sched-disabled';
       const blockedCls = (!OpMode.isAuto && m.mode !== 'once') ? ' sched-blocked' : '';
 
       // Battery trigger info
       let triggerHtml = '';
       if (m.batteryThreshold && m.batteryThreshold > 0) {
-        triggerHtml = `<div class="sched-trigger"><span class="trigger-tag">BAT &le; ${m.batteryThreshold}%</span></div>`;
+        const operator = m.batteryCondition === 'above' || m.batteryCondition === 'gte' ? '&ge;' : '&le;';
+        const waitText = m.batteryWaitLogged ? ' · 충전 중 대기' : '';
+        triggerHtml = `<div class="sched-trigger"><span class="trigger-tag">BAT ${operator} ${m.batteryThreshold}%${waitText}</span></div>`;
       }
 
       return `<div class="scheduler-item ${statusCls}${blockedCls}">
@@ -3398,6 +4163,7 @@ const MissionScheduler = {
         </div>
         <div class="sched-actions">
           <button class="btn btn-small" onclick="MissionScheduler.executeMission(${m.id}, true)" title="Manual run">Run</button>
+          <button class="btn btn-small" onclick="MissionScheduler.editMission(${m.id})" title="미션 수정">수정</button>
           <button class="btn btn-small" onclick="MissionScheduler.toggleMission(${m.id})">${m.enabled ? 'Disable' : 'Enable'}</button>
           <button class="btn btn-small btn-danger" onclick="MissionScheduler.removeMission(${m.id})">Del</button>
         </div>

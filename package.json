@@ -6,9 +6,9 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "build:win": "pkg launcher.js --targets node18-win-x64 --output dist/EasyLoop.exe --compress GZip",
-    "build:linux": "pkg launcher.js --targets node18-linux-x64 --output dist/easyloop --compress GZip",
-    "build:all": "pkg launcher.js --targets node18-win-x64,node18-linux-x64 --output dist/easyloop --compress GZip",
+    "build:win": "pkg --config package.json launcher.js --targets node18-win-x64 --output dist/EasyLoop.exe --compress GZip",
+    "build:linux": "pkg --config package.json launcher.js --targets node18-linux-x64 --output dist/easyloop --compress GZip",
+    "build:all": "pkg --config package.json launcher.js --targets node18-win-x64,node18-linux-x64 --output dist/easyloop --compress GZip",
     "lint": "eslint .",
     "test": "jest"
   },
@@ -21,7 +21,8 @@
   },
   "devDependencies": {
     "eslint": "^8.57.0",
-    "jest": "^29.7.0"
+    "jest": "^29.7.0",
+    "pkg": "5.8.1"
   },
   "author": "",
   "license": "MIT",

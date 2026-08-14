@@ -21,7 +21,7 @@ const RosInfo = {
     const filtered = query ? items.filter(item => item.toLowerCase().includes(query)) : items;
 
     select.innerHTML = '';
-    filtered.forEach((item, i) => {
+    filtered.forEach((item) => {
       const option = document.createElement('option');
       option.value = item;
       option.textContent = item;

@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-function loadJogControl(savedConfig = null) {
+function loadJogControl(savedConfig = null, compatibilityProfile = null) {
   const source = fs.readFileSync(
     path.join(__dirname, '..', 'public', 'js', 'jog-control.js'),
     'utf8'
@@ -14,7 +14,8 @@ function loadJogControl(savedConfig = null) {
   const liftStatus = { className: '', textContent: '' };
   const makeButton = () => ({
     disabled: false,
-    classList: { add: jest.fn(), remove: jest.fn() }
+    classList: { add: jest.fn(), remove: jest.fn() },
+    setAttribute: jest.fn()
   });
   const liftUpButton = makeButton();
   const liftDownButton = makeButton();
@@ -28,10 +29,48 @@ function loadJogControl(savedConfig = null) {
     })
   };
   const sendSavedQueueToSlot = jest.fn().mockResolvedValue({ result: { success: true } });
+  const published = [];
+  const topics = [];
+  const serviceCalls = [];
+  const documentListeners = {};
+  class Topic {
+    constructor(options) {
+      this.options = options;
+      topics.push(this);
+    }
+
+    publish(message) {
+      published.push({ topic: this.options.name, message });
+    }
+  }
+  class Message {
+    constructor(values) {
+      Object.assign(this, values);
+    }
+  }
+  class ServiceRequest {
+    constructor(values) {
+      Object.assign(this, values);
+    }
+  }
+  class Service {
+    constructor(options) {
+      this.options = options;
+    }
+
+    callService(request, success) {
+      serviceCalls.push({ options: this.options, request });
+      success({ success: true, err_code: 0 });
+    }
+  }
   const context = {
     App: {
       activeSlotIndex: 0,
-      robotSlots: [{ robotId: 'R_051', connected: true, ros: {} }],
+      robotSlots: [{
+        robotId: 'R_051', connected: true, ros: {},
+        robotModel: compatibilityProfile ? 'stl1500w' : null,
+        compatibilityProfile
+      }],
       toast: jest.fn()
     },
     ActionSender: {
@@ -41,19 +80,27 @@ function loadJogControl(savedConfig = null) {
         '기본 - 리프트 다운': { queue: [{}] }
       })
     },
-    RosManager: {},
-    ROSLIB: {},
+    RosManager: {
+      getRos: jest.fn(() => context.App.robotSlots[0].ros),
+      getRobotId: jest.fn(() => context.App.robotSlots[0].robotId)
+    },
+    ROSLIB: { Topic, Message, Service, ServiceRequest },
     localStorage: {
       getItem: jest.fn(key => storage.get(key) || null),
       setItem: jest.fn((key, value) => storage.set(key, String(value)))
     },
     document: {
-      addEventListener: jest.fn(),
+      activeElement: null,
+      hidden: false,
+      addEventListener: jest.fn((name, callback) => {
+        documentListeners[name] = callback;
+      }),
       getElementById: jest.fn(id => {
         if (id === 'jog-quick-task-status') return status;
         if (id === 'jog-manual-lift-status') return liftStatus;
         if (id === 'jog-lift-up') return liftUpButton;
         if (id === 'jog-lift-down') return liftDownButton;
+        if (id === 'jog-panel') return { style: { display: 'flex' } };
         return null;
       }),
       querySelector: jest.fn(() => row)
@@ -64,6 +111,13 @@ function loadJogControl(savedConfig = null) {
     setInterval,
     clearInterval
   };
+  if (compatibilityProfile) {
+    context.RobotCompatibility = {
+      get: jest.fn(() => compatibilityProfile),
+      discover: jest.fn().mockResolvedValue(compatibilityProfile),
+      isStlUlsanModel: jest.fn(model => ['stl1000w', 'stl1500w'].includes(String(model).toLowerCase()))
+    };
+  }
   vm.createContext(context);
   vm.runInContext(`${source}\nglobalThis.__JogControl = JogControl;`, context);
   return {
@@ -74,7 +128,11 @@ function loadJogControl(savedConfig = null) {
     button: { disabled: false },
     liftStatus,
     liftUpButton,
-    liftDownButton
+    liftDownButton,
+    published,
+    topics,
+    serviceCalls,
+    documentListeners
   };
 }
 
@@ -107,25 +165,136 @@ describe('Jog Quick Task', () => {
     expect(button.disabled).toBe(false);
   });
 
-  test('manual lift up uses the shared built-in lift task on the active robot', async () => {
+  test('manual lift publishes UP while held and STOP when released', () => {
     const {
       manager,
       sendSavedQueueToSlot,
       liftStatus,
-      liftUpButton
+      liftUpButton,
+      published,
+      topics
     } = loadJogControl();
     manager._stopVel = jest.fn();
 
-    await manager._runManualLift('up', liftUpButton);
+    manager._startManualLift('up', liftUpButton);
 
     expect(manager._stopVel).toHaveBeenCalled();
-    expect(sendSavedQueueToSlot).toHaveBeenCalledWith(
-      '기본 - 리프트 업',
-      0,
-      1,
-      'Manual_LiftUp'
-    );
+    expect(topics[0].options).toMatchObject({
+      name: '/R_051/Lift/manual_cmd',
+      messageType: 'std_msgs/Int8'
+    });
+    expect(published[0]).toMatchObject({
+      topic: '/R_051/Lift/manual_cmd',
+      message: { data: 1 }
+    });
+    expect(liftStatus.className).toContain('running');
+    expect(sendSavedQueueToSlot).not.toHaveBeenCalled();
+
+    manager._stopManualLift();
+
+    expect(published.at(-1).message.data).toBe(0);
     expect(liftStatus.className).toContain('success');
-    expect(liftUpButton.disabled).toBe(false);
+  });
+
+  test('STL1500W service lift sends UP once and STOP on release', () => {
+    const compatibilityProfile = {
+      discovered: true,
+      lift: {
+        interface: 'service',
+        service: '/R_051/Lift/cmd',
+        serviceType: 'syscon_msgs/lift_cmd',
+        cancelService: '/R_051/Lift/cancel',
+        cancelType: 'syscon_msgs/string_srv',
+        cancelArgs: { data: '' },
+        commands: { stop: 0, up: 1, down: 2 }
+      }
+    };
+    const { manager, serviceCalls, liftUpButton, published } = loadJogControl(
+      null,
+      compatibilityProfile
+    );
+    manager._stopVel = jest.fn();
+
+    expect(manager._getSelectedChassisModel().id).toBe('stl_ulsan');
+    manager._startManualLift('up', liftUpButton);
+
+    expect(serviceCalls[0]).toMatchObject({
+      options: {
+        name: '/R_051/Lift/cmd',
+        serviceType: 'syscon_msgs/lift_cmd'
+      },
+      request: { mode: 1, height: 0 }
+    });
+    expect(published).toHaveLength(0);
+
+    manager._stopManualLift();
+    expect(serviceCalls.at(-1)).toMatchObject({
+      options: {
+        name: '/R_051/Lift/cancel',
+        serviceType: 'syscon_msgs/string_srv'
+      },
+      request: { data: '' }
+    });
+  });
+
+  test('Z is lift up and C is lift down only until keyup', () => {
+    const { manager, documentListeners, published } = loadJogControl();
+    manager._stopVel = jest.fn();
+    manager._setupKeyboard();
+
+    const zDown = { key: 'z', repeat: false, preventDefault: jest.fn() };
+    documentListeners.keydown(zDown);
+    expect(zDown.preventDefault).toHaveBeenCalled();
+    expect(published.at(-1).message.data).toBe(1);
+
+    documentListeners.keyup({ key: 'z', preventDefault: jest.fn() });
+    expect(published.at(-1).message.data).toBe(0);
+
+    documentListeners.keydown({ key: 'c', repeat: false, preventDefault: jest.fn() });
+    expect(published.at(-1).message.data).toBe(-1);
+
+    documentListeners.keyup({ key: 'c', preventDefault: jest.fn() });
+    expect(published.at(-1).message.data).toBe(0);
+  });
+
+  test('O turns charging on with the shared confirmation path and F turns it off', () => {
+    const { manager, documentListeners } = loadJogControl();
+    manager._setChargeRelay = jest.fn();
+    manager._setupKeyboard();
+    const onEvent = {
+      key: 'o',
+      repeat: false,
+      preventDefault: jest.fn(),
+      stopImmediatePropagation: jest.fn()
+    };
+    const offEvent = {
+      key: 'f',
+      repeat: false,
+      preventDefault: jest.fn(),
+      stopImmediatePropagation: jest.fn()
+    };
+
+    documentListeners.keydown(onEvent);
+    documentListeners.keydown(offEvent);
+
+    expect(manager._setChargeRelay).toHaveBeenNthCalledWith(1, true);
+    expect(manager._setChargeRelay).toHaveBeenNthCalledWith(2, false);
+    expect(onEvent.preventDefault).toHaveBeenCalled();
+    expect(offEvent.stopImmediatePropagation).toHaveBeenCalled();
+  });
+
+  test('does not repeat a charge command while a shortcut key is held', () => {
+    const { manager, documentListeners } = loadJogControl();
+    manager._setChargeRelay = jest.fn();
+    manager._setupKeyboard();
+
+    documentListeners.keydown({
+      key: 'o',
+      repeat: true,
+      preventDefault: jest.fn(),
+      stopImmediatePropagation: jest.fn()
+    });
+
+    expect(manager._setChargeRelay).not.toHaveBeenCalled();
   });
 });

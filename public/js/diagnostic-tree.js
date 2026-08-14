@@ -140,6 +140,8 @@ const DiagnosticTree = {
   history: [],
 
   init() {
+    if (this._initialized) return;
+    this._initialized = true;
     const btn = document.getElementById('btn-diagnostic');
     if (btn) {
       btn.addEventListener('click', () => this.showModal());
@@ -210,7 +212,7 @@ const DiagnosticTree = {
 
     // Breadcrumb
     const path = [...this.history, this.currentNode];
-    breadcrumbEl.innerHTML = path.map((n, i) => {
+    breadcrumbEl.innerHTML = path.map((n) => {
       const label = n.replace(/_/g, ' ');
       return `<span class="diag-crumb">${label}</span>`;
     }).join(' → ');

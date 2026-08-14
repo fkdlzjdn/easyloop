@@ -26,7 +26,9 @@ function loadJogControl() {
   const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'jog-control.js'), 'utf8');
   const elements = {
     'jog-charge-relay-state': makeElement(),
-    'jog-charge-progress': makeElement()
+    'jog-charge-progress': makeElement(),
+    'jog-charge-on': makeElement(),
+    'jog-charge-off': makeElement()
   };
   const slot = {
     robotId: 'R_001',
@@ -38,7 +40,10 @@ function loadJogControl() {
   };
   const context = {
     App: { activeSlotIndex: 0, robotSlots: [slot], toast: jest.fn() },
-    RosManager: {},
+    RosManager: {
+      getRos: jest.fn(() => slot.ros),
+      getRobotId: jest.fn(() => slot.robotId)
+    },
     ROSLIB: {},
     document: {
       addEventListener: jest.fn(),
@@ -105,5 +110,49 @@ describe('Jog charging control status', () => {
 
     await expect(manager._resolveChargeService({}, 'R_001', slot))
       .resolves.toBe('/R_001/io/set/auto_charge_relay');
+  });
+
+  test('changes the active virtual robot charge state in Test Mode', async () => {
+    const { manager, slot, context, elements } = loadJogControl();
+    const setActiveCharging = jest.fn();
+    slot.virtualTestRobot = true;
+    context.TestMode = { enabled: true, setActiveCharging };
+
+    await manager._setChargeRelay(true);
+
+    expect(setActiveCharging).toHaveBeenCalledWith(true);
+    expect(slot.chargeRelayOn).toBe(true);
+    expect(slot.chargeServiceName).toContain('TestMode');
+    expect(elements['jog-charge-on'].disabled).toBe(false);
+    expect(elements['jog-charge-off'].disabled).toBe(false);
+  });
+
+  test('requires confirmation for charge ON and explains the real relay risk', async () => {
+    const { manager, slot, context } = loadJogControl();
+    const setActiveCharging = jest.fn();
+    slot.virtualTestRobot = true;
+    context.TestMode = { enabled: true, setActiveCharging };
+    context.confirm.mockReturnValue(false);
+
+    await manager._setChargeRelay(true);
+
+    expect(context.confirm).toHaveBeenCalledTimes(1);
+    expect(context.confirm.mock.calls[0][0]).toContain('실제 충전 릴레이');
+    expect(context.confirm.mock.calls[0][0]).toContain('정말 충전을 시작');
+    expect(setActiveCharging).not.toHaveBeenCalled();
+    expect(manager._chargeCommandPending).toBe(false);
+  });
+
+  test('turns charge OFF immediately without confirmation', async () => {
+    const { manager, slot, context } = loadJogControl();
+    const setActiveCharging = jest.fn();
+    slot.virtualTestRobot = true;
+    context.TestMode = { enabled: true, setActiveCharging };
+
+    await manager._setChargeRelay(false);
+
+    expect(context.confirm).not.toHaveBeenCalled();
+    expect(setActiveCharging).toHaveBeenCalledWith(false);
+    expect(slot.chargeRelayOn).toBe(false);
   });
 });

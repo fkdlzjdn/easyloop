@@ -49,7 +49,14 @@ function createRateLimiterStore(config) {
       }
 
       if (entry.hits.length > max) {
-        return res.status(429).json({ success: false, message: 'Rate limit exceeded' });
+        const oldestHit = entry.hits[0];
+        const retryAfterSeconds = Math.max(1, Math.ceil((windowMs - (now - oldestHit)) / 1000));
+        res.set('Retry-After', String(retryAfterSeconds));
+        return res.status(429).json({
+          success: false,
+          message: '요청이 너무 많습니다. 잠시 후 다시 시도하세요.',
+          retryAfterSeconds
+        });
       }
 
       return next();

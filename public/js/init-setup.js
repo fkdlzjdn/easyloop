@@ -8,6 +8,8 @@ const InitSetup = {
   _otherLines: [],   // non-export lines preserved
 
   init() {
+    if (this._initialized) return;
+    this._initialized = true;
     const btn = document.getElementById('btn-init-setup');
     const modal = document.getElementById('init-setup-modal');
     const closeBtn = document.getElementById('init-setup-close');

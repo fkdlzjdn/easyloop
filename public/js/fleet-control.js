@@ -15,18 +15,25 @@ const FleetControl = {
   _referenceSlotIndex: -1,
   _mapImageCanvas: null,
   _mapImageSignature: null,
+  _activeMapSyncIndex: -1,
   _renderTimer: null,
   _resizeObserver: null,
   _selectedSlotIndex: -1,
   _robotHitAreas: [],
   _robotIconSize: 40,
+  _showTaskRoutes: true,
+  _showTaskLabels: true,
   _selectedTaskName: '',
   _taskRunning: false,
+  _pendingShortcutTask: null,
   _colors: ['#22c55e', '#38bdf8', '#f59e0b', '#a78bfa', '#f43f5e', '#14b8a6', '#eab308', '#fb7185'],
 
   init() {
     document.getElementById('btn-fleet-map-refresh')?.addEventListener('click', () => {
       this.refreshMaps();
+    });
+    document.getElementById('btn-fleet-sync-active-map')?.addEventListener('click', () => {
+      this.syncActiveRobotMap(true);
     });
     document.getElementById('fleet-control-map')?.addEventListener('click', event => {
       this._handleMapClick(event);
@@ -44,14 +51,44 @@ const FleetControl = {
     document.getElementById('btn-fleet-task-run')?.addEventListener('click', () => {
       this._runSelectedTask();
     });
+    document.getElementById('btn-fleet-shortcut-confirm')?.addEventListener('click', () => {
+      this._confirmShortcutTask();
+    });
+    ['btn-fleet-shortcut-cancel', 'btn-fleet-shortcut-close'].forEach(id => {
+      document.getElementById(id)?.addEventListener('click', () => {
+        this._closeShortcutTaskConfirm();
+      });
+    });
+    document.getElementById('fleet-shortcut-task-modal')?.addEventListener('click', event => {
+      if (event.target?.id === 'fleet-shortcut-task-modal') this._closeShortcutTaskConfirm();
+    });
     document.getElementById('btn-fleet-task-cancel')?.addEventListener('click', () => {
       this._cancelSelectedTask();
+    });
+    document.getElementById('btn-fleet-running-task-info')?.addEventListener('click', () => {
+      this._showSelectedRunningTaskInfo();
+    });
+    document.getElementById('fleet-show-task-routes')?.addEventListener('change', event => {
+      this._showTaskRoutes = event.target.checked;
+      this.requestRender();
+    });
+    document.getElementById('fleet-show-task-labels')?.addEventListener('change', event => {
+      this._showTaskLabels = event.target.checked;
+      this.requestRender();
     });
     document.addEventListener('easyloop:tasks-changed', () => {
       if (!this._active) return;
       const filter = document.getElementById('fleet-task-filter')?.value || '';
       this._refreshTaskOptions(filter);
     });
+    document.addEventListener('amr:active-robot-changed', event => {
+      if (!this._active) return;
+      this.syncActiveRobotMap(false, event?.detail?.index);
+    });
+    document.addEventListener('keydown', event => {
+      if (this._handleShortcutTaskModalKey(event)) return;
+      this._handleTaskShortcut(event);
+    }, true);
     try {
       this._setRobotIconSize(localStorage.getItem('fleetRobotIconSize') || 40, false);
     } catch (e) {
@@ -113,6 +150,7 @@ const FleetControl = {
     this._referenceSlotIndex = -1;
     this._mapImageCanvas = null;
     this._mapImageSignature = null;
+    this._activeMapSyncIndex = -1;
     this._selectedSlotIndex = -1;
     this._robotHitAreas = [];
     this._updateTaskPanel();
@@ -133,6 +171,7 @@ const FleetControl = {
     this._poses.delete(index);
     this._cancelMapCheck(index);
     this._mapStates.delete(index);
+    if (index === this._activeMapSyncIndex) this._activeMapSyncIndex = -1;
     if (index === this._selectedSlotIndex) {
       this._selectedSlotIndex = -1;
       this._updateTaskPanel();
@@ -155,8 +194,10 @@ const FleetControl = {
     this._referenceSlotIndex = -1;
     this._mapImageCanvas = null;
     this._mapImageSignature = null;
-
     const connected = this._connectedIndices();
+    this._activeMapSyncIndex = connected.includes(App.activeSlotIndex)
+      ? App.activeSlotIndex
+      : -1;
     connected.sort((a, b) => {
       if (a === App.activeSlotIndex) return -1;
       if (b === App.activeSlotIndex) return 1;
@@ -165,6 +206,49 @@ const FleetControl = {
     this._seedActiveRobotMap(connected);
     connected.forEach(index => this._enqueueMapCheck(index));
     this.requestRender();
+  },
+
+  syncActiveRobotMap(forceReload = false, requestedIndex = App.activeSlotIndex) {
+    if (!this._active) return false;
+    const index = Number.isInteger(Number(requestedIndex))
+      ? Number(requestedIndex)
+      : App.activeSlotIndex;
+    const slot = App.robotSlots[index];
+    if (!slot?.connected || !slot.ros || index !== App.activeSlotIndex) {
+      if (forceReload && typeof App.toast === 'function') {
+        App.toast('활성 로봇이 연결되어 있지 않아 맵을 동기화할 수 없습니다.', 'error');
+      }
+      this.requestRender();
+      return false;
+    }
+
+    this._selectedSlotIndex = index;
+    this._updateTaskPanel();
+
+    // On initial activation RosManager may already hold the active robot's map.
+    // During an active-slot switch it is cleared first, so the fleet subscriber
+    // below becomes the authoritative source for the newly active robot.
+    if (!forceReload && typeof RosManager !== 'undefined' && RosManager.lastMapMsg) {
+      this._acceptMap(index, RosManager.lastMapMsg);
+      this.requestRender();
+      return true;
+    }
+
+    if (!forceReload && this._referenceSlotIndex === index && this._referenceMap) {
+      this._activeMapSyncIndex = -1;
+      this.requestRender();
+      return true;
+    }
+
+    this._activeMapSyncIndex = index;
+    this._cancelMapCheck(index);
+    this._mapStates.delete(index);
+    this._enqueueMapCheck(index, true);
+    if (forceReload && typeof App.toast === 'function') {
+      App.toast(`${this._robotNumber(slot)}번 활성 로봇의 맵을 다시 동기화합니다.`, 'info');
+    }
+    this.requestRender();
+    return true;
   },
 
   _connectedIndices() {
@@ -252,12 +336,13 @@ const FleetControl = {
     Array.from(this._positionSubscriptions.keys()).forEach(index => this._unsubscribePosition(index));
   },
 
-  _enqueueMapCheck(index) {
+  _enqueueMapCheck(index, priority = false) {
     if (!this._active || this._mapStates.has(index) || this._mapQueue.includes(index)) return;
     const slot = App.robotSlots[index];
     if (!slot || !slot.connected || !slot.ros) return;
     this._mapStates.set(index, { status: 'pending' });
-    this._mapQueue.push(index);
+    if (priority) this._mapQueue.unshift(index);
+    else this._mapQueue.push(index);
     this._pumpMapQueue();
   },
 
@@ -277,7 +362,10 @@ const FleetControl = {
 
   _startMapCheck(index, slot) {
     const generation = this._mapGeneration;
-    // Deployments expose either /{rid}/map or the standard /map. First response wins.
+    // Deployments expose either /{rid}/map or the standard /map. The namespaced
+    // topic is canonical because slam_toolbox/localization builds it from the
+    // saved pose graph. Keep /map only as a delayed map_server fallback; letting
+    // the first response win can select an older PGM revision after Mapping.
     // A static map is usually latched, but rosbridge does not always replay that
     // latched value to a second browser-side subscriber. In that case request the
     // same OccupancyGrid through map_server's nav_msgs/GetMap service.
@@ -289,6 +377,7 @@ const FleetControl = {
       queue_length: 1
     }));
     let completed = false;
+    let rootMapFallback = null;
     this._mapInFlight += 1;
     this._mapStates.set(index, { status: 'loading' });
 
@@ -297,6 +386,7 @@ const FleetControl = {
       completed = true;
       clearTimeout(timeoutId);
       clearTimeout(staticMapTimerId);
+      clearTimeout(rootMapFallbackTimerId);
       topics.forEach(topic => {
         try { topic.unsubscribe(); } catch (e) { /* ignore */ }
       });
@@ -306,7 +396,10 @@ const FleetControl = {
       if (generation === this._mapGeneration && this._active) {
         if (status === 'ok' && message) this._acceptMap(index, message);
         else if (status === 'cancelled') this._mapStates.delete(index);
-        else this._mapStates.set(index, { status: 'error' });
+        else {
+          this._mapStates.set(index, { status: 'error' });
+          if (index === this._activeMapSyncIndex) this._activeMapSyncIndex = -1;
+        }
         this._pumpMapQueue();
         this.requestRender();
       }
@@ -315,13 +408,22 @@ const FleetControl = {
     const staticMapTimerId = setTimeout(() => {
       this._requestStaticMap(slot, finish);
     }, 1200);
+    const rootMapFallbackTimerId = setTimeout(() => {
+      if (rootMapFallback) finish('ok', rootMapFallback);
+    }, 700);
     const timeoutId = setTimeout(() => finish('error'), 12000);
-    this._mapTopics.set(index, { topics, timeoutId, staticMapTimerId, finish });
-    topics.forEach(topic => topic.subscribe(msg => finish('ok', msg)));
+    this._mapTopics.set(index, {
+      topics, timeoutId, staticMapTimerId, rootMapFallbackTimerId, finish
+    });
+    topics.forEach(topic => topic.subscribe(msg => {
+      const sourceName = topic.name || topic.options?.name;
+      if (sourceName === `/${slot.robotId}/map`) finish('ok', msg);
+      else rootMapFallback = msg;
+    }));
   },
 
   _requestStaticMap(slot, finish) {
-    if (!slot?.ros || typeof ROSLIB?.Service !== 'function') return;
+    if (!slot?.ros || typeof ROSLIB === 'undefined' || typeof ROSLIB.Service !== 'function') return;
     const serviceNames = Array.from(new Set([`/${slot.robotId}/static_map`, '/static_map']));
     serviceNames.forEach(name => {
       const service = new ROSLIB.Service({
@@ -352,10 +454,15 @@ const FleetControl = {
   _acceptMap(index, message) {
     const signature = this.mapFingerprint(message);
     this._mapStates.set(index, { status: 'ok', signature });
-    if (!this._referenceMap) {
+    if (!this._referenceMap || index === App.activeSlotIndex) {
       this._referenceMap = message;
       this._referenceSignature = signature;
       this._referenceSlotIndex = index;
+      this._mapImageCanvas = null;
+      this._mapImageSignature = null;
+    }
+    if (index === this._activeMapSyncIndex) {
+      this._activeMapSyncIndex = -1;
     }
   },
 
@@ -370,6 +477,7 @@ const FleetControl = {
     Array.from(this._mapTopics.values()).forEach(record => {
       clearTimeout(record.timeoutId);
       clearTimeout(record.staticMapTimerId);
+      clearTimeout(record.rootMapFallbackTimerId);
       (record.topics || []).forEach(topic => {
         try { topic.unsubscribe(); } catch (e) { /* ignore */ }
       });
@@ -426,9 +534,27 @@ const FleetControl = {
     const mapComplete = connected.filter(index => this._mapStates.get(index)?.status === 'ok').length;
     const summary = document.getElementById('fleet-control-summary');
     const referenceSlot = App.robotSlots[this._referenceSlotIndex];
+    const activeSlot = App.robotSlots[App.activeSlotIndex];
+    const activeMapSource = document.getElementById('fleet-active-map-source');
     if (summary) {
       const referenceText = referenceSlot ? ` · 기준 맵 ${this._robotNumber(referenceSlot)}` : '';
       summary.textContent = `연결 ${connected.length}대 · 위치 ${poseCount}대 · 맵 확인 ${mapComplete}/${connected.length}${referenceText}`;
+    }
+    if (activeMapSource) {
+      const activeNumber = activeSlot ? this._robotNumber(activeSlot) : '--';
+      const synchronized = this._referenceSlotIndex === App.activeSlotIndex && Boolean(this._referenceMap);
+      const syncing = this._activeMapSyncIndex === App.activeSlotIndex;
+      const failed = this._mapStates.get(App.activeSlotIndex)?.status === 'error';
+      activeMapSource.textContent = syncing
+        ? `${activeNumber}번 맵 동기화 중`
+        : failed
+          ? `${activeNumber}번 맵 실패`
+        : synchronized
+          ? `${activeNumber}번 활성 맵`
+          : `${activeNumber}번 맵 대기`;
+      activeMapSource.classList.toggle('syncing', syncing);
+      activeMapSource.classList.toggle('ready', synchronized && !syncing);
+      activeMapSource.classList.toggle('error', failed && !syncing);
     }
 
     const warning = document.getElementById('fleet-map-warning');
@@ -495,6 +621,8 @@ const FleetControl = {
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(mapImage, offsetX, offsetY, drawWidth, drawHeight);
 
+    this._drawRunningTaskRoutes(ctx, info, scale, offsetX, offsetY);
+
     this._connectedIndices().forEach(index => {
       const pose = this._poses.get(index);
       if (!pose) return;
@@ -507,6 +635,41 @@ const FleetControl = {
         radius: Math.max(22, 29 * iconScale)
       });
       this._drawRobot(ctx, point.x, point.y, pose.yaw - point.originYaw, index, pose.receivedAt);
+    });
+  },
+
+  _drawRunningTaskRoutes(ctx, info, scale, offsetX, offsetY) {
+    if (!this._showTaskRoutes || typeof ActionSender === 'undefined') return;
+    this._connectedIndices().forEach(index => {
+      const slot = App.robotSlots[index];
+      const running = slot?.robotId ? ActionSender._runningTasks?.get(slot.robotId) : null;
+      const points = Array.from(running?.points || []);
+      if (points.length === 0) return;
+      const color = this._colorForSlot(slot, index);
+      ctx.save();
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      points.forEach((point, pointIndex) => {
+        const canvasPoint = this._worldToCanvas(point, info, scale, offsetX, offsetY);
+        if (pointIndex > 0) {
+          const previous = this._worldToCanvas(points[pointIndex - 1], info, scale, offsetX, offsetY);
+          ctx.beginPath();
+          ctx.strokeStyle = color;
+          ctx.globalAlpha = Number(point.actionIndex) < Number(running.actionIndex) ? 0.38 : 0.88;
+          ctx.lineWidth = Number(point.actionIndex) === Number(running.actionIndex) ? 4 : 2.5;
+          ctx.setLineDash(Number(point.actionIndex) === Number(running.actionIndex) ? [] : [7, 4]);
+          ctx.moveTo(previous.x, previous.y);
+          ctx.lineTo(canvasPoint.x, canvasPoint.y);
+          ctx.stroke();
+        }
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = Number(point.actionIndex) === Number(running.actionIndex) ? '#facc15' : color;
+        ctx.beginPath();
+        ctx.arc(canvasPoint.x, canvasPoint.y, Number(point.actionIndex) === Number(running.actionIndex) ? 6 : 4, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      ctx.restore();
     });
   },
 
@@ -606,6 +769,16 @@ const FleetControl = {
     ctx.strokeText(label, x - 4 * scale, y);
     ctx.fillStyle = '#ffffff';
     ctx.fillText(label, x - 4 * scale, y);
+    if (this._showTaskLabels && typeof ActionSender !== 'undefined') {
+      const running = ActionSender._runningTasks?.get(slot.robotId);
+      if (running) {
+        const taskLabel = `${running.taskId} · ${String(running.state || 'work').toUpperCase()}`;
+        ctx.font = `600 ${Math.max(9, 9 * scale)}px sans-serif`;
+        ctx.strokeText(taskLabel, x, y + 24 * scale);
+        ctx.fillStyle = '#f8fafc';
+        ctx.fillText(taskLabel, x, y + 24 * scale);
+      }
+    }
     ctx.restore();
   },
 
@@ -675,6 +848,7 @@ const FleetControl = {
     if (!list || typeof ActionSender === 'undefined') return;
     const saved = ActionSender.getSavedQueues();
     const filter = String(filterText || '').trim().toLowerCase();
+    const shortcutNames = this._shortcutTaskNames(saved);
     const names = Object.keys(saved)
       .filter(name => !filter || name.toLowerCase().includes(filter))
       .sort((a, b) => a.localeCompare(b));
@@ -699,8 +873,15 @@ const FleetControl = {
       nameEl.textContent = name;
       const countEl = document.createElement('small');
       countEl.textContent = `${count} actions`;
+      const shortcutIndex = shortcutNames.indexOf(name);
       item.appendChild(nameEl);
       item.appendChild(countEl);
+      if (shortcutIndex >= 0) {
+        const shortcut = document.createElement('kbd');
+        shortcut.className = 'fleet-task-shortcut';
+        shortcut.textContent = `Ctrl+${shortcutIndex + 1}`;
+        item.appendChild(shortcut);
+      }
       item.addEventListener('click', () => this._selectTask(name));
       list.appendChild(item);
     });
@@ -713,6 +894,134 @@ const FleetControl = {
     const filter = document.getElementById('fleet-task-filter')?.value || '';
     this._refreshTaskOptions(filter);
     this._updateTaskDetail();
+  },
+
+  _shortcutTaskNames(saved = null) {
+    const queues = saved || (typeof ActionSender !== 'undefined'
+      ? ActionSender.getSavedQueues()
+      : {});
+    return Object.keys(queues || {})
+      .sort((a, b) => a.localeCompare(b))
+      .slice(0, 9);
+  },
+
+  _handleTaskShortcut(event = {}) {
+    if (!this._active || !(event.ctrlKey || event.metaKey)
+        || event.altKey || event.shiftKey || !/^[1-9]$/.test(String(event.key || ''))) {
+      return false;
+    }
+    event.preventDefault?.();
+    event.stopImmediatePropagation?.();
+    if (event.repeat) return true;
+
+    const shortcutNumber = Number(event.key);
+    const taskName = this._shortcutTaskNames()[shortcutNumber - 1];
+    if (!taskName) {
+      App.toast?.(`Ctrl+${shortcutNumber}에 해당하는 저장 Task가 없습니다.`, 'info');
+      return true;
+    }
+    this._requestShortcutTask(taskName, shortcutNumber);
+    return true;
+  },
+
+  _handleShortcutTaskModalKey(event = {}) {
+    if (!this._pendingShortcutTask || event.isComposing) return false;
+    if (event.key !== 'Enter' && event.key !== 'Escape') return false;
+
+    event.preventDefault?.();
+    event.stopImmediatePropagation?.();
+    if (event.repeat) return true;
+
+    if (event.key === 'Escape') {
+      this._closeShortcutTaskConfirm();
+    } else {
+      this._confirmShortcutTask();
+    }
+    return true;
+  },
+
+  _requestShortcutTask(taskName, shortcutNumber) {
+    if (this._taskRunning || typeof ActionSender === 'undefined') return false;
+    const slot = App.robotSlots?.[this._selectedSlotIndex];
+    const entry = ActionSender.getSavedQueues()?.[taskName];
+    if (!slot?.connected || !slot?.ros) {
+      this._setTaskResult('error', '관제 맵에서 Task 대상 로봇을 먼저 선택하세요.');
+      App.toast?.('관제 맵에서 Task 대상 로봇을 먼저 선택하세요.', 'warning');
+      return false;
+    }
+    if (!entry || !Array.isArray(entry.queue) || entry.queue.length === 0) {
+      this._setTaskResult('error', `"${taskName}" Task 정보가 없거나 Action이 비어 있습니다.`);
+      return false;
+    }
+
+    this._selectedTaskName = taskName;
+    const filter = document.getElementById('fleet-task-filter')?.value || '';
+    this._refreshTaskOptions(filter);
+    const loopInput = document.getElementById('fleet-task-loop');
+    const requestedLoop = parseInt(loopInput?.value, 10);
+    const loopCount = Math.max(0, Math.min(
+      9999,
+      Number.isFinite(requestedLoop) ? requestedLoop : (Number(entry.loopFlag) || 0)
+    ));
+    const model = ActionSender.getTaskDetailModel?.(taskName);
+    this._pendingShortcutTask = {
+      taskName,
+      shortcutNumber,
+      slotIndex: this._selectedSlotIndex,
+      robotId: slot.robotId,
+      loopCount
+    };
+
+    const modal = document.getElementById('fleet-shortcut-task-modal');
+    const shortcut = document.getElementById('fleet-shortcut-task-key');
+    const robot = document.getElementById('fleet-shortcut-task-robot');
+    const name = document.getElementById('fleet-shortcut-task-name');
+    const meta = document.getElementById('fleet-shortcut-task-meta');
+    const preview = document.getElementById('fleet-shortcut-task-preview');
+    if (shortcut) shortcut.textContent = `Ctrl+${shortcutNumber}`;
+    if (robot) robot.textContent = `${slot.robotId} · ${slot.ip || '--'}`;
+    if (name) name.textContent = model?.name || entry.yamlTaskId || taskName;
+    if (meta) {
+      const missionCount = model?.missionCount ?? '?';
+      const actionCount = model?.actions?.length ?? entry.queue.length;
+      meta.textContent = `${missionCount} Missions · ${actionCount} Actions · 반복 ${loopCount}`;
+    }
+    if (preview) {
+      preview.innerHTML = '';
+      const actions = Array.from(model?.actions || []).slice(0, 4);
+      actions.forEach((action, index) => {
+        const row = document.createElement('div');
+        row.className = 'fleet-shortcut-action-row';
+        row.textContent = `${index + 1}. ${action.id} · ${action.typeName}`;
+        preview.appendChild(row);
+      });
+      if ((model?.actions?.length || 0) > actions.length) {
+        const more = document.createElement('small');
+        more.textContent = `외 ${(model.actions.length - actions.length)}개 Action`;
+        preview.appendChild(more);
+      }
+    }
+    modal?.classList.add('show');
+    return true;
+  },
+
+  _closeShortcutTaskConfirm() {
+    document.getElementById('fleet-shortcut-task-modal')?.classList.remove('show');
+    this._pendingShortcutTask = null;
+  },
+
+  async _confirmShortcutTask() {
+    const pending = this._pendingShortcutTask;
+    if (!pending) return;
+    const currentSlot = App.robotSlots?.[pending.slotIndex];
+    if (!currentSlot?.connected || !currentSlot.ros || currentSlot.robotId !== pending.robotId) {
+      this._closeShortcutTaskConfirm();
+      this._setTaskResult('error', '선택했던 로봇의 연결 상태가 변경되었습니다. 다시 선택하세요.');
+      return;
+    }
+    this._pendingShortcutTask = null;
+    document.getElementById('fleet-shortcut-task-modal')?.classList.remove('show');
+    await this._runSelectedTask(true, pending.loopCount);
   },
 
   _updateTaskDetail() {
@@ -734,6 +1043,10 @@ const FleetControl = {
     const taskName = document.getElementById('fleet-task-selected-name');
     const runButton = document.getElementById('btn-fleet-task-run');
     const cancelButton = document.getElementById('btn-fleet-task-cancel');
+    const infoButton = document.getElementById('btn-fleet-running-task-info');
+    const running = slot?.robotId && typeof ActionSender !== 'undefined'
+      ? ActionSender._runningTasks?.get(slot.robotId)
+      : null;
     if (label) {
       label.textContent = slot?.connected
         ? `${this._robotNumber(slot)} · ${slot.robotId}`
@@ -741,7 +1054,9 @@ const FleetControl = {
     }
     if (detail) {
       detail.textContent = slot?.connected
-        ? `${slot.ip} · ${this._selectedSlotIndex === App.activeSlotIndex ? '연결됨(데이터수신)' : '연결됨(대기)'}`
+        ? `${slot.ip} · ${this._selectedSlotIndex === App.activeSlotIndex ? '수신' : '대기'}${
+          running ? ` · ${running.taskId} (${String(running.state || 'work').toUpperCase()})` : ''
+        }`
         : '맵 아이콘 또는 하단 목록에서 선택';
     }
     card?.classList.toggle('empty', !slot?.connected);
@@ -750,9 +1065,27 @@ const FleetControl = {
     const robotEnabled = Boolean(slot?.connected && slot?.ros) && !this._taskRunning;
     if (runButton) runButton.disabled = !(robotEnabled && this._selectedTaskName);
     if (cancelButton) cancelButton.disabled = !robotEnabled;
+    if (infoButton) infoButton.disabled = !running;
   },
 
-  async _runSelectedTask() {
+  _showSelectedRunningTaskInfo() {
+    const slot = App.robotSlots?.[this._selectedSlotIndex];
+    const running = slot?.robotId && typeof ActionSender !== 'undefined'
+      ? ActionSender._runningTasks?.get(slot.robotId)
+      : null;
+    if (!running) {
+      App.toast('선택한 로봇의 실행 Task 정보가 없습니다.', 'info');
+      return;
+    }
+    ActionSender.showTaskInfoFromQueue(
+      running.taskId,
+      running.queue,
+      running.loopFlag,
+      `${running.robotId} · ${String(running.state || 'work').toUpperCase()}`
+    );
+  },
+
+  async _runSelectedTask(skipConfirm = false, requestedLoopCount = null) {
     if (this._taskRunning || typeof ActionSender === 'undefined') return;
     const slot = App.robotSlots?.[this._selectedSlotIndex];
     const loopInput = document.getElementById('fleet-task-loop');
@@ -770,8 +1103,10 @@ const FleetControl = {
       this._setTaskResult('error', `"${taskName}" Task가 없습니다. Tasks 탭에서 먼저 저장하세요.`);
       return;
     }
-    const loopCount = Math.max(0, Math.min(9999, parseInt(loopInput?.value, 10) || 0));
-    if (!confirm(`${slot.robotId}에서 "${taskName}" Task를 실행하시겠습니까?`)) return;
+    const loopCount = requestedLoopCount === null
+      ? Math.max(0, Math.min(9999, parseInt(loopInput?.value, 10) || 0))
+      : Math.max(0, Math.min(9999, Number(requestedLoopCount) || 0));
+    if (!skipConfirm && !confirm(`${slot.robotId}에서 "${taskName}" Task를 실행하시겠습니까?`)) return;
 
     this._taskRunning = true;
     this._updateTaskPanel();
@@ -806,7 +1141,7 @@ const FleetControl = {
     this._setTaskResult('running', `${slot.robotId} · Task 취소 요청 중...`);
     try {
       await ActionSender.cancelTaskOnSlot(this._selectedSlotIndex);
-      this._setTaskResult('success', `✓ ${slot.robotId} Task 취소 요청 완료`);
+      this._setTaskResult('success', `✓ ${slot.robotId} Task 취소 요청 승인 · 종료 상태 확인 중`);
     } catch (error) {
       this._setTaskResult('error', `Task 취소 실패: ${error.message || error}`);
     } finally {

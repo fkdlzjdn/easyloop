@@ -7,7 +7,12 @@ const JogControl = {
   _publishing: false,
   _cmdVelTopic: null,
   _activeKeys: new Set(),
+  _manualLiftState: null,
+  _manualLiftHeldKey: null,
+  _manualLiftPubInterval: null,
   _chargeStatusTimer: null,
+  _chargeCommandPending: false,
+  _stlTurntableTaskPending: false,
   QUICK_TASK_STORAGE_KEY: 'jogQuickTasks',
   QUICK_TASK_COUNT: 5,
   _quickTaskConfigs: [],
@@ -24,21 +29,30 @@ const JogControl = {
       commands: {}
     },
     {
+      id: 'stl_ulsan',
+      label: 'stl_ulsan · Lift / Turntable',
+      driveType: 'dd',
+      controlProfile: 'lift_service',
+      commands: {}
+    },
+    {
       id: 'sr3_ls_1st',
       label: 'sr3_ls_1st',
       driveType: 'dd',
       controlProfile: 'sr3_ls_1st_conveyor',
       commands: {
-        frontDoorOpen: { label: '전방 도어 OPEN', cmdType: 144, count: 1 },
-        frontDoorClose: { label: '전방 도어 CLOSE', cmdType: 145, count: 1 },
-        rearDoorOpen: { label: '후방 도어 OPEN', cmdType: 146, count: 1 },
-        rearDoorClose: { label: '후방 도어 CLOSE', cmdType: 147, count: 1 },
-        frontDischarge: { label: '컨베이어 전방 배출', cmdType: 3, count: 1 },
-        rearDischarge: { label: '컨베이어 후방 배출', cmdType: 6, count: 1 }
+        frontDoorOpen: { label: '전방 도어 OPEN', description: '전방 도어를 엽니다.', cmdType: 144, count: 1 },
+        frontDoorClose: { label: '전방 도어 CLOSE', description: '전방 도어를 닫습니다.', cmdType: 145, count: 1 },
+        rearDoorOpen: { label: '후방 도어 OPEN', description: '후방 도어를 엽니다.', cmdType: 146, count: 1 },
+        rearDoorClose: { label: '후방 도어 CLOSE', description: '후방 도어를 닫습니다.', cmdType: 147, count: 1 },
+        frontIntake: { label: '컨베이어 전방 투입', description: '컨베이어를 전방 투입 방향으로 동작시킵니다.', cmdType: 3, count: 0 },
+        rearDischarge: { label: '컨베이어 후방 배출', description: '컨베이어를 후방 배출 방향으로 동작시킵니다.', cmdType: 6, count: 0 },
+        conveyorStop: { label: '컨베이어 정지', description: '현재 컨베이어 동작을 정지합니다.', cmdType: 2, count: 0 }
       }
     }
   ],
   PUB_RATE: 100,
+  MANUAL_LIFT_PUB_RATE: 75,
 
   _getDriveType() {
     return (document.getElementById('jog-drive-type') || {}).value || 'dd';
@@ -52,6 +66,7 @@ const JogControl = {
     this._setupChassisSelector();
     this._setupDriveTypeSwitch();
     this._setupChassisCommandButtons();
+    this._setupStlUlsanControls();
     this._setupQuickTasks();
   },
 
@@ -77,6 +92,11 @@ const JogControl = {
     return slot?.robotId || slot?.ip || 'default';
   },
 
+  _isStlUlsanSlot(slot = App.robotSlots?.[App.activeSlotIndex]) {
+    return typeof RobotCompatibility !== 'undefined'
+      && RobotCompatibility.isStlUlsanModel?.(slot?.robotModel) === true;
+  },
+
   _loadChassisSelections() {
     try {
       const saved = JSON.parse(localStorage.getItem(this.CHASSIS_STORAGE_KEY));
@@ -95,7 +115,15 @@ const JogControl = {
   },
 
   _getSelectedChassisModel() {
-    const selectedId = this._chassisSelections[this._activeChassisKey()] || this.DEFAULT_CHASSIS_MODEL;
+    const savedId = this._chassisSelections[this._activeChassisKey()];
+    const slot = App.robotSlots?.[App.activeSlotIndex];
+    const isStlUlsan = this._isStlUlsanSlot(slot);
+    const autoId = isStlUlsan
+      ? 'stl_ulsan'
+      : this.DEFAULT_CHASSIS_MODEL;
+    const selectedId = isStlUlsan
+      ? autoId
+      : (savedId === 'stl_ulsan' ? this.DEFAULT_CHASSIS_MODEL : (savedId || autoId));
     return this.CHASSIS_MODELS.find(model => model.id === selectedId)
       || this.CHASSIS_MODELS.find(model => model.id === this.DEFAULT_CHASSIS_MODEL)
       || this.CHASSIS_MODELS[0];
@@ -118,11 +146,16 @@ const JogControl = {
     });
     this._syncChassisModelUi(false);
     document.addEventListener('amr:active-robot-changed', () => this._syncChassisModelUi());
+    document.addEventListener('amr:robot-model-changed', () => this._syncChassisModelUi(false));
   },
 
   _setChassisModel(modelId) {
     const model = this.CHASSIS_MODELS.find(entry => entry.id === modelId);
     if (!model) return;
+    if (model.id === 'stl_ulsan' && !this._isStlUlsanSlot()) {
+      App.toast('ROBOT_MODEL이 stl1000w 또는 stl1500w인 로봇에서만 선택할 수 있습니다.', 'error');
+      return;
+    }
     this._chassisSelections[this._activeChassisKey()] = model.id;
     this._saveChassisSelections();
     this._syncChassisModelUi();
@@ -143,12 +176,20 @@ const JogControl = {
     if (current) current.textContent = `${model.label} · ${model.driveType.toUpperCase()}`;
 
     const liftControl = document.querySelector('.jog-manual-lift');
+    const stlUlsanControl = document.getElementById('jog-stl-ulsan-control');
     const modelIoControl = document.getElementById('jog-model-io-control');
     const isSr3Conveyor = model.controlProfile === 'sr3_ls_1st_conveyor';
+    const isStlUlsan = this._isStlUlsanSlot();
+    if (isSr3Conveyor) this._stopManualLift();
     if (liftControl) liftControl.hidden = isSr3Conveyor;
+    if (stlUlsanControl) stlUlsanControl.hidden = !isStlUlsan;
     if (modelIoControl) modelIoControl.hidden = !isSr3Conveyor;
+    document.querySelectorAll('.jog-chassis-option').forEach(button => {
+      if (button.dataset.modelId === 'stl_ulsan') button.hidden = !isStlUlsan;
+    });
     this._applyDriveType(model.driveType, stop);
     this._updateQuickTaskTarget();
+    this._refreshChassisCommandHelp();
     this._setChassisCommandStatus('', '명령 대기');
   },
 
@@ -226,7 +267,7 @@ const JogControl = {
     panel.style.display = 'none';
     toggleBtn.classList.remove('active');
     if (toggleBtnMap) toggleBtnMap.classList.remove('active');
-    this._stopVel();
+    this._stopJogControls();
   },
 
   _isPanelOpen() {
@@ -277,7 +318,7 @@ const JogControl = {
       },
       'jog-rot-left':  () => this._setVel(0, 0, this._getAngularSpeed()),
       'jog-rot-right': () => this._setVel(0, 0, -this._getAngularSpeed()),
-      'jog-stop':      () => this._stopVel()
+      'jog-stop':      () => this._stopJogControls()
     };
 
     Object.entries(btnMap).forEach(([id, action]) => {
@@ -311,16 +352,65 @@ const JogControl = {
 
     const liftUpBtn = document.getElementById('jog-lift-up');
     const liftDownBtn = document.getElementById('jog-lift-down');
-    if (liftUpBtn) liftUpBtn.addEventListener('click', () => this._runManualLift('up', liftUpBtn));
-    if (liftDownBtn) liftDownBtn.addEventListener('click', () => this._runManualLift('down', liftDownBtn));
+    this._bindManualLiftHoldButton(liftUpBtn, 'up');
+    this._bindManualLiftHoldButton(liftDownBtn, 'down');
   },
 
   _setupChassisCommandButtons() {
     document.querySelectorAll('[data-chassis-command]').forEach(button => {
+      const showHelp = () => this._showChassisCommandHelp(button.dataset.chassisCommand);
+      button.addEventListener('mouseenter', showHelp);
+      button.addEventListener('focus', showHelp);
       button.addEventListener('click', () => {
         this._callChassisCommand(button.dataset.chassisCommand, button);
       });
     });
+    this._refreshChassisCommandHelp();
+  },
+
+  _chassisCommandServiceName() {
+    const rid = RosManager.getRobotId(App.activeSlotIndex);
+    return `/${rid || '{RID}'}/Conv/cmd`;
+  },
+
+  _formatChassisCommandHelp(command) {
+    if (!command) return '';
+    const request = JSON.stringify({
+      cmds: [{ cmd_type: command.cmdType, count: command.count }]
+    });
+    return [
+      command.description || command.label,
+      `Service: ${this._chassisCommandServiceName()}`,
+      'Type: syscon_msgs/conv_cmd',
+      `Request: ${request}`
+    ].join('\n');
+  },
+
+  _showChassisCommandHelp(commandKey) {
+    const command = this._getSelectedChassisModel().commands?.[commandKey];
+    const preview = document.getElementById('jog-model-io-command-preview');
+    if (preview && command) preview.textContent = this._formatChassisCommandHelp(command);
+  },
+
+  _refreshChassisCommandHelp() {
+    const model = this._getSelectedChassisModel();
+    const buttons = Array.from(document.querySelectorAll('[data-chassis-command]'));
+    buttons.forEach(button => {
+      const command = model.commands?.[button.dataset.chassisCommand];
+      const help = this._formatChassisCommandHelp(command);
+      button.title = help;
+      if (command) button.setAttribute('aria-label', `${command.label}. ${help.replace(/\n/g, ' ')}`);
+    });
+
+    const firstCommand = buttons
+      .map(button => model.commands?.[button.dataset.chassisCommand])
+      .find(Boolean);
+    const preview = document.getElementById('jog-model-io-command-preview');
+    if (preview) {
+      preview.textContent = firstCommand
+        ? '버튼에 마우스를 올리거나 포커스하면 설명과 서비스 명령을 확인할 수 있습니다.'
+        : '선택한 차상에서 사용할 수 있는 명령이 없습니다.';
+    }
   },
 
   async _callChassisCommand(commandKey, sourceButton = null) {
@@ -330,6 +420,7 @@ const JogControl = {
       this._setChassisCommandStatus('error', `${model.label}에서 지원하지 않는 명령입니다.`);
       return;
     }
+    this._showChassisCommandHelp(commandKey);
 
     const slotIndex = App.activeSlotIndex;
     const slot = App.robotSlots?.[slotIndex];
@@ -345,7 +436,27 @@ const JogControl = {
     this._stopVel();
     buttons.forEach(button => { button.disabled = true; });
     if (sourceButton) sourceButton.classList.add('active');
-    this._setChassisCommandStatus('running', `${rid} · ${command.label} 명령 중...`);
+    this._setChassisCommandStatus(
+      'running',
+      `${rid} · ${command.label} (${command.cmdType},${command.count}) 명령 중...`
+    );
+
+    if (typeof TestMode !== 'undefined' && TestMode.enabled && slot.virtualTestRobot) {
+      this._setChassisCommandStatus(
+        'success',
+        `${rid} · ${command.label} (${command.cmdType},${command.count}) Test Mode 실행 완료`
+      );
+      App.toast(`${rid} ${command.label} Test Mode 실행 완료`, 'success');
+      App.addEvent?.(
+        'action',
+        `[TestMode] ${command.label}`,
+        `${rid} · /${rid}/Conv/cmd · (${command.cmdType},${command.count})`,
+        'success'
+      );
+      buttons.forEach(button => { button.disabled = false; });
+      if (sourceButton) sourceButton.classList.remove('active');
+      return;
+    }
 
     try {
       const service = new ROSLIB.Service({
@@ -366,7 +477,10 @@ const JogControl = {
       if (result?.success === false) {
         throw new Error(`로봇 거부 (error_code=${result.error_code ?? '-'})`);
       }
-      this._setChassisCommandStatus('success', `${rid} · ${command.label} 요청 완료`);
+      this._setChassisCommandStatus(
+        'success',
+        `${rid} · ${command.label} (${command.cmdType},${command.count}) 요청 완료`
+      );
       App.toast(`${rid} ${command.label} 요청 완료`, 'success');
     } catch (error) {
       this._setChassisCommandStatus('error', `${command.label} 실패: ${error.message || error}`);
@@ -394,6 +508,12 @@ const JogControl = {
     const rid = RosManager.getRobotId(slotIndex);
     const serviceName = rid ? `/${rid}${serviceSuffix}` : serviceSuffix;
 
+    if (typeof TestMode !== 'undefined' && TestMode.enabled) {
+      App.toast(`[TestMode] ${serviceName}: OK`, 'success');
+      App.addEvent?.('action', '[TestMode] Motor reset', serviceName, 'success');
+      return;
+    }
+
     const service = new ROSLIB.Service({
       ros: ros,
       name: serviceName,
@@ -418,10 +538,16 @@ const JogControl = {
       App.toast('활성 로봇이 연결되어 있지 않습니다', 'error');
       return;
     }
-    if (enabled && !confirm(`${rid} 충전 릴레이를 ON 하시겠습니까?`)) return;
+    if (this._chargeCommandPending) return;
+    if (enabled && !confirm(
+      `⚠ ${rid} 충전을 ON으로 전환합니다.\n\n`
+      + '실제 충전 릴레이가 동작할 수 있습니다.\n'
+      + '정말 충전을 시작하시겠습니까?'
+    )) return;
 
     const onBtn = document.getElementById('jog-charge-on');
     const offBtn = document.getElementById('jog-charge-off');
+    this._chargeCommandPending = true;
     if (onBtn) onBtn.disabled = true;
     if (offBtn) offBtn.disabled = true;
     slot.chargeRelayCommand = enabled;
@@ -431,6 +557,16 @@ const JogControl = {
     this.updateChargeStatus(slot);
 
     try {
+      if (typeof TestMode !== 'undefined' && TestMode.enabled && slot.virtualTestRobot) {
+        TestMode.setActiveCharging(enabled);
+        slot.chargeRelayOn = enabled;
+        slot.chargeRelayAssumed = true;
+        slot.chargeServiceName = '[TestMode] virtual charge relay';
+        this.updateChargeStatus(slot);
+        App.toast(`${rid} 충전 ${enabled ? 'ON' : 'OFF'} Test Mode 실행 완료`, 'success');
+        return;
+      }
+
       const serviceName = await this._resolveChargeService(ros, rid, slot);
       const result = await this._callSetBool(ros, serviceName, enabled);
       if (result && result.success === false) {
@@ -452,6 +588,7 @@ const JogControl = {
       this._setChargeProgress('error', `충전 명령 실패: ${error.message || error}`);
       this.updateChargeStatus(slot, true);
     } finally {
+      this._chargeCommandPending = false;
       if (onBtn) onBtn.disabled = false;
       if (offBtn) offBtn.disabled = false;
     }
@@ -582,46 +719,312 @@ const JogControl = {
     el.textContent = message;
   },
 
-  async _runManualLift(direction, button) {
+  _bindManualLiftHoldButton(button, direction) {
+    if (!button) return;
+    const start = event => {
+      event.preventDefault();
+      if (typeof button.setPointerCapture === 'function' && event.pointerId !== undefined) {
+        try {
+          button.setPointerCapture(event.pointerId);
+        } catch (error) {
+          // Pointer capture is only an extra guard; document-level release still stops the lift.
+        }
+      }
+      this._startManualLift(direction, button, 'pointer');
+    };
+    const stop = event => {
+      if (event) event.preventDefault();
+      if (this._manualLiftState?.source === 'pointer') this._stopManualLift();
+    };
+    button.addEventListener('pointerdown', start);
+    button.addEventListener('pointerup', stop);
+    button.addEventListener('pointercancel', stop);
+    button.addEventListener('lostpointercapture', stop);
+    button.addEventListener('pointerleave', stop);
+    button.addEventListener('contextmenu', event => event.preventDefault());
+  },
+
+  _startManualLift(direction, button = null, source = 'programmatic') {
     const slotIndex = App.activeSlotIndex;
     const slot = App.robotSlots?.[slotIndex];
+    const ros = typeof RosManager.getRos === 'function'
+      ? RosManager.getRos(slotIndex)
+      : slot?.ros;
+    const rid = typeof RosManager.getRobotId === 'function'
+      ? RosManager.getRobotId(slotIndex)
+      : slot?.robotId;
     const isUp = direction === 'up';
-    const taskName = isUp ? '기본 - 리프트 업' : '기본 - 리프트 다운';
     const label = isUp ? '리프트 UP' : '리프트 DOWN';
-    if (!slot?.connected || !slot.ros) {
-      this._setManualLiftStatus('error', '활성 로봇이 연결되어 있지 않습니다.');
-      return;
+    const model = this._getSelectedChassisModel();
+    if (!['lift', 'lift_service'].includes(model.controlProfile)) {
+      this._setManualLiftStatus('error', '현재 차상 모델은 수동 리프트를 지원하지 않습니다.');
+      return false;
     }
-    if (typeof ActionSender === 'undefined' || !ActionSender.getSavedQueues()[taskName]) {
-      this._setManualLiftStatus('error', `${taskName} Task를 찾을 수 없습니다.`);
-      return;
+    if (!slot?.connected || !ros || !rid) {
+      this._setManualLiftStatus('error', '활성 로봇이 연결되어 있지 않습니다.');
+      return false;
+    }
+    if (typeof RobotCompatibility !== 'undefined'
+        && !slot.compatibilityProfile?.discovered
+        && !this._isStlUlsanSlot(slot)) {
+      this._setManualLiftStatus('running', `${rid} · 리프트 인터페이스 확인 중 · 확인 후 다시 누르세요.`);
+      RobotCompatibility.discover(slot).then(() => this._syncChassisModelUi(false));
+      return false;
+    }
+    if (this._manualLiftState?.direction === direction
+        && this._manualLiftState.ros === ros
+        && this._manualLiftState.rid === rid) {
+      return true;
     }
 
+    this._stopManualLift();
     const upButton = document.getElementById('jog-lift-up');
     const downButton = document.getElementById('jog-lift-down');
     this._stopVel();
-    if (upButton) upButton.disabled = true;
-    if (downButton) downButton.disabled = true;
+    const slotProfile = typeof RobotCompatibility !== 'undefined'
+      ? RobotCompatibility.get(slot)
+      : null;
+    const useService = model.controlProfile === 'lift_service'
+      || slotProfile?.lift?.interface === 'service';
+    const liftConfig = useService
+      ? (slotProfile?.lift || {
+        interface: 'service',
+        service: `/${rid}/Lift/cmd`,
+        serviceType: 'syscon_msgs/lift_cmd',
+        cancelService: `/${rid}/Lift/cancel`,
+        cancelType: 'syscon_msgs/string_srv',
+        cancelArgs: { data: '' },
+        commands: { stop: 0, up: 1, down: 2 }
+      })
+      : (slotProfile?.lift || {
+        interface: 'topic',
+        topic: `/${rid}/Lift/manual_cmd`,
+        topicType: 'std_msgs/Int8',
+        commands: { stop: 0, up: 1, down: -1 }
+      });
+    const transport = useService
+      ? new ROSLIB.Service({
+        ros,
+        name: liftConfig.service || `/${rid}/Lift/cmd`,
+        serviceType: liftConfig.serviceType || 'syscon_msgs/lift_cmd'
+      })
+      : new ROSLIB.Topic({
+        ros,
+        name: liftConfig.topic || `/${rid}/Lift/manual_cmd`,
+        messageType: liftConfig.topicType || 'std_msgs/Int8'
+      });
+    const cancelTransport = useService && liftConfig.cancelService
+      ? new ROSLIB.Service({
+        ros,
+        name: liftConfig.cancelService,
+        serviceType: liftConfig.cancelType || 'syscon_msgs/string_srv'
+      })
+      : null;
+    this._manualLiftState = {
+      direction,
+      value: isUp ? liftConfig.commands.up : liftConfig.commands.down,
+      stopValue: liftConfig.commands.stop,
+      label,
+      rid,
+      ros,
+      interface: useService ? 'service' : 'topic',
+      transport,
+      cancelTransport,
+      cancelArgs: liftConfig.cancelArgs || { data: '' },
+      button,
+      source
+    };
+    if (upButton) upButton.setAttribute('aria-pressed', String(isUp));
+    if (downButton) downButton.setAttribute('aria-pressed', String(!isUp));
     if (button) button.classList.add('active');
-    this._setManualLiftStatus('running', `${slot.robotId} · ${label} 명령 중...`);
-    try {
-      await ActionSender.sendSavedQueueToSlot(taskName, slotIndex, 1, `Manual_${isUp ? 'LiftUp' : 'LiftDown'}`);
-      this._setManualLiftStatus('success', `${slot.robotId} · ${label} 요청 완료`);
-      App.toast(`${slot.robotId} ${label} 요청 완료`, 'success');
-    } catch (error) {
-      this._setManualLiftStatus('error', `${label} 실패: ${error.message || error}`);
-      App.toast(`${label} 실패: ${error.message || error}`, 'error');
-    } finally {
-      if (upButton) upButton.disabled = false;
-      if (downButton) downButton.disabled = false;
-      if (button) button.classList.remove('active');
+    if (!this._publishManualLiftCommand(this._manualLiftState.value, this._manualLiftState)) {
+      this._manualLiftState = null;
+      [upButton, downButton].forEach(control => {
+        if (!control) return;
+        control.classList.remove('active');
+        control.setAttribute('aria-pressed', 'false');
+      });
+      this._setManualLiftStatus('error', `${rid} · ${label} 명령 전송 실패`);
+      return false;
     }
+    if (!useService) {
+      this._manualLiftPubInterval = setInterval(() => {
+        if (this._manualLiftState) {
+          this._publishManualLiftCommand(this._manualLiftState.value, this._manualLiftState);
+        }
+      }, this.MANUAL_LIFT_PUB_RATE);
+    }
+    this._setManualLiftStatus('running', `${rid} · ${label} 동작 중 · 떼면 정지`);
+    return true;
+  },
+
+  // 이전 내부 호출과의 호환을 유지하되, 이제는 hold 시작 동작만 수행한다.
+  _runManualLift(direction, button) {
+    return this._startManualLift(direction, button);
+  },
+
+  _publishManualLiftCommand(value, state = this._manualLiftState) {
+    if (!state?.transport) return false;
+    try {
+      if (state.interface === 'service') {
+        const stopping = value === state.stopValue && state.cancelTransport;
+        const service = stopping ? state.cancelTransport : state.transport;
+        const request = stopping
+          ? new ROSLIB.ServiceRequest(state.cancelArgs || { data: '' })
+          : new ROSLIB.ServiceRequest({ mode: value, height: 0 });
+        service.callService(
+          request,
+          result => {
+            if (result?.success === false) {
+              const message = `${state.rid} · 리프트 명령 거부 (err_code=${result.err_code ?? '-'})`;
+              this._setManualLiftStatus('error', message);
+              App.toast(message, 'error');
+            }
+          },
+          error => {
+            const message = `${state.rid} · 리프트 서비스 실패: ${error || 'unknown error'}`;
+            this._setManualLiftStatus('error', message);
+            App.toast(message, 'error');
+          }
+        );
+      } else {
+        state.transport.publish(new ROSLIB.Message({ data: value }));
+      }
+      return true;
+    } catch (error) {
+      console.warn(`수동 리프트 명령 전송 실패 (${state.rid}):`, error.message || error);
+      return false;
+    }
+  },
+
+  _stopManualLift() {
+    const state = this._manualLiftState;
+    if (this._manualLiftPubInterval) {
+      clearInterval(this._manualLiftPubInterval);
+      this._manualLiftPubInterval = null;
+    }
+    this._manualLiftHeldKey = null;
+    if (!state) return false;
+
+    // 활성 로봇이 바뀐 경우에도 동작을 시작한 기존 로봇의 topic으로 STOP을 보낸다.
+    const stopSent = this._publishManualLiftCommand(state.stopValue ?? 0, state);
+    this._manualLiftState = null;
+    const upButton = document.getElementById('jog-lift-up');
+    const downButton = document.getElementById('jog-lift-down');
+    [upButton, downButton].forEach(button => {
+      if (!button) return;
+      button.classList.remove('active');
+      button.setAttribute('aria-pressed', 'false');
+    });
+    this._setManualLiftStatus(
+      stopSent ? 'success' : 'error',
+      stopSent ? `${state.rid} · 리프트 정지` : `${state.rid} · 정지 명령 전송 실패`
+    );
+    return stopSent;
   },
 
   _setManualLiftStatus(state, message) {
     const status = document.getElementById('jog-manual-lift-status');
     if (!status) return;
     status.className = `jog-manual-lift-status ${state || ''}`.trim();
+    status.textContent = message;
+  },
+
+  _setupStlUlsanControls() {
+    document.querySelectorAll('[data-turntable-target]').forEach(button => {
+      button.addEventListener('click', () => {
+        this._runStlTurntableTarget(Number(button.dataset.turntableTarget), button);
+      });
+    });
+    document.getElementById('jog-turntable-go')?.addEventListener('click', event => {
+      const input = document.getElementById('jog-turntable-target');
+      this._runStlTurntableTarget(Number(input?.value), event.currentTarget);
+    });
+    document.getElementById('jog-turntable-cancel')?.addEventListener('click', event => {
+      this._cancelStlTurntable(event.currentTarget);
+    });
+  },
+
+  async _runStlTurntableTarget(target, button = null) {
+    const slotIndex = App.activeSlotIndex;
+    const slot = App.robotSlots?.[slotIndex];
+    if (!this._isStlUlsanSlot(slot)) {
+      this._setStlTurntableStatus('error', 'stl_ulsan ROBOT_MODEL에서만 사용할 수 있습니다.');
+      return false;
+    }
+    if (!slot?.connected || !slot.ros) {
+      this._setStlTurntableStatus('error', '활성 로봇이 연결되어 있지 않습니다.');
+      return false;
+    }
+    if (!Number.isFinite(target) || target < -180 || target > 180) {
+      this._setStlTurntableStatus('error', '목표 각도는 -180°~180°로 입력하세요.');
+      return false;
+    }
+    if (this._stlTurntableTaskPending) return false;
+    if (typeof ActionSender === 'undefined' || !ActionSender.sendJogActionToSlot) {
+      this._setStlTurntableStatus('error', 'Task 입력 기능을 사용할 수 없습니다.');
+      return false;
+    }
+
+    this._stopVel();
+    this._stopManualLift();
+    this._stlTurntableTaskPending = true;
+    if (button) button.disabled = true;
+    this._setStlTurntableStatus('running', `${slot.robotId} · ${target}° Task 입력 중...`);
+    try {
+      await ActionSender.sendJogActionToSlot(
+        slotIndex,
+        0x22,
+        [3, target, 0],
+        `easyloop_turntable_${Date.now()}`
+      );
+      this._setStlTurntableStatus('success', `${slot.robotId} · ${target}° Turntable 실행 요청 완료`);
+      App.toast(`${slot.robotId} Turntable ${target}° 실행`, 'success');
+      return true;
+    } catch (error) {
+      this._setStlTurntableStatus('error', `Turntable 실행 실패: ${error.message || error}`);
+      App.toast(`Turntable 실행 실패: ${error.message || error}`, 'error');
+      return false;
+    } finally {
+      this._stlTurntableTaskPending = false;
+      if (button) button.disabled = false;
+    }
+  },
+
+  async _cancelStlTurntable(button = null) {
+    const slotIndex = App.activeSlotIndex;
+    const slot = App.robotSlots?.[slotIndex];
+    if (!this._isStlUlsanSlot(slot)) {
+      this._setStlTurntableStatus('error', 'stl_ulsan ROBOT_MODEL에서만 사용할 수 있습니다.');
+      return false;
+    }
+    if (!slot?.connected || !slot.ros || typeof ActionSender === 'undefined') {
+      this._setStlTurntableStatus('error', '활성 로봇의 Task 취소 기능을 사용할 수 없습니다.');
+      return false;
+    }
+
+    this._stopVel();
+    this._stopManualLift();
+    if (button) button.disabled = true;
+    this._setStlTurntableStatus('running', `${slot.robotId} · TARU Task 취소 요청 중...`);
+    try {
+      await ActionSender.cancelTaskOnSlot(slotIndex);
+      this._setStlTurntableStatus('success', `${slot.robotId} · Turntable Task 취소 요청 완료`);
+      App.toast(`${slot.robotId} Turntable Task 취소`, 'success');
+      return true;
+    } catch (error) {
+      this._setStlTurntableStatus('error', `Task 취소 실패: ${error.message || error}`);
+      App.toast(`Turntable Task 취소 실패: ${error.message || error}`, 'error');
+      return false;
+    } finally {
+      if (button) button.disabled = false;
+    }
+  },
+
+  _setStlTurntableStatus(state, message) {
+    const status = document.getElementById('jog-turntable-status');
+    if (!status) return;
+    status.className = `jog-turntable-status ${state || ''}`.trim();
     status.textContent = message;
   },
 
@@ -733,6 +1136,12 @@ const JogControl = {
     if (target) target.textContent = text;
     const liftTarget = document.getElementById('jog-manual-lift-target');
     if (liftTarget) liftTarget.textContent = text;
+    const stlTarget = document.getElementById('jog-stl-ulsan-target');
+    if (stlTarget) {
+      stlTarget.textContent = slot?.robotModel
+        ? `${slot.robotId} · ${slot.robotModel}`
+        : 'ROBOT_MODEL 확인 중';
+    }
     const modelIoTarget = document.getElementById('jog-model-io-target');
     if (modelIoTarget) modelIoTarget.textContent = text;
   },
@@ -781,27 +1190,72 @@ const JogControl = {
     document.addEventListener('keydown', (e) => {
       // Only respond when Jog panel is open and no input is focused
       if (!this._isPanelOpen()) return;
-      if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA' || document.activeElement.tagName === 'SELECT')) return;
+      if (document.activeElement && (
+        document.activeElement.tagName === 'INPUT'
+        || document.activeElement.tagName === 'TEXTAREA'
+        || document.activeElement.tagName === 'SELECT'
+        || document.activeElement.isContentEditable
+      )) return;
 
       const key = e.key;
+      const normalizedKey = typeof key === 'string' ? key.toLowerCase() : key;
+      if (normalizedKey === 'o' || normalizedKey === 'f') {
+        e.preventDefault();
+        e.stopImmediatePropagation?.();
+        if (!e.repeat) this._setChargeRelay(normalizedKey === 'o');
+        return;
+      }
+      if (normalizedKey === 'z' || normalizedKey === 'c') {
+        e.preventDefault();
+        e.stopImmediatePropagation?.();
+        if (e.repeat || this._manualLiftHeldKey || this._manualLiftState) return;
+        const direction = normalizedKey === 'z' ? 'up' : 'down';
+        const button = document.getElementById(direction === 'up' ? 'jog-lift-up' : 'jog-lift-down');
+        if (this._startManualLift(direction, button, 'keyboard')) this._manualLiftHeldKey = normalizedKey;
+        return;
+      }
       if (this._activeKeys.has(key)) return; // already held
       this._activeKeys.add(key);
 
       const jogKeys = ['ArrowUp','w','ArrowDown','x','ArrowLeft','a','ArrowRight','d','q','e'];
       if (jogKeys.includes(key)) {
         e.preventDefault();
+        e.stopImmediatePropagation?.();
+        this._stopManualLift();
         this._updateFromKeys();
       } else if (key === 's' || key === ' ') {
         e.preventDefault();
-        this._stopVel();
+        e.stopImmediatePropagation?.();
+        this._stopJogControls();
       }
-    });
+    }, true);
 
     document.addEventListener('keyup', (e) => {
+      const normalizedKey = typeof e.key === 'string' ? e.key.toLowerCase() : e.key;
+      if (normalizedKey === this._manualLiftHeldKey) {
+        e.preventDefault();
+        this._stopManualLift();
+        return;
+      }
       this._activeKeys.delete(e.key);
       if (!this._isPanelOpen()) return;
       this._updateFromKeys();
     });
+
+    document.addEventListener('pointerup', () => {
+      if (this._manualLiftState?.source === 'pointer') this._stopManualLift();
+    });
+    document.addEventListener('pointercancel', () => {
+      if (this._manualLiftState?.source === 'pointer') this._stopManualLift();
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) this._stopJogControls();
+    });
+    document.addEventListener('amr:active-robot-changed', () => this._stopJogControls());
+    if (typeof window !== 'undefined') {
+      window.addEventListener('blur', () => this._stopJogControls());
+      window.addEventListener('pagehide', () => this._stopJogControls());
+    }
   },
 
   _updateFromKeys() {
@@ -833,6 +1287,7 @@ const JogControl = {
   },
 
   _setVel(lx, ly, az) {
+    this._stopManualLift();
     this._currentLx = lx;
     this._currentLy = ly || 0;
     this._currentAz = az;
@@ -848,6 +1303,11 @@ const JogControl = {
     this._updateDisplay();
     this._publishOnce();
     this._stopPublishing();
+  },
+
+  _stopJogControls() {
+    this._stopVel();
+    this._stopManualLift();
   },
 
   _updateDisplay() {

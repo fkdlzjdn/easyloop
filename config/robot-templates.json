@@ -81,6 +81,39 @@
       }
     },
     {
+      "id": "stl_ulsan",
+      "name": "STL Ulsan (STL1000W / STL1500W)",
+      "description": "ROBOT_MODEL이 stl1000w 또는 stl1500w인 로봇의 service lift, turntable 및 map lifecycle",
+      "rosBridgePort": 9090,
+      "defaultParams": {
+        "max_trans_vel": 0.8,
+        "max_rot_vel": 1.0,
+        "camera_count": 1,
+        "has_lift": true,
+        "compatibility_profile": "stl_ulsan"
+      },
+      "topics": {
+        "bms": "/{robotId}/bms",
+        "robotState": "/{robotId}/robot_state",
+        "pose": "/{robotId}/amcl_pose",
+        "map": "/{robotId}/map",
+        "scan": "/{robotId}/scan",
+        "mappingMode": "/{robotId}/spcore/MODE",
+        "liftFeedback": "/{robotId}/Lift/feedback"
+      },
+      "services": {
+        "goal": "/{robotId}/TARU/goal",
+        "cancel": "/{robotId}/TARU/cancel",
+        "lift": "/{robotId}/Lift/cmd",
+        "liftCancel": "/{robotId}/Lift/cancel",
+        "turntable": "/{robotId}/Turntable/cmd",
+        "turntableCancel": "/{robotId}/Turntable/cancel",
+        "saveMap": "/{robotId}/save_map",
+        "reloadMap": "/{robotId}/change_map",
+        "staticMap": "/{robotId}/static_map"
+      }
+    },
+    {
       "id": "custom",
       "name": "Custom Robot",
       "description": "User-defined robot configuration",

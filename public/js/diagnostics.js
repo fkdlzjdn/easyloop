@@ -191,7 +191,6 @@ const Diagnostics = {
         });
       });
 
-      const rid = this._getRobotId() || '';
       const allExpected = [
         ...this.EXPECTED_NODES.P0.map(n => ({ name: n, priority: 'P0' })),
         ...this.EXPECTED_NODES.P1.map(n => ({ name: n, priority: 'P1' })),
@@ -322,7 +321,6 @@ const Diagnostics = {
           const timer = setTimeout(() => reject(new Error('Timeout')), 3000);
           ros.getTopics((res) => { clearTimeout(timer); resolve(res); });
         });
-        const rid = this._getRobotId() || '';
         const hasOdom = (result.topics || []).some(t => t.includes('/odom'));
         items.push({
           name: 'odom -> base_link',
@@ -700,7 +698,6 @@ const Diagnostics = {
     if (d.errors.length === 0) {
       items.push({ name: 'rosout errors', status: 'pass', detail: '0 errors in 30s' });
     } else {
-      const summary = d.errors.slice(0, 3).map(e => `[${e.level}] ${e.node}: ${e.msg.substring(0, 60)}`).join('\n');
       items.push({
         name: 'rosout errors',
         status: 'warn',

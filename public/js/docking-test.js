@@ -206,7 +206,7 @@ const DockingTest = {
       } else {
         this.log('OptiTrack scan: ' + (result.message || 'No server found'), true);
       }
-    }, (error) => {
+    }, (_error) => {
       document.getElementById('btn-optitrack-scan').disabled = false;
       // Try alternative: check if optitrack topics exist
       this.scanOptiTrackTopics();
@@ -284,7 +284,7 @@ const DockingTest = {
         }
         this.subscribeOptiTrackData();
       },
-      (error) => {
+      (_error) => {
         // Service not available, try direct subscription
         this.subscribeOptiTrackData();
       }
@@ -298,12 +298,6 @@ const DockingTest = {
     }
 
     // Try different topic patterns for OptiTrack data
-    const topicPatterns = [
-      { name: '/optitrack/rigid_bodies', type: 'optitrack_msgs/RigidBodyArray' },
-      { name: '/vrpn_client_node/rigid_bodies', type: 'geometry_msgs/PoseArray' },
-      { name: '/mocap/rigid_bodies', type: 'geometry_msgs/PoseArray' }
-    ];
-
     // First, get list of available topics to find the right one
     RosManager.ros.getTopics((topics) => {
       let foundTopic = null;
@@ -925,7 +919,6 @@ const DockingTest = {
     const meanYaw = yaws.reduce((s, v) => s + v, 0) / yaws.length;
     const yawStd = this.calculateStdDev(yaws);
     const yawRange = Math.max(yawStd * 6, 1); // Show at least 6-sigma range
-    const minYaw = meanYaw - yawRange / 2;
     const maxYaw = meanYaw + yawRange / 2;
 
     // Draw grid
@@ -1371,7 +1364,7 @@ const DockingTest = {
     }
   },
 
-  onDockingResult(msg) {
+  onDockingResult(_msg) {
     if (this.cycleStartTime) {
       const elapsed = (Date.now() - this.cycleStartTime) / 1000;
       this.results.dockIn.push(elapsed);
@@ -1388,7 +1381,7 @@ const DockingTest = {
     this.cycleStartTime = Date.now(); // Start timing for dock out
   },
 
-  onDockingOutResult(msg) {
+  onDockingOutResult(_msg) {
     if (this.cycleStartTime) {
       const elapsed = (Date.now() - this.cycleStartTime) / 1000;
       this.results.dockOut.push(elapsed);

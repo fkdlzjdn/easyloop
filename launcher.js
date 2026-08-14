@@ -1,6 +1,5 @@
 // Launcher wrapper — starts server and opens browser automatically
 const { exec } = require('child_process');
-const path = require('path');
 const os = require('os');
 
 // Start the actual server and open the browser on the port it selected.

@@ -25,12 +25,13 @@ function makeElement(extra = {}) {
     dataset: {},
     style: {},
     classList: makeClassList(),
+    addEventListener: jest.fn(),
     setAttribute: jest.fn(),
     ...extra
   };
 }
 
-function loadJogControl(robotId = 'R_051') {
+function loadJogControl(robotId = 'R_051', robotModel = null) {
   const source = fs.readFileSync(
     path.join(__dirname, '..', 'public', 'js', 'jog-control.js'),
     'utf8'
@@ -39,17 +40,32 @@ function loadJogControl(robotId = 'R_051') {
   const liftControl = makeElement();
   const modelIoControl = makeElement({ hidden: true });
   const modelIoStatus = makeElement();
+  const stlUlsanControl = makeElement({ hidden: true });
+  const turntableStatus = makeElement();
   const chassisCurrent = makeElement();
   const chassisButtons = [
     makeElement({ dataset: { modelId: 'default_lift_dd' } }),
+    makeElement({ dataset: { modelId: 'stl_ulsan' } }),
     makeElement({ dataset: { modelId: 'sr3_ls_1st' } })
   ];
-  const commandButtons = Array.from({ length: 6 }, () => makeElement());
+  const commandButtons = [
+    'frontDoorOpen',
+    'frontDoorClose',
+    'rearDoorOpen',
+    'rearDoorClose',
+    'frontIntake',
+    'rearDischarge',
+    'conveyorStop'
+  ].map(command => makeElement({ dataset: { chassisCommand: command } }));
+  const commandPreview = makeElement();
   const elements = {
     'jog-drive-type': driveType,
     'jog-model-io-control': modelIoControl,
     'jog-model-io-status': modelIoStatus,
-    'jog-chassis-current': chassisCurrent
+    'jog-model-io-command-preview': commandPreview,
+    'jog-chassis-current': chassisCurrent,
+    'jog-stl-ulsan-control': stlUlsanControl,
+    'jog-turntable-status': turntableStatus
   };
   const calls = [];
 
@@ -74,7 +90,7 @@ function loadJogControl(robotId = 'R_051') {
   const context = {
     App: {
       activeSlotIndex: 0,
-      robotSlots: [{ robotId, ip: '192.168.20.51', connected: true, ros: {} }],
+      robotSlots: [{ robotId, robotModel, ip: '192.168.20.51', connected: true, ros: {} }],
       toast: jest.fn()
     },
     RosManager: {
@@ -82,7 +98,17 @@ function loadJogControl(robotId = 'R_051') {
       getRobotId: jest.fn(() => robotId)
     },
     ROSLIB: { Service, ServiceRequest },
-    ActionSender: {},
+    RobotCompatibility: {
+      isStlUlsanModel: model => ['stl1000w', 'stl1500w'].includes(String(model || '').toLowerCase()),
+      get: slot => slot.compatibilityProfile || {
+        discovered: true,
+        lift: { interface: 'topic' }
+      }
+    },
+    ActionSender: {
+      sendJogActionToSlot: jest.fn().mockResolvedValue({ result: { success: true } }),
+      cancelTaskOnSlot: jest.fn().mockResolvedValue({ success: true })
+    },
     localStorage: {
       getItem: jest.fn(key => storage.get(key) || null),
       setItem: jest.fn((key, value) => storage.set(key, String(value)))
@@ -119,6 +145,10 @@ function loadJogControl(robotId = 'R_051') {
     liftControl,
     modelIoControl,
     modelIoStatus,
+    stlUlsanControl,
+    turntableStatus,
+    commandButtons,
+    commandPreview,
     chassisCurrent
   };
 }
@@ -162,6 +192,36 @@ describe('Jog chassis model control', () => {
     expect(chassisCurrent.textContent).toBe('선택 안 함 (기본) · DD');
   });
 
+  test.each(['stl1000w', 'stl1500w'])('auto-selects stl_ulsan controls only for ROBOT_MODEL %s', robotModel => {
+    const { manager, stlUlsanControl, modelIoControl, chassisCurrent } = loadJogControl(
+      'R_051',
+      robotModel
+    );
+
+    manager._syncChassisModelUi(false);
+
+    expect(manager._getSelectedChassisModel().id).toBe('stl_ulsan');
+    expect(stlUlsanControl.hidden).toBe(false);
+    expect(modelIoControl.hidden).toBe(true);
+    expect(chassisCurrent.textContent).toBe('stl_ulsan · Lift / Turntable · DD');
+  });
+
+  test('sends and cancels a Turntable Jog through the Task input/cancel API', async () => {
+    const { manager, context, turntableStatus } = loadJogControl('R_051', 'stl1500w');
+
+    await manager._runStlTurntableTarget(-90);
+    expect(context.ActionSender.sendJogActionToSlot).toHaveBeenCalledWith(
+      0,
+      0x22,
+      [3, -90, 0],
+      expect.stringMatching(/^easyloop_turntable_/)
+    );
+    expect(turntableStatus.className).toContain('success');
+
+    await manager._cancelStlTurntable();
+    expect(context.ActionSender.cancelTaskOnSlot).toHaveBeenCalledWith(0);
+  });
+
   test('defines the requested sr3_ls_1st command codes', () => {
     const { manager } = loadJogControl();
     const commands = manager.CHASSIS_MODELS.find(model => model.id === 'sr3_ls_1st').commands;
@@ -170,21 +230,61 @@ describe('Jog chassis model control', () => {
     expect(commands.frontDoorClose.cmdType).toBe(145);
     expect(commands.rearDoorOpen.cmdType).toBe(146);
     expect(commands.rearDoorClose.cmdType).toBe(147);
-    expect(commands.frontDischarge.cmdType).toBe(3);
-    expect(commands.rearDischarge.cmdType).toBe(6);
-    Object.values(commands).forEach(command => expect(command.count).toBe(1));
+    expect(commands.frontIntake).toMatchObject({ cmdType: 3, count: 0 });
+    expect(commands.rearDischarge).toMatchObject({ cmdType: 6, count: 0 });
+    expect(commands.conveyorStop).toMatchObject({ cmdType: 2, count: 0 });
+    [
+      commands.frontDoorOpen,
+      commands.frontDoorClose,
+      commands.rearDoorOpen,
+      commands.rearDoorClose
+    ].forEach(command => expect(command.count).toBe(1));
   });
 
-  test('builds Conv/cmd from the active RID instead of hardcoding R_014', async () => {
+  test.each([
+    ['frontIntake', 3, 0],
+    ['rearDischarge', 6, 0],
+    ['conveyorStop', 2, 0]
+  ])('sends %s through the active RID Conv/cmd service', async (commandKey, cmdType, count) => {
     const { manager, calls, modelIoStatus } = loadJogControl('R_051');
     manager._chassisSelections = { R_051: 'sr3_ls_1st' };
 
-    await manager._callChassisCommand('frontDoorOpen');
+    await manager._callChassisCommand(commandKey);
 
     expect(calls).toHaveLength(1);
     expect(calls[0].options.name).toBe('/R_051/Conv/cmd');
     expect(calls[0].options.serviceType).toBe('syscon_msgs/conv_cmd');
-    expect(calls[0].request.cmds).toEqual([{ cmd_type: 144, count: 1 }]);
+    expect(calls[0].request.cmds).toEqual([{ cmd_type: cmdType, count }]);
     expect(modelIoStatus.className).toContain('success');
+  });
+
+  test('simulates chassis service commands without a real ROS service in Test Mode', async () => {
+    const { manager, context, calls, modelIoStatus } = loadJogControl('R_TEST_1');
+    context.App.robotSlots[0].virtualTestRobot = true;
+    context.TestMode = { enabled: true };
+    manager._chassisSelections = { R_TEST_1: 'sr3_ls_1st' };
+
+    await manager._callChassisCommand('frontIntake');
+
+    expect(calls).toHaveLength(0);
+    expect(modelIoStatus.className).toContain('success');
+    expect(modelIoStatus.textContent).toContain('Test Mode 실행 완료');
+  });
+
+  test('shows the description, service, type, and request on hover help', () => {
+    const { manager, commandButtons, commandPreview } = loadJogControl('R_051');
+    manager._chassisSelections = { R_051: 'sr3_ls_1st' };
+
+    manager._refreshChassisCommandHelp();
+    manager._showChassisCommandHelp('conveyorStop');
+
+    const stopButton = commandButtons.find(button =>
+      button.dataset.chassisCommand === 'conveyorStop'
+    );
+    expect(stopButton.title).toContain('현재 컨베이어 동작을 정지합니다.');
+    expect(stopButton.title).toContain('Service: /R_051/Conv/cmd');
+    expect(stopButton.title).toContain('Type: syscon_msgs/conv_cmd');
+    expect(stopButton.title).toContain('"cmd_type":2,"count":0');
+    expect(commandPreview.textContent).toBe(stopButton.title);
   });
 });

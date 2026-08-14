@@ -121,10 +121,11 @@ const SSHTerminal = {
           this.fit();
           break;
 
-        case 'data':
+        case 'data': {
           const data = atob(msg.data);
           this.terminal.write(data);
           break;
+        }
 
         case 'disconnected':
           App.updateSshStatus(false);
@@ -149,7 +150,7 @@ const SSHTerminal = {
       App.updateSshStatus(false);
     };
 
-    this.ws.onerror = (error) => {
+    this.ws.onerror = (_error) => {
       this.terminal.writeln('\r\n\x1b[31mWebSocket error\x1b[0m');
       App.updateSshStatus(false);
     };
@@ -174,8 +175,6 @@ const SSHTerminal = {
         exitCode: 0
       };
     }
-
-    const info = App.getConnectionInfo();
 
     if (!this.sessionId) {
       // Need to create SSH session first
@@ -217,8 +216,6 @@ const SSHTerminal = {
       }));
       return { success: true, results };
     }
-
-    const info = App.getConnectionInfo();
 
     if (!this.sessionId) {
       const connectResult = await this.apiConnect();
@@ -336,8 +333,6 @@ const SSHTerminal = {
     const prevBtn = document.getElementById('btn-terminal-search-prev');
     const nextBtn = document.getElementById('btn-terminal-search-next');
     const closeBtn = document.getElementById('btn-terminal-search-close');
-    const countEl = document.getElementById('terminal-search-count');
-
     if (!searchBar || !searchInput) return;
 
     // Toggle search bar with Ctrl+F
@@ -561,7 +556,6 @@ SSHTerminal.closeTerminal = function(idx) {
 
   // Renumber tabs
   document.querySelectorAll('.terminal-tab[data-term-idx]').forEach((tab, i) => {
-    const realIdx = parseInt(tab.dataset.termIdx);
     tab.childNodes[0].textContent = `Terminal ${i + 1} `;
   });
 };
@@ -642,10 +636,11 @@ SSHTerminal.connectActive = function(password = null) {
         inst.fitAddon.fit();
         break;
 
-      case 'data':
+      case 'data': {
         const data = atob(msg.data);
         inst.terminal.write(data);
         break;
+      }
 
       case 'disconnected':
         App.updateSshStatus(false);
