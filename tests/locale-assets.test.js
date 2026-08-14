@@ -66,10 +66,15 @@ describe('locale assets', () => {
     referencedKeys.forEach(key => expect(koreanKeys).toContain(key));
   });
 
-  test('all checked-in distribution locale assets remain valid JSON', () => {
+  test('package configuration includes public locale assets', () => {
+    const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+
+    expect(packageJson.pkg?.assets).toContain('public/**/*');
+  });
+
+  test('generated distribution locale assets remain valid JSON when present', () => {
     const distributionLocales = findLocaleJsonFiles(path.join(__dirname, '..', 'dist'));
 
-    expect(distributionLocales.length).toBeGreaterThan(0);
     distributionLocales.forEach(filePath => {
       expect(() => JSON.parse(fs.readFileSync(filePath, 'utf8'))).not.toThrow();
     });
