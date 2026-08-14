@@ -25,7 +25,8 @@ describe('RobotCompatibility runtime profiles', () => {
       `${ns}/save_map`, `${ns}/change_map`, `${ns}/static_map`,
       `${ns}/slam_toolbox/serialize_map`,
       `${ns}/amcl/change_map`, `${ns}/Lift/cmd`, `${ns}/Lift/cancel`,
-      `${ns}/Turntable/cmd`, `${ns}/Turntable/cancel`, `${ns}/TARU/goal`
+      `${ns}/Turntable/cmd`, `${ns}/Turntable/cancel`, `${ns}/Turntable/sync_mode`,
+      `${ns}/TARU/goal`
     ];
     const topics = [
       `${ns}/map`, `${ns}/sp_routine`, `${ns}/spcore/MODE`,
@@ -41,6 +42,7 @@ describe('RobotCompatibility runtime profiles', () => {
       [`${ns}/Lift/cancel`]: 'syscon_msgs/string_srv',
       [`${ns}/Turntable/cmd`]: 'syscon_msgs/turntable_cmd',
       [`${ns}/Turntable/cancel`]: 'syscon_msgs/string_srv',
+      [`${ns}/Turntable/sync_mode`]: 'std_srvs/SetBool',
       [`${ns}/TARU/goal`]: 'sp_task/TaskGoal'
     });
 
@@ -80,7 +82,10 @@ describe('RobotCompatibility runtime profiles', () => {
       asyncModeArg: true,
       service: '/R_013/Turntable/cmd',
       serviceType: 'syscon_msgs/turntable_cmd',
-      cancelService: '/R_013/Turntable/cancel'
+      cancelService: '/R_013/Turntable/cancel',
+      feedbackTopic: '/R_013/Turntable/feedback',
+      syncService: '/R_013/Turntable/sync_mode',
+      syncType: 'std_srvs/SetBool'
     });
     expect(profile.task).toMatchObject({
       variant: 'sp_task',

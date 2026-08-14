@@ -13,6 +13,15 @@ const JogControl = {
   _chargeStatusTimer: null,
   _chargeCommandPending: false,
   _stlTurntableTaskPending: false,
+  _telemetrySubscriptions: [],
+  _telemetryTimer: null,
+  _telemetrySlotIndex: -1,
+  _safetyState: null,
+  _lidarSafetyInputs: null,
+  _actualVelocity: null,
+  _liftFeedback: null,
+  _turntableFeedback: null,
+  _lastSafetyBlockSignature: '',
   QUICK_TASK_STORAGE_KEY: 'jogQuickTasks',
   QUICK_TASK_COUNT: 5,
   _quickTaskConfigs: [],
@@ -53,6 +62,17 @@ const JogControl = {
   ],
   PUB_RATE: 100,
   MANUAL_LIFT_PUB_RATE: 75,
+  SAFETY_STALE_MS: 1200,
+  TELEMETRY_STALE_MS: 2500,
+  FEEDBACK_STATUS_LABELS: {
+    0: 'READY',
+    1: 'RUNNING',
+    2: 'COMPLETE',
+    3: 'READY_TO_COMPLETE',
+    4: 'ERROR',
+    5: 'ABORT',
+    6: 'SYNC'
+  },
 
   _getDriveType() {
     return (document.getElementById('jog-drive-type') || {}).value || 'dd';
@@ -218,6 +238,7 @@ const JogControl = {
       this.refreshQuickTaskOptions();
       this._updateQuickTaskTarget();
       this._syncChassisModelUi(false);
+      this._startTelemetry();
     };
 
     // Toggle handler
@@ -268,6 +289,7 @@ const JogControl = {
     toggleBtn.classList.remove('active');
     if (toggleBtnMap) toggleBtnMap.classList.remove('active');
     this._stopJogControls();
+    this._stopTelemetry();
   },
 
   _isPanelOpen() {
@@ -288,6 +310,333 @@ const JogControl = {
     const rid = RosManager.getRobotId(slotIndex);
     const topicSuffix = document.getElementById('jog-topic').value || '/cmd_vel';
     return rid ? `/${rid}${topicSuffix}` : topicSuffix;
+  },
+
+  _emptySafetyState() {
+    const item = () => ({ value: null, at: 0 });
+    return {
+      manual: item(),
+      idle: item(),
+      emo: item(),
+      sto: item(),
+      lidar: item(),
+      brake: item()
+    };
+  },
+
+  _startTelemetry() {
+    this._stopTelemetry(false);
+    const slotIndex = App.activeSlotIndex;
+    const slot = App.robotSlots?.[slotIndex];
+    const ros = typeof RosManager.getRos === 'function' ? RosManager.getRos(slotIndex) : slot?.ros;
+    const rid = typeof RosManager.getRobotId === 'function' ? RosManager.getRobotId(slotIndex) : slot?.robotId;
+    this._telemetrySlotIndex = slotIndex;
+    this._safetyState = this._emptySafetyState();
+    this._lidarSafetyInputs = {
+      field: { value: null, at: 0 },
+      emergency: { value: null, at: 0 }
+    };
+    this._actualVelocity = { motor: null, odom: null };
+    this._liftFeedback = null;
+    this._turntableFeedback = null;
+    this._lastSafetyBlockSignature = '';
+    this._refreshTelemetryUi();
+    if (!slot?.connected || !ros || !rid) return;
+
+    const subscribe = (suffix, messageType, callback) => {
+      try {
+        const topic = new ROSLIB.Topic({
+          ros,
+          name: `/${rid}${suffix}`,
+          messageType,
+          throttle_rate: 100
+        });
+        topic.subscribe(message => {
+          if (this._telemetrySlotIndex !== slotIndex || App.activeSlotIndex !== slotIndex) return;
+          callback(message || {});
+        });
+        this._telemetrySubscriptions.push(topic);
+      } catch (error) {
+        console.warn(`[Jog] ${rid}${suffix} 구독 실패:`, error.message || error);
+      }
+    };
+
+    subscribe('/io/select', 'std_msgs/Bool', msg => this._recordSafety('manual', !msg.data));
+    subscribe('/robot_state', 'syscon_msgs/RobotState', msg => {
+      const state = Number(msg.workstate ?? msg.data);
+      this._recordSafety('idle', Number.isFinite(state) && state === 0);
+    });
+    subscribe('/emergency_sensor', 'std_msgs/Int32MultiArray', msg => {
+      const data = Array.isArray(msg.data) ? msg.data : [];
+      this._recordSafety('emo', data.length > 0 ? Number(data[0]) === 0 : null);
+      this._lidarSafetyInputs.emergency = {
+        value: data.length >= 4 ? Number(data[2]) === 0 && Number(data[3]) === 0 : null,
+        at: Date.now()
+      };
+      this._mergeLidarSafety();
+    });
+    subscribe('/sto_stop', 'std_msgs/Bool', msg => this._recordSafety('sto', !msg.data));
+    subscribe('/io/lidar_field', 'std_msgs/UInt8', msg => {
+      this._lidarSafetyInputs.field = {
+        // HMI contract: field value 1 means a Lidar stop condition.
+        value: Number(msg.data) !== 1,
+        at: Date.now()
+      };
+      this._mergeLidarSafety();
+    });
+    subscribe('/io/break_released', 'std_msgs/Bool', msg => this._recordSafety('brake', Boolean(msg.data)));
+    subscribe('/motor_status', 'syscon_msgs/MotorState', msg => {
+      const twist = msg.feed_vel;
+      if (twist) this._recordActualVelocity('motor', twist);
+    });
+    subscribe('/odom', 'nav_msgs/Odometry', msg => {
+      const twist = msg.twist?.twist;
+      if (twist) this._recordActualVelocity('odom', twist);
+    });
+    subscribe('/Lift/feedback', 'syscon_msgs/LiftFeedback', msg => {
+      this._liftFeedback = { ...msg, at: Date.now() };
+      this._renderLiftFeedback();
+    });
+    subscribe('/Turntable/feedback', 'syscon_msgs/LiftFeedback', msg => {
+      this._turntableFeedback = { ...msg, at: Date.now() };
+      this._renderTurntableFeedback();
+    });
+
+    this._telemetryTimer = setInterval(() => {
+      this._refreshTelemetryUi();
+      this._enforceSafetyGate();
+    }, 500);
+  },
+
+  _stopTelemetry(resetUi = true) {
+    this._telemetrySubscriptions.forEach(topic => {
+      try { topic.unsubscribe(); } catch (error) { /* ignore stale ROS subscription */ }
+    });
+    this._telemetrySubscriptions = [];
+    if (this._telemetryTimer) clearInterval(this._telemetryTimer);
+    this._telemetryTimer = null;
+    this._telemetrySlotIndex = -1;
+    if (resetUi) {
+      this._safetyState = this._emptySafetyState();
+      this._actualVelocity = null;
+      this._liftFeedback = null;
+      this._turntableFeedback = null;
+      this._refreshTelemetryUi();
+    }
+  },
+
+  _recordSafety(key, value) {
+    if (!this._safetyState?.[key]) return;
+    this._safetyState[key] = { value, at: Date.now() };
+    this._refreshSafetyUi();
+    this._enforceSafetyGate();
+  },
+
+  _mergeLidarSafety() {
+    const field = this._lidarSafetyInputs?.field;
+    const emergency = this._lidarSafetyInputs?.emergency;
+    if (!field || !emergency) return;
+    const known = field.value !== null && emergency.value !== null;
+    this._safetyState.lidar = {
+      value: known ? field.value && emergency.value : null,
+      at: known ? Math.min(field.at, emergency.at) : 0
+    };
+    this._refreshSafetyUi();
+    this._enforceSafetyGate();
+  },
+
+  _recordActualVelocity(source, twist) {
+    if (!this._actualVelocity) this._actualVelocity = { motor: null, odom: null };
+    this._actualVelocity[source] = {
+      lx: Number(twist.linear?.x) || 0,
+      ly: Number(twist.linear?.y) || 0,
+      az: Number(twist.angular?.z) || 0,
+      at: Date.now()
+    };
+    this._renderVelocityComparison();
+  },
+
+  _safetyEvaluation() {
+    const slot = App.robotSlots?.[App.activeSlotIndex];
+    if (!this._isStlUlsanSlot(slot)) {
+      return { safe: true, strict: false, reasons: [] };
+    }
+    if (typeof TestMode !== 'undefined' && TestMode.enabled && slot?.virtualTestRobot) {
+      return { safe: true, strict: true, reasons: [], virtual: true };
+    }
+    const labels = {
+      manual: 'MANUAL 모드 미확인',
+      idle: 'IDLE 상태 미확인',
+      emo: 'EMO 정상 미확인',
+      sto: 'STO 정상 미확인',
+      lidar: 'Lidar 정상 미확인',
+      brake: 'Brake Release 미확인'
+    };
+    const now = Date.now();
+    const reasons = [];
+    if (!slot?.connected || !slot?.ros) reasons.push('활성 로봇 미연결');
+    Object.entries(labels).forEach(([key, label]) => {
+      const state = this._safetyState?.[key];
+      if (!state || state.value !== true || now - state.at > this.SAFETY_STALE_MS) {
+        reasons.push(label);
+      }
+    });
+    return { safe: reasons.length === 0, strict: true, reasons };
+  },
+
+  _requireSafety(actionLabel = 'Jog 명령') {
+    const evaluation = this._safetyEvaluation();
+    if (evaluation.safe) return true;
+    const reason = evaluation.reasons.join(', ');
+    this._stopVel();
+    this._setSafetyDetail(`${actionLabel} 차단: ${reason}`);
+    App.toast?.(`${actionLabel} 차단 · ${reason}`, 'error');
+    return false;
+  },
+
+  _enforceSafetyGate() {
+    const evaluation = this._safetyEvaluation();
+    this._refreshSafetyUi(evaluation);
+    if (!evaluation.strict || evaluation.safe) {
+      this._lastSafetyBlockSignature = '';
+      return;
+    }
+    const moving = this._publishing || this._manualLiftState
+      || this._currentLx !== 0 || this._currentLy !== 0 || this._currentAz !== 0;
+    if (!moving) return;
+    this._stopJogControls();
+    const signature = evaluation.reasons.join('|');
+    if (signature !== this._lastSafetyBlockSignature) {
+      this._lastSafetyBlockSignature = signature;
+      App.toast?.(`안전 상태 변경으로 Jog 정지 · ${evaluation.reasons.join(', ')}`, 'error');
+    }
+  },
+
+  _refreshTelemetryUi() {
+    this._refreshSafetyUi();
+    this._renderVelocityComparison();
+    this._renderLiftFeedback();
+    this._renderTurntableFeedback();
+  },
+
+  _setSafetyDetail(message) {
+    const detail = document.getElementById('jog-safety-detail');
+    if (detail) detail.textContent = message;
+  },
+
+  _refreshSafetyUi(evaluation = this._safetyEvaluation()) {
+    const summary = document.getElementById('jog-safety-summary');
+    const gate = document.getElementById('jog-safety-gate');
+    if (summary) {
+      summary.className = evaluation.strict
+        ? (evaluation.safe ? 'safe' : 'blocked')
+        : 'checking';
+      summary.textContent = evaluation.strict
+        ? (evaluation.safe ? 'READY · 명령 허용' : 'BLOCKED · 명령 차단')
+        : 'LEGACY · 표시 전용';
+    }
+    if (gate) gate.classList.toggle('blocked', evaluation.strict && !evaluation.safe);
+
+    const chipLabels = {
+      manual: ['MANUAL', 'AUTO'],
+      idle: ['IDLE', 'NOT IDLE'],
+      emo: ['EMO CLEAR', 'EMO ACTIVE'],
+      sto: ['STO CLEAR', 'STO ACTIVE'],
+      lidar: ['LIDAR CLEAR', 'LIDAR STOP'],
+      brake: ['BRAKE RELEASE', 'BRAKE ON']
+    };
+    const now = Date.now();
+    Object.entries(chipLabels).forEach(([key, labels]) => {
+      const el = document.getElementById(`jog-safety-${key}`);
+      if (!el) return;
+      const item = this._safetyState?.[key];
+      const fresh = item && item.value !== null && now - item.at <= this.SAFETY_STALE_MS;
+      el.className = `jog-safety-chip ${fresh ? (item.value ? 'safe' : 'blocked') : 'unknown'}`;
+      el.textContent = fresh ? labels[item.value ? 0 : 1] : `${key.toUpperCase()} --`;
+    });
+    if (evaluation.strict) {
+      this._setSafetyDetail(evaluation.safe
+        ? '모든 안전 상태가 최신·정상입니다.'
+        : evaluation.reasons.join(' · '));
+    } else {
+      this._setSafetyDetail('stl_ulsan 이외 모델은 안전 상태를 표시하지만 strict gate를 적용하지 않습니다.');
+    }
+
+    const disabled = evaluation.strict && !evaluation.safe;
+    [
+      'jog-fwd', 'jog-bwd', 'jog-left', 'jog-right', 'jog-rot-left', 'jog-rot-right',
+      'jog-lift-up', 'jog-lift-down', 'jog-turntable-go',
+      'jog-turntable-sync-on'
+    ].forEach(id => {
+      const button = document.getElementById(id);
+      if (button) button.disabled = disabled;
+    });
+    document.querySelectorAll('[data-turntable-target]').forEach(button => { button.disabled = disabled; });
+  },
+
+  _renderVelocityComparison() {
+    const command = document.getElementById('jog-command-velocity');
+    if (command) {
+      command.textContent = `Lx ${this._currentLx.toFixed(2)} · Ly ${this._currentLy.toFixed(2)} · Az ${this._currentAz.toFixed(2)}`;
+    }
+    const actual = document.getElementById('jog-actual-velocity');
+    const sourceEl = document.getElementById('jog-velocity-source');
+    if (!actual) return;
+    const now = Date.now();
+    const motor = this._actualVelocity?.motor;
+    const odom = this._actualVelocity?.odom;
+    const selected = motor && now - motor.at <= this.TELEMETRY_STALE_MS
+      ? { ...motor, source: 'motor_status.feed_vel' }
+      : (odom && now - odom.at <= this.TELEMETRY_STALE_MS
+        ? { ...odom, source: 'odom.twist' }
+        : null);
+    actual.textContent = selected
+      ? `Lx ${selected.lx.toFixed(2)} · Ly ${selected.ly.toFixed(2)} · Az ${selected.az.toFixed(2)}`
+      : '수신 대기 / stale';
+    if (sourceEl) sourceEl.textContent = selected ? `Source: ${selected.source}` : 'Source: motor_status → odom fallback';
+  },
+
+  _feedbackStatus(value) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? (this.FEEDBACK_STATUS_LABELS[numeric] || `UNKNOWN(${numeric})`) : '--';
+  },
+
+  _renderLiftFeedback() {
+    const height = document.getElementById('jog-lift-height');
+    const status = document.getElementById('jog-lift-feedback-status');
+    const error = document.getElementById('jog-lift-error');
+    const feedback = this._liftFeedback;
+    const fresh = feedback && Date.now() - feedback.at <= this.TELEMETRY_STALE_MS;
+    if (height) height.textContent = fresh ? `${(Number(feedback.height || 0) / 100).toFixed(2)}°` : '--';
+    if (status) status.textContent = fresh ? this._feedbackStatus(feedback.status) : '--';
+    if (error) error.textContent = fresh ? `0x${Number(feedback.error_code || 0).toString(16).toUpperCase().padStart(4, '0')}` : '--';
+  },
+
+  _renderTurntableFeedback() {
+    const angle = document.getElementById('jog-turntable-angle');
+    const status = document.getElementById('jog-turntable-feedback-status');
+    const error = document.getElementById('jog-turntable-error');
+    const sync = document.getElementById('jog-turntable-sync-state');
+    const feedback = this._turntableFeedback;
+    const fresh = feedback && Date.now() - feedback.at <= this.TELEMETRY_STALE_MS;
+    const numericStatus = Number(feedback?.status);
+    if (angle) angle.textContent = fresh ? `${(Number(feedback.height || 0) / 100).toFixed(2)}°` : '--';
+    if (status) status.textContent = fresh ? this._feedbackStatus(numericStatus) : '--';
+    if (error) error.textContent = fresh ? `0x${Number(feedback.error_code || 0).toString(16).toUpperCase().padStart(4, '0')}` : '--';
+    if (sync) sync.textContent = fresh ? (numericStatus === 6 ? 'ON' : 'OFF') : '확인 중';
+  },
+
+  _confirmRiskyCommand(title, { rid, endpoint, payload = '', warning = '' } = {}) {
+    const lines = [
+      `⚠ ${title}`,
+      '',
+      `대상 RID: ${rid || '--'}`,
+      `ROS endpoint: ${endpoint || '--'}`
+    ];
+    if (payload) lines.push(`Payload: ${payload}`);
+    if (warning) lines.push('', warning);
+    lines.push('', '대상과 상태를 확인했습니까?');
+    return typeof confirm === 'function' ? confirm(lines.join('\n')) : true;
   },
 
   _setupSliders() {
@@ -499,14 +848,25 @@ const JogControl = {
   },
 
   _callMotorReset(serviceSuffix) {
-    const ros = RosManager.ros;
+    const slotIndex = App.activeSlotIndex;
+    const slot = App.robotSlots?.[slotIndex];
+    const ros = typeof RosManager.getRos === 'function'
+      ? RosManager.getRos(slotIndex)
+      : slot?.ros;
     if (!ros) {
       App.toast('ROS not connected', 'error');
       return;
     }
-    const slotIndex = App.activeSlotIndex;
     const rid = RosManager.getRobotId(slotIndex);
     const serviceName = rid ? `/${rid}${serviceSuffix}` : serviceSuffix;
+
+    if (!this._requireSafety('Motor Reset')) return;
+    if (!this._confirmRiskyCommand('Motor Reset을 실행합니다.', {
+      rid,
+      endpoint: serviceName,
+      payload: '{}',
+      warning: '모터 드라이버가 재초기화되며 예상치 못한 상태 변화가 발생할 수 있습니다.'
+    })) return;
 
     if (typeof TestMode !== 'undefined' && TestMode.enabled) {
       App.toast(`[TestMode] ${serviceName}: OK`, 'success');
@@ -539,11 +899,12 @@ const JogControl = {
       return;
     }
     if (this._chargeCommandPending) return;
-    if (enabled && !confirm(
-      `⚠ ${rid} 충전을 ON으로 전환합니다.\n\n`
-      + '실제 충전 릴레이가 동작할 수 있습니다.\n'
-      + '정말 충전을 시작하시겠습니까?'
-    )) return;
+    if (enabled && !this._confirmRiskyCommand('충전을 ON으로 전환합니다.', {
+      rid,
+      endpoint: `/${rid}/io/charge_relay (runtime discovery)`,
+      payload: '{ data: true }',
+      warning: '실제 충전 릴레이가 동작할 수 있습니다. 정말 충전을 시작하시겠습니까?'
+    })) return;
 
     const onBtn = document.getElementById('jog-charge-on');
     const offBtn = document.getElementById('jog-charge-off');
@@ -755,6 +1116,7 @@ const JogControl = {
       : slot?.robotId;
     const isUp = direction === 'up';
     const label = isUp ? '리프트 UP' : '리프트 DOWN';
+    if (!this._requireSafety(label)) return false;
     const model = this._getSelectedChassisModel();
     if (!['lift', 'lift_service'].includes(model.controlProfile)) {
       this._setManualLiftStatus('error', '현재 차상 모델은 수동 리프트를 지원하지 않습니다.');
@@ -943,6 +1305,12 @@ const JogControl = {
     document.getElementById('jog-turntable-cancel')?.addEventListener('click', event => {
       this._cancelStlTurntable(event.currentTarget);
     });
+    document.getElementById('jog-turntable-sync-on')?.addEventListener('click', event => {
+      this._setTurntableSync(true, event.currentTarget);
+    });
+    document.getElementById('jog-turntable-sync-off')?.addEventListener('click', event => {
+      this._setTurntableSync(false, event.currentTarget);
+    });
   },
 
   async _runStlTurntableTarget(target, button = null) {
@@ -965,6 +1333,15 @@ const JogControl = {
       this._setStlTurntableStatus('error', 'Task 입력 기능을 사용할 수 없습니다.');
       return false;
     }
+    if (!this._requireSafety('Turntable 이동')) return false;
+    const rid = RosManager.getRobotId(slotIndex) || slot.robotId;
+    const profile = typeof RobotCompatibility !== 'undefined' ? RobotCompatibility.get(slot) : null;
+    if (!this._confirmRiskyCommand('Turntable을 이동합니다.', {
+      rid,
+      endpoint: profile?.task?.goalName || `/${rid}/TARU/goal`,
+      payload: `action_type=0x22, action_args=[3, ${target}, 0]`,
+      warning: '턴테이블 회전 반경에 사람과 적재물이 없는지 확인하세요.'
+    })) return false;
 
     this._stopVel();
     this._stopManualLift();
@@ -1018,6 +1395,56 @@ const JogControl = {
       return false;
     } finally {
       if (button) button.disabled = false;
+    }
+  },
+
+  async _setTurntableSync(enabled, button = null) {
+    const slotIndex = App.activeSlotIndex;
+    const slot = App.robotSlots?.[slotIndex];
+    const ros = typeof RosManager.getRos === 'function' ? RosManager.getRos(slotIndex) : slot?.ros;
+    const rid = typeof RosManager.getRobotId === 'function' ? RosManager.getRobotId(slotIndex) : slot?.robotId;
+    if (!this._isStlUlsanSlot(slot) || !slot?.connected || !ros || !rid) {
+      this._setStlTurntableStatus('error', '연결된 stl_ulsan 로봇에서만 Sync를 변경할 수 있습니다.');
+      return false;
+    }
+    // Sync OFF is a risk-reducing command and must remain available during a safety stop.
+    if (enabled && !this._requireSafety('Turntable Sync ON')) return false;
+    const profile = typeof RobotCompatibility !== 'undefined' ? RobotCompatibility.get(slot) : null;
+    const serviceName = profile?.actions?.turntable?.syncService || `/${rid}/Turntable/sync_mode`;
+    const serviceType = profile?.actions?.turntable?.syncType || 'std_srvs/SetBool';
+    if (!this._confirmRiskyCommand(`Turntable Sync를 ${enabled ? 'ON' : 'OFF'}으로 전환합니다.`, {
+      rid,
+      endpoint: serviceName,
+      payload: `{ data: ${enabled} }`,
+      warning: enabled
+        ? 'Sync ON은 Turntable 추종 제어를 활성화합니다.'
+        : 'Sync OFF는 Turntable 추종 제어를 해제합니다.'
+    })) return false;
+
+    if (button) button.disabled = true;
+    this._stopVel();
+    this._stopManualLift();
+    this._setStlTurntableStatus('running', `${rid} · Sync ${enabled ? 'ON' : 'OFF'} 요청 중...`);
+    try {
+      const result = await new Promise((resolve, reject) => {
+        const service = new ROSLIB.Service({ ros, name: serviceName, serviceType });
+        service.callService(
+          new ROSLIB.ServiceRequest({ data: enabled }),
+          resolve,
+          error => reject(new Error(String(error || `${serviceName} 호출 실패`)))
+        );
+      });
+      if (result?.success === false) throw new Error(result.message || '로봇이 Sync 변경을 거부했습니다.');
+      this._setStlTurntableStatus('success', `${rid} · Sync ${enabled ? 'ON' : 'OFF'} 요청 완료 · feedback 확인 중`);
+      App.toast(`${rid} Turntable Sync ${enabled ? 'ON' : 'OFF'}`, 'success');
+      return true;
+    } catch (error) {
+      this._setStlTurntableStatus('error', `Sync 변경 실패: ${error.message || error}`);
+      App.toast(`Turntable Sync 변경 실패: ${error.message || error}`, 'error');
+      return false;
+    } finally {
+      if (button) button.disabled = false;
+      this._refreshSafetyUi();
     }
   },
 
@@ -1161,6 +1588,15 @@ const JogControl = {
       this._setQuickTaskStatus('error', '활성 로봇이 연결되어 있지 않습니다.');
       return;
     }
+    if (!this._requireSafety(`Quick Task ${index + 1}`)) return;
+    const rid = RosManager.getRobotId(slotIndex) || slot.robotId;
+    const profile = typeof RobotCompatibility !== 'undefined' ? RobotCompatibility.get(slot) : null;
+    if (!this._confirmRiskyCommand('Quick Task를 실행합니다.', {
+      rid,
+      endpoint: profile?.task?.goalName || `/${rid}/TARU/goal`,
+      payload: `saved task: ${taskName}`,
+      warning: '저장된 Task가 로봇과 차상을 실제로 동작시킬 수 있습니다.'
+    })) return;
 
     this._quickTaskConfigs[index] = { taskName, displayName };
     this._saveQuickTaskConfigs();
@@ -1199,6 +1635,21 @@ const JogControl = {
 
       const key = e.key;
       const normalizedKey = typeof key === 'string' ? key.toLowerCase() : key;
+      if (normalizedKey === 'r' || normalizedKey === 'v' || normalizedKey === 't') {
+        e.preventDefault();
+        e.stopImmediatePropagation?.();
+        if (e.repeat) return;
+        if (normalizedKey === 'r') {
+          const input = document.getElementById('jog-turntable-target');
+          this._runStlTurntableTarget(Number(input?.value));
+        } else if (normalizedKey === 'v') {
+          this._cancelStlTurntable();
+        } else {
+          const syncOn = Number(this._turntableFeedback?.status) === 6;
+          this._setTurntableSync(!syncOn);
+        }
+        return;
+      }
       if (normalizedKey === 'o' || normalizedKey === 'f') {
         e.preventDefault();
         e.stopImmediatePropagation?.();
@@ -1251,7 +1702,11 @@ const JogControl = {
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) this._stopJogControls();
     });
-    document.addEventListener('amr:active-robot-changed', () => this._stopJogControls());
+    document.addEventListener('amr:active-robot-changed', () => {
+      this._stopJogControls();
+      if (this._isPanelOpen()) this._startTelemetry();
+      else this._stopTelemetry();
+    });
     if (typeof window !== 'undefined') {
       window.addEventListener('blur', () => this._stopJogControls());
       window.addEventListener('pagehide', () => this._stopJogControls());
@@ -1287,12 +1742,14 @@ const JogControl = {
   },
 
   _setVel(lx, ly, az) {
+    if (!this._requireSafety('주행 Jog')) return false;
     this._stopManualLift();
     this._currentLx = lx;
     this._currentLy = ly || 0;
     this._currentAz = az;
     this._updateDisplay();
     this._startPublishing();
+    return true;
   },
 
   _stopVel() {
@@ -1316,6 +1773,7 @@ const JogControl = {
     if (lyEl) lyEl.textContent = this._currentLy.toFixed(2);
     document.getElementById('jog-cur-az').textContent = this._currentAz.toFixed(2);
     document.getElementById('jog-pub-status').textContent = this._publishing ? 'On' : 'Off';
+    this._renderVelocityComparison();
 
     ['jog-fwd', 'jog-bwd', 'jog-left', 'jog-right', 'jog-rot-left', 'jog-rot-right'].forEach(id => {
       const el = document.getElementById(id);

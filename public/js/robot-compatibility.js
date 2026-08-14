@@ -61,6 +61,8 @@ const RobotCompatibility = {
         cancelService: isStlUlsan ? `${ns}/Lift/cancel` : null,
         cancelType: isStlUlsan ? 'syscon_msgs/string_srv' : null,
         cancelArgs: isStlUlsan ? { data: '' } : null,
+        feedbackTopic: `${ns}/Lift/feedback`,
+        feedbackType: 'syscon_msgs/LiftFeedback',
         commands: isStlUlsan
           ? { stop: 0, up: 1, down: 2 }
           : { stop: 0, up: 1, down: -1 }
@@ -73,7 +75,11 @@ const RobotCompatibility = {
           service: isStlUlsan ? `${ns}/Turntable/cmd` : null,
           serviceType: isStlUlsan ? 'syscon_msgs/turntable_cmd' : null,
           cancelService: isStlUlsan ? `${ns}/Turntable/cancel` : null,
-          cancelType: isStlUlsan ? 'syscon_msgs/string_srv' : null
+          cancelType: isStlUlsan ? 'syscon_msgs/string_srv' : null,
+          feedbackTopic: `${ns}/Turntable/feedback`,
+          feedbackType: 'syscon_msgs/LiftFeedback',
+          syncService: isStlUlsan ? `${ns}/Turntable/sync_mode` : null,
+          syncType: isStlUlsan ? 'std_srvs/SetBool' : null
         }
       },
       task: {
@@ -144,7 +150,7 @@ const RobotCompatibility = {
       `${ns}/save_map`, `${ns}/change_map`, `${ns}/amcl/change_map`,
       `${ns}/slam_toolbox/serialize_map`, '/slam_toolbox/serialize_map',
       `${ns}/Lift/cmd`, `${ns}/Lift/cancel`,
-      `${ns}/Turntable/cmd`, `${ns}/Turntable/cancel`,
+      `${ns}/Turntable/cmd`, `${ns}/Turntable/cancel`, `${ns}/Turntable/sync_mode`,
       `${ns}/TARU/goal`, `${ns}/spx/task/goal`
     ].filter(name => services.includes(name));
     const typeEntries = await Promise.all(typeCandidates.map(async name => {
@@ -186,6 +192,7 @@ const RobotCompatibility = {
     const legacyTask = `${ns}/TARU/goal`;
     const turntableService = `${ns}/Turntable/cmd`;
     const turntableCancel = `${ns}/Turntable/cancel`;
+    const turntableSync = `${ns}/Turntable/sync_mode`;
     const isStlUlsan = this.isStlUlsanModel(slot.robotModel);
     const hasServiceMapApi = hasService(`${ns}/change_map`)
       && /(^|\/)SaveMap$/.test(saveType);
@@ -206,7 +213,11 @@ const RobotCompatibility = {
         service: hasService(turntableService) ? turntableService : `${ns}/Turntable/cmd`,
         serviceType: serviceTypes[turntableService] || 'syscon_msgs/turntable_cmd',
         cancelService: hasService(turntableCancel) ? turntableCancel : `${ns}/Turntable/cancel`,
-        cancelType: serviceTypes[turntableCancel] || 'syscon_msgs/string_srv'
+        cancelType: serviceTypes[turntableCancel] || 'syscon_msgs/string_srv',
+        feedbackTopic: `${ns}/Turntable/feedback`,
+        feedbackType: 'syscon_msgs/LiftFeedback',
+        syncService: hasService(turntableSync) ? turntableSync : `${ns}/Turntable/sync_mode`,
+        syncType: serviceTypes[turntableSync] || 'std_srvs/SetBool'
       };
     }
 

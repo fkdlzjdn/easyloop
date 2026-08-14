@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>EasyLoop</title>
-  <link rel="stylesheet" href="css/style.css?v=20260806-stl-ulsan-jog">
+  <link rel="stylesheet" href="css/style.css?v=20260806-stl-ulsan-jog&jog-safety=20260813">
   <link rel="stylesheet" href="css/can-diagnostics.css?v=20260725-responsive-layout">
   <link rel="stylesheet" href="vendor/xterm/xterm.css?v=5.3.0">
 </head>
@@ -2378,6 +2378,21 @@ free -h"></textarea>
           <input type="text" id="jog-topic" value="/cmd_vel" class="jog-topic-input">
         </div>
       </div>
+      <section id="jog-safety-gate" class="jog-safety-gate" aria-live="polite">
+        <div class="jog-safety-header">
+          <span>Jog 안전 게이트</span>
+          <strong id="jog-safety-summary" class="checking">상태 확인 중 · 명령 차단</strong>
+        </div>
+        <div class="jog-safety-grid">
+          <span id="jog-safety-manual" class="jog-safety-chip unknown">MODE --</span>
+          <span id="jog-safety-idle" class="jog-safety-chip unknown">STATE --</span>
+          <span id="jog-safety-emo" class="jog-safety-chip unknown">EMO --</span>
+          <span id="jog-safety-sto" class="jog-safety-chip unknown">STO --</span>
+          <span id="jog-safety-lidar" class="jog-safety-chip unknown">LIDAR --</span>
+          <span id="jog-safety-brake" class="jog-safety-chip unknown">BRAKE --</span>
+        </div>
+        <small id="jog-safety-detail">stl_ulsan은 모든 안전 상태가 최신·정상일 때만 Jog 명령을 허용합니다.</small>
+      </section>
       <div class="jog-dpad">
         <!-- QD: rotation row (q/e) -->
         <div class="jog-dpad-row jog-qd-only" style="display:none;">
@@ -2435,7 +2450,12 @@ free -h"></textarea>
         <span>Az: <strong id="jog-cur-az">0.00</strong></span>
         <span>Pub: <strong id="jog-pub-status">Off</strong></span>
       </div>
-      <p class="jog-hint">DD: W/X/A/D | QD: W/X=fwd/bwd, A/D=strafe, Q/E=rotate | Lift: Z=up, C=down | 충전: O=ON, F=OFF</p>
+      <div class="jog-velocity-compare">
+        <div><span>명령</span><code id="jog-command-velocity">Lx 0.00 · Ly 0.00 · Az 0.00</code></div>
+        <div><span>실제</span><code id="jog-actual-velocity">수신 대기</code></div>
+        <small id="jog-velocity-source">Source: /{RID}/motor_status → /odom fallback</small>
+      </div>
+      <p class="jog-hint">DD: W/X/A/D | QD: W/X=fwd/bwd, A/D=strafe, Q/E=rotate | Lift: Z/C | Turntable: R=이동, V=취소, T=Sync | 충전: O=ON, F=OFF</p>
       <div class="jog-service-btns">
         <button class="btn btn-small btn-warning" id="jog-motor-reset" title="Call /rid/motor_reset">Motor Reset</button>
         <button class="btn btn-small btn-warning" id="jog-lift-motor-reset" title="Call /rid/lift_motor_reset">Lift Motor Reset</button>
@@ -2454,6 +2474,11 @@ free -h"></textarea>
           </button>
         </div>
         <div id="jog-manual-lift-status" class="jog-manual-lift-status">버튼 또는 키를 누르는 동안만 동작</div>
+        <div class="jog-feedback-grid">
+          <span>현재 높이 <strong id="jog-lift-height">--</strong></span>
+          <span>상태 <strong id="jog-lift-feedback-status">--</strong></span>
+          <span>오류 <strong id="jog-lift-error">--</strong></span>
+        </div>
       </div>
       <div id="jog-stl-ulsan-control" class="jog-stl-ulsan-control" hidden>
         <div class="jog-stl-ulsan-header">
@@ -2471,6 +2496,17 @@ free -h"></textarea>
           <input id="jog-turntable-target" type="number" min="-180" max="180" step="1" value="0">
           <button class="btn btn-small btn-primary" id="jog-turntable-go" type="button">이동</button>
           <button class="btn btn-small btn-danger" id="jog-turntable-cancel" type="button">정지 / Task 취소</button>
+        </div>
+        <div class="jog-turntable-sync-row">
+          <span>Sync <strong id="jog-turntable-sync-state">확인 중</strong></span>
+          <button class="btn btn-small btn-primary" id="jog-turntable-sync-on" type="button">Sync ON</button>
+          <button class="btn btn-small" id="jog-turntable-sync-off" type="button">Sync OFF</button>
+          <kbd>T</kbd>
+        </div>
+        <div class="jog-feedback-grid">
+          <span>현재 각도 <strong id="jog-turntable-angle">--</strong></span>
+          <span>상태 <strong id="jog-turntable-feedback-status">--</strong></span>
+          <span>오류 <strong id="jog-turntable-error">--</strong></span>
         </div>
         <div id="jog-turntable-status" class="jog-turntable-status">Turntable Action args: [mode, target, asyncmode]</div>
       </div>
@@ -2557,6 +2593,7 @@ free -h"></textarea>
         <div class="sc-item"><kbd>Q</kbd><kbd>E</kbd> <span>Jog 회전</span></div>
         <div class="sc-item"><kbd>S</kbd><kbd>Space</kbd> <span>Jog 즉시 정지</span></div>
         <div class="sc-item"><kbd>Z</kbd><kbd>C</kbd> <span>리프트 상승 / 하강</span></div>
+        <div class="sc-item"><kbd>R</kbd><kbd>V</kbd><kbd>T</kbd> <span>Turntable 목표 이동 / 취소 / Sync 전환</span></div>
         <div class="sc-item"><kbd>O</kbd><kbd>F</kbd> <span>Jog 충전 ON(확인) / OFF(즉시)</span></div>
         <div class="sc-item"><kbd>+</kbd><kbd>-</kbd> <span>Jog 선속도 증감</span></div>
         <div class="sc-item"><kbd>Ctrl</kbd>+<kbd>+</kbd><kbd>-</kbd> <span>Jog 각속도 증감</span></div>
@@ -2947,7 +2984,7 @@ free -h"></textarea>
   <script src="js/i18n.js"></script>
   <script src="js/app.js?v=20260731-manual-on-robot-switch&health=3"></script>
   <script src="js/dashboard.js"></script>
-  <script src="js/robot-compatibility.js?v=20260806-stl-ulsan-jog"></script>
+  <script src="js/robot-compatibility.js?v=20260813-jog-safety"></script>
   <script src="js/ros-manager.js?v=20260806-stl-ulsan-jog&health=3"></script>
   <script src="js/test-mode.js?v=20260728-drive-lab"></script>
   <script src="js/ros-info.js"></script>
@@ -3243,7 +3280,7 @@ free -h"></textarea>
   <script src="js/file-transfer.js?v=20260723-active-robot-session"></script>
   <script src="js/commands.js"></script>
   <script src="js/action-sender.js?v=20260806-stl-ulsan-jog"></script>
-  <script src="js/jog-control.js?v=20260806-stl-ulsan-jog"></script>
+  <script src="js/jog-control.js?v=20260813-jog-safety"></script>
   <script src="js/vel-monitor.js"></script>
   <script src="js/docking-test.js"></script>
   <script src="js/init-setup.js"></script>

@@ -214,6 +214,10 @@ describe('Jog Quick Task', () => {
       compatibilityProfile
     );
     manager._stopVel = jest.fn();
+    const at = Date.now();
+    manager._safetyState = Object.fromEntries(
+      ['manual', 'idle', 'emo', 'sto', 'lidar', 'brake'].map(key => [key, { value: true, at }])
+    );
 
     expect(manager._getSelectedChassisModel().id).toBe('stl_ulsan');
     manager._startManualLift('up', liftUpButton);
