@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="css/style.css?v=20260806-stl-ulsan-jog">
   <link rel="stylesheet" href="css/can-diagnostics.css?v=20260725-responsive-layout">
   <link rel="stylesheet" href="vendor/xterm/xterm.css?v=5.3.0">
-  <link rel="stylesheet" href="css/hig.css?v=20260812-hig-system">
+  <link rel="stylesheet" href="css/hig.css?v=20260814-global-button-balance">
 </head>
 <body>
   <!-- Password Overlay -->
@@ -1224,88 +1224,135 @@
                           title="Task 저장 (Ctrl+S)">Task 저장</button>
                 </div>
               </div>
-              <button type="button" id="btn-run-quick-task"
-                      class="btn quick-task-run quick-task-run-primary"
-                      title="현재 Quick Task를 저장한 뒤 활성 로봇에서 바로 실행합니다">저장 후 실행</button>
-
-              <div class="quick-task-meta">
-                <label>
-                  <span>Task 이름</span>
-                  <small>task_id</small>
-                  <input type="text" id="quick-task-name" placeholder="예: pallet_to_dock">
-                </label>
-                <label>
-                  <span>반복</span>
-                  <small>loop_flag</small>
-                  <input type="number" id="quick-task-loop" min="0" max="9999" value="1">
-                </label>
-              </div>
-
-              <div class="quick-task-guide">
-                <strong>빠른 반복시험</strong>
-                <span>① WayPoint·Trajectory·곡선 경로 입력 → ② 주행 입력 완료 → ③ 마지막 동작 선택(생략 가능) → ④ 저장 후 실행</span>
-              </div>
-
-              <div class="quick-task-tools">
-                <button type="button" id="btn-quick-waypoint" class="btn btn-small" data-shortcut="W"
-                        title="첫 클릭으로 위치, 두 번째 클릭으로 방향을 지정해 Way_Point Action을 추가합니다">📍 WayPoint</button>
-                <button type="button" id="btn-quick-trajectory" class="btn btn-small" data-shortcut="T"
-                        title="각 경유점의 위치와 방향을 두 번의 클릭으로 지정해 TrajectoryFollowing Action을 만듭니다">〰 Trajectory 시작</button>
-                <button type="button" id="btn-quick-freehand" class="btn btn-small quick-freehand-tool" data-shortcut="G"
-                        title="맵에서 누른 채 곡선을 그리면 경로를 자동 정리해 TrajectoryFollowing Action을 만듭니다">✍ 곡선 경로 그리기</button>
-                <button type="button" id="btn-quick-trajectory-finish" class="btn btn-small btn-primary"
-                        data-shortcut="F" disabled
-                        title="현재 WayPoint 또는 Trajectory 입력을 마치고 마지막 동작을 선택합니다">✓ 주행 입력 완료</button>
-                <button type="button" id="btn-quick-docking" class="btn btn-small" data-shortcut="D"
-                        title="맵에서 도킹 시작 위치·방향을 지정한 뒤 WayPoint와 Docking을 함께 추가합니다">⌖ 맵 지정 + Docking</button>
-                <button type="button" id="btn-quick-docking-inline" class="btn btn-small"
-                        data-shortcut="⇧D"
-                        title="위치 WayPoint 없이 Docking Action만 현재 Task 맨 뒤에 추가합니다">🔌 Docking만 추가</button>
-                <button type="button" id="btn-quick-docking-out" class="btn btn-small" data-shortcut="O"
-                        title="위치 WayPoint 없이 DockingOut Action만 현재 Task 맨 뒤에 추가합니다">↩ DockingOut만 추가</button>
-                <button type="button" id="btn-quick-docking-out-map" class="btn btn-small"
-                        data-shortcut="⇧O"
-                        title="맵에서 시작 위치·방향을 지정한 뒤 WayPoint와 DockingOut을 함께 추가합니다">⌖ 맵 지정 + DockingOut</button>
-              </div>
-              <details class="quick-task-shortcut-help">
-                <summary>⌨ Quick Task 단축키 전체 보기</summary>
-                <div class="quick-task-shortcut-groups" aria-label="Quick Task 단축키">
-                  <section>
-                    <strong>Action 입력</strong>
-                    <div class="quick-task-shortcuts">
-                      <span><kbd>W</kbd> WayPoint 연속</span>
-                      <span><kbd>T</kbd> Trajectory</span>
-                      <span><kbd>G</kbd> 곡선 경로</span>
-                      <span><kbd>D</kbd> 맵 지정 + Docking</span>
-                      <span><kbd>Shift+D</kbd> Docking만 추가</span>
-                      <span><kbd>O</kbd> DockingOut만 추가</span>
-                      <span><kbd>Shift+O</kbd> 맵 지정 + DockingOut</span>
-                      <span><kbd>S</kbd> Standby</span>
-                      <span><kbd>F</kbd> 주행 입력 완료</span>
-                    </div>
-                  </section>
-                  <section>
-                    <strong>마지막 동작 선택창</strong>
-                    <div class="quick-task-shortcuts">
-                      <span><kbd>D</kbd> Docking</span>
-                      <span><kbd>O</kbd> DockingOut</span>
-                      <span><kbd>S</kbd> Standby</span>
-                      <span><kbd>N</kbd> 또는 <kbd>0</kbd> 추가 없음</span>
-                    </div>
-                  </section>
-                  <section>
-                    <strong>작성 · 실행</strong>
-                    <div class="quick-task-shortcuts">
-                      <span><kbd>I</kbd> Task Info</span>
-                      <span><kbd>E</kbd> 상세 편집</span>
-                      <span><kbd>Ctrl</kbd>+<kbd>S</kbd> Task 저장</span>
-                      <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> 저장 후 실행</span>
-                      <span><kbd>Backspace</kbd> 마지막 취소</span>
-                      <span><kbd>Esc</kbd> 입력 중지 / 선택창 닫기</span>
-                    </div>
-                  </section>
+              <div class="quick-task-primary-row">
+                <div class="quick-task-meta">
+                  <label>
+                    <span>Task 이름</span>
+                    <small>task_id</small>
+                    <input type="text" id="quick-task-name" placeholder="예: pallet_to_dock">
+                  </label>
+                  <label>
+                    <span>반복</span>
+                    <small>loop_flag</small>
+                    <input type="number" id="quick-task-loop" min="0" max="9999" value="1">
+                  </label>
                 </div>
-              </details>
+                <button type="button" id="btn-run-quick-task"
+                        class="btn quick-task-run quick-task-run-primary"
+                        title="현재 Quick Task를 저장한 뒤 활성 로봇에서 바로 실행합니다">저장 후 실행</button>
+              </div>
+
+              <div class="quick-task-onboarding">
+                <div class="quick-task-guide">
+                  <strong>빠른 반복시험</strong>
+                  <span>경로 입력 → 주행 입력 완료 → 마지막 동작 선택 → 저장 후 실행</span>
+                </div>
+                <details class="quick-task-shortcut-help">
+                  <summary>⌨ Quick Task 단축키 전체 보기</summary>
+                  <div class="quick-task-shortcut-groups" aria-label="Quick Task 단축키">
+                    <section>
+                      <strong>Action 입력</strong>
+                      <div class="quick-task-shortcuts">
+                        <span><kbd>W</kbd> WayPoint 연속</span>
+                        <span><kbd>T</kbd> Trajectory</span>
+                        <span><kbd>G</kbd> 곡선 경로</span>
+                        <span><kbd>D</kbd> 맵 지정 + Docking</span>
+                        <span><kbd>Shift+D</kbd> Docking만 추가</span>
+                        <span><kbd>O</kbd> DockingOut만 추가</span>
+                        <span><kbd>Shift+O</kbd> 맵 지정 + DockingOut</span>
+                        <span><kbd>S</kbd> Standby</span>
+                        <span><kbd>F</kbd> 주행 입력 완료</span>
+                      </div>
+                    </section>
+                    <section>
+                      <strong>마지막 동작 선택창</strong>
+                      <div class="quick-task-shortcuts">
+                        <span><kbd>D</kbd> Docking</span>
+                        <span><kbd>O</kbd> DockingOut</span>
+                        <span><kbd>S</kbd> Standby</span>
+                        <span><kbd>N</kbd> 또는 <kbd>0</kbd> 추가 없음</span>
+                      </div>
+                    </section>
+                    <section>
+                      <strong>작성 · 실행</strong>
+                      <div class="quick-task-shortcuts">
+                        <span><kbd>I</kbd> Task Info</span>
+                        <span><kbd>E</kbd> 상세 편집</span>
+                        <span><kbd>Ctrl</kbd>+<kbd>S</kbd> Task 저장</span>
+                        <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> 저장 후 실행</span>
+                        <span><kbd>Backspace</kbd> 마지막 취소</span>
+                        <span><kbd>Esc</kbd> 입력 중지 / 선택창 닫기</span>
+                      </div>
+                    </section>
+                  </div>
+                </details>
+              </div>
+
+              <div class="quick-task-workspace">
+                <section class="quick-task-control-card quick-task-path-card" aria-labelledby="quick-task-path-title">
+                  <div class="quick-task-section-heading">
+                    <span class="quick-task-step">1</span>
+                    <div>
+                      <strong id="quick-task-path-title">경로 입력</strong>
+                      <small>맵에서 이동 경로를 구성하세요.</small>
+                    </div>
+                  </div>
+                  <div class="quick-task-tools">
+                    <button type="button" id="btn-quick-waypoint" class="btn btn-small" data-shortcut="W"
+                            title="첫 클릭으로 위치, 두 번째 클릭으로 방향을 지정해 Way_Point Action을 추가합니다">📍 WayPoint</button>
+                    <button type="button" id="btn-quick-trajectory" class="btn btn-small" data-shortcut="T"
+                            title="각 경유점의 위치와 방향을 두 번의 클릭으로 지정해 TrajectoryFollowing Action을 만듭니다">〰 Trajectory 시작</button>
+                    <button type="button" id="btn-quick-freehand" class="btn btn-small quick-freehand-tool" data-shortcut="G"
+                            title="맵에서 누른 채 곡선을 그리면 경로를 자동 정리해 TrajectoryFollowing Action을 만듭니다">✍ 곡선 경로 그리기</button>
+                    <button type="button" id="btn-quick-trajectory-finish" class="btn btn-small btn-primary"
+                            data-shortcut="F" disabled
+                            title="현재 WayPoint 또는 Trajectory 입력을 마치고 마지막 동작을 선택합니다">✓ 주행 입력 완료</button>
+                  </div>
+                  <div id="quick-task-status" class="quick-task-status">
+                    도구를 선택한 뒤 왼쪽 맵에서 위치를 지정하세요.
+                  </div>
+                </section>
+
+                <section class="quick-task-control-card quick-task-terminal-card" aria-labelledby="quick-task-terminal-title">
+                  <div class="quick-task-section-heading">
+                    <span class="quick-task-step">2</span>
+                    <div>
+                      <strong id="quick-task-terminal-title">보조 Action</strong>
+                      <small>현재 Task 뒤에 필요한 동작만 추가하세요.</small>
+                    </div>
+                  </div>
+                  <div class="quick-task-terminal-tools">
+                    <button type="button" id="btn-quick-docking" class="btn btn-small" data-shortcut="D"
+                            title="맵에서 도킹 시작 위치·방향을 지정한 뒤 WayPoint와 Docking을 함께 추가합니다">⌖ 맵 지정 + Docking</button>
+                    <button type="button" id="btn-quick-docking-inline" class="btn btn-small"
+                            data-shortcut="⇧D"
+                            title="위치 WayPoint 없이 Docking Action만 현재 Task 맨 뒤에 추가합니다">🔌 Docking만 추가</button>
+                    <button type="button" id="btn-quick-docking-out-map" class="btn btn-small"
+                            data-shortcut="⇧O"
+                            title="맵에서 시작 위치·방향을 지정한 뒤 WayPoint와 DockingOut을 함께 추가합니다">⌖ 맵 지정 + DockingOut</button>
+                  </div>
+                  <div class="quick-inline-actions">
+                    <div class="quick-standby-row">
+                      <label for="quick-standby-duration">Standby</label>
+                      <input type="number" id="quick-standby-duration" min="0" step="0.1" value="5">
+                      <span>초</span>
+                      <button type="button" id="btn-quick-standby" class="btn btn-small"
+                              data-shortcut="S">＋ 추가</button>
+                    </div>
+                    <div class="quick-standby-row">
+                      <label for="quick-docking-out-distance">DockingOut</label>
+                      <input type="number" id="quick-docking-out-distance" step="0.1" value="-1.0">
+                      <span>m</span>
+                      <button type="button" id="btn-quick-docking-out" class="btn btn-small"
+                              data-shortcut="O"
+                              title="위치 WayPoint 없이 DockingOut Action만 현재 Task 맨 뒤에 추가합니다">↩ 추가</button>
+                      <button type="button" id="btn-quick-docking-out-inline" hidden aria-hidden="true" tabindex="-1">
+                        DockingOut 호환 버튼
+                      </button>
+                    </div>
+                  </div>
+                </section>
+              </div>
 
               <div class="quick-task-options">
                 <details>
@@ -1372,49 +1419,38 @@
                 </details>
               </div>
 
-              <div class="quick-inline-actions">
-                <div class="quick-standby-row">
-                  <label for="quick-standby-duration">Standby 시간</label>
-                  <input type="number" id="quick-standby-duration" min="0" step="0.1" value="5">
-                  <span>초</span>
-                  <button type="button" id="btn-quick-standby" class="btn btn-small"
-                          data-shortcut="S">＋ Standby 추가</button>
-                </div>
-                <div class="quick-standby-row">
-                  <label for="quick-docking-out-distance">DockingOut 거리</label>
-                  <input type="number" id="quick-docking-out-distance" step="0.1" value="-1.0">
-                  <span>m</span>
-                  <button type="button" id="btn-quick-docking-out-inline" class="btn btn-small"
-                          data-shortcut="O">↩ 현재 Task 맨 뒤에 추가</button>
-                </div>
-              </div>
-
-              <div id="quick-task-status" class="quick-task-status">
-                도구를 선택한 뒤 왼쪽 맵에서 위치를 지정하세요.
-              </div>
-
-              <div class="quick-action-preview">
-                <div class="quick-action-preview-head">
-                  <strong>실시간 Action 목록</strong>
-                  <div>
-                    <span><b id="quick-task-action-count">0</b> actions</span>
-                    <button type="button" id="btn-quick-action-undo-delete" class="btn btn-mini" disabled>↶ 삭제 취소</button>
+              <div class="quick-task-results-grid">
+                <section class="quick-action-preview" aria-labelledby="quick-action-preview-title">
+                  <div class="quick-action-preview-head">
+                    <div>
+                      <strong id="quick-action-preview-title">ROS Action 미리보기</strong>
+                      <small>실제로 전송될 Action 단위</small>
+                    </div>
+                    <div>
+                      <span><b id="quick-task-action-count">0</b> actions</span>
+                      <button type="button" id="btn-quick-action-undo-delete" class="btn btn-mini" disabled>↶ 삭제 취소</button>
+                    </div>
                   </div>
-                </div>
-                <div id="quick-task-action-preview" class="quick-action-preview-list">
-                  <span class="quick-action-preview-empty">추가된 Action 없음</span>
-                </div>
-              </div>
+                  <div id="quick-task-action-preview" class="quick-action-preview-list">
+                    <span class="quick-action-preview-empty">추가된 Action 없음</span>
+                  </div>
+                </section>
 
-              <div class="quick-task-sequence-header">
-                <strong>구성 항목 (<span id="quick-task-count">0</span>)</strong>
-                <div>
-                  <button type="button" id="btn-quick-task-undo" class="btn btn-small" disabled>마지막 취소</button>
-                  <button type="button" id="btn-quick-task-clear" class="btn btn-small">전체 비우기</button>
-                </div>
-              </div>
-              <div id="quick-task-sequence" class="quick-task-sequence">
-                <p class="quick-task-empty">아직 추가된 항목이 없습니다.</p>
+                <section class="quick-task-sequence-card" aria-labelledby="quick-task-sequence-title">
+                  <div class="quick-task-sequence-header">
+                    <div>
+                      <strong id="quick-task-sequence-title">작성 순서 (<span id="quick-task-count">0</span>)</strong>
+                      <small>맵에서 추가한 경로와 보조 동작</small>
+                    </div>
+                    <div>
+                      <button type="button" id="btn-quick-task-undo" class="btn btn-small" disabled>마지막 취소</button>
+                      <button type="button" id="btn-quick-task-clear" class="btn btn-small">전체 비우기</button>
+                    </div>
+                  </div>
+                  <div id="quick-task-sequence" class="quick-task-sequence">
+                    <p class="quick-task-empty">아직 추가된 항목이 없습니다.</p>
+                  </div>
+                </section>
               </div>
             </section>
 
@@ -3244,8 +3280,8 @@ free -h"></textarea>
   <script src="js/ssh-terminal.js"></script>
   <script src="js/file-transfer.js?v=20260723-active-robot-session"></script>
   <script src="js/commands.js"></script>
-  <script src="js/action-sender.js?v=20260806-stl-ulsan-jog"></script>
-  <script src="js/jog-control.js?v=20260806-stl-ulsan-jog"></script>
+  <script src="js/action-sender.js?v=20260814-jog-shortcut-priority"></script>
+  <script src="js/jog-control.js?v=20260814-jog-shortcut-priority"></script>
   <script src="js/vel-monitor.js"></script>
   <script src="js/docking-test.js"></script>
   <script src="js/init-setup.js"></script>
