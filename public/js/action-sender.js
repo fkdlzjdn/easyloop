@@ -1756,6 +1756,11 @@ const ActionSender = {
 
   _handleQuickTaskShortcut(event = {}) {
     if (!this._isQuickTaskBuilderOpen()) return false;
+    // When Jog is open, overlapping movement/IO keys belong to Jog first.
+    // Returning without consuming lets JogControl's capture listener handle them.
+    if (typeof JogControl !== 'undefined' && JogControl._ownsKeyboardEvent?.(event)) {
+      return false;
+    }
 
     const key = String(event.key || '');
     const normalized = key.toLowerCase();

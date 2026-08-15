@@ -275,6 +275,26 @@ const JogControl = {
     return panel && panel.style.display !== 'none';
   },
 
+  _normalizeKeyboardKey(key) {
+    const value = String(key || '');
+    return value.length === 1 ? value.toLowerCase() : value;
+  },
+
+  _ownsKeyboardEvent(event = {}) {
+    if (!this._isPanelOpen()) return false;
+    const target = event.target || document.activeElement;
+    const tag = String(target?.tagName || '').toUpperCase();
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) {
+      return false;
+    }
+    const key = this._normalizeKeyboardKey(event.key);
+    return [
+      'ArrowUp', 'w', 'ArrowDown', 'x',
+      'ArrowLeft', 'a', 'ArrowRight', 'd',
+      'q', 'e', 's', ' ', 'z', 'c', 'o', 'f'
+    ].includes(key);
+  },
+
   _getLinearSpeed() {
     return parseFloat(document.getElementById('jog-linear-speed').value) || 0.2;
   },
@@ -1188,17 +1208,12 @@ const JogControl = {
 
   _setupKeyboard() {
     document.addEventListener('keydown', (e) => {
-      // Only respond when Jog panel is open and no input is focused
-      if (!this._isPanelOpen()) return;
-      if (document.activeElement && (
-        document.activeElement.tagName === 'INPUT'
-        || document.activeElement.tagName === 'TEXTAREA'
-        || document.activeElement.tagName === 'SELECT'
-        || document.activeElement.isContentEditable
-      )) return;
+      // Jog owns its shortcuts while the panel is open. Other capture handlers
+      // (including Quick Task) use the same ownership check and yield first.
+      if (!this._ownsKeyboardEvent(e)) return;
 
-      const key = e.key;
-      const normalizedKey = typeof key === 'string' ? key.toLowerCase() : key;
+      const key = this._normalizeKeyboardKey(e.key);
+      const normalizedKey = key;
       if (normalizedKey === 'o' || normalizedKey === 'f') {
         e.preventDefault();
         e.stopImmediatePropagation?.();
@@ -1231,13 +1246,13 @@ const JogControl = {
     }, true);
 
     document.addEventListener('keyup', (e) => {
-      const normalizedKey = typeof e.key === 'string' ? e.key.toLowerCase() : e.key;
+      const normalizedKey = this._normalizeKeyboardKey(e.key);
       if (normalizedKey === this._manualLiftHeldKey) {
         e.preventDefault();
         this._stopManualLift();
         return;
       }
-      this._activeKeys.delete(e.key);
+      this._activeKeys.delete(normalizedKey);
       if (!this._isPanelOpen()) return;
       this._updateFromKeys();
     });
