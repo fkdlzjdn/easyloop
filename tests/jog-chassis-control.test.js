@@ -153,6 +153,13 @@ function loadJogControl(robotId = 'R_051', robotModel = null) {
   };
 }
 
+function markSafetyReady(manager) {
+  const at = Date.now();
+  manager._safetyState = Object.fromEntries(
+    ['manual', 'idle', 'emo', 'sto', 'lidar', 'brake'].map(key => [key, { value: true, at }])
+  );
+}
+
 describe('Jog chassis model control', () => {
   test('sr3_ls_1st selects DD drive and swaps lift controls for conveyor controls', () => {
     const {
@@ -208,6 +215,7 @@ describe('Jog chassis model control', () => {
 
   test('sends and cancels a Turntable Jog through the Task input/cancel API', async () => {
     const { manager, context, turntableStatus } = loadJogControl('R_051', 'stl1500w');
+    markSafetyReady(manager);
 
     await manager._runStlTurntableTarget(-90);
     expect(context.ActionSender.sendJogActionToSlot).toHaveBeenCalledWith(

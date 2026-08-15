@@ -3262,9 +3262,13 @@ document.addEventListener('DOMContentLoaded', () => {
       if (shortcutsOverlay) shortcutsOverlay.classList.add('hidden');
       const jogPanel = document.getElementById('jog-panel');
       if (jogPanel && jogPanel.style.display !== 'none') {
-        jogPanel.style.display = 'none';
-        const jogBtn = document.getElementById('btn-jog-toggle');
-        if (jogBtn) jogBtn.classList.remove('active');
+        if (typeof JogControl !== 'undefined' && JogControl._closePanel) {
+          JogControl._closePanel();
+        } else {
+          jogPanel.style.display = 'none';
+          const jogBtn = document.getElementById('btn-jog-toggle');
+          if (jogBtn) jogBtn.classList.remove('active');
+        }
       }
       const cmdPanel = document.getElementById('cmd-panel');
       if (cmdPanel && cmdPanel.style.display !== 'none') {
@@ -3407,25 +3411,8 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    // WASD + QE = Jog control
-    const jogKeys = { 'w': 'forward', 'a': 'left', 's': 'backward', 'd': 'right', 'q': 'rotate-left', 'e': 'rotate-right' };
-    if (jogKeys[key.toLowerCase()]) {
-      e.preventDefault();
-      const dir = jogKeys[key.toLowerCase()];
-      if (typeof JogControl !== 'undefined' && JogControl._publishOnce) {
-        const mapping = {
-          'forward': { linear: 0.3, angular: 0 },
-          'backward': { linear: -0.3, angular: 0 },
-          'left': { linear: 0, angular: 0.5 },
-          'right': { linear: 0, angular: -0.5 },
-          'rotate-left': { linear: 0, angular: 0.8 },
-          'rotate-right': { linear: 0, angular: -0.8 },
-        };
-        const m = mapping[dir];
-        if (m) JogControl._publishOnce(m.linear, m.angular);
-      }
-      return;
-    }
+    // WASD/QE are handled exclusively by JogControl while its panel is open.
+    // Keeping a second global publisher here can move a robot with a hidden panel.
   });
 
   // ============ Initialize New UX Components ============

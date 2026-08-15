@@ -214,6 +214,10 @@ describe('Jog Quick Task', () => {
       compatibilityProfile
     );
     manager._stopVel = jest.fn();
+    const at = Date.now();
+    manager._safetyState = Object.fromEntries(
+      ['manual', 'idle', 'emo', 'sto', 'lidar', 'brake'].map(key => [key, { value: true, at }])
+    );
 
     expect(manager._getSelectedChassisModel().id).toBe('stl_ulsan');
     manager._startManualLift('up', liftUpButton);
@@ -311,6 +315,9 @@ describe('Jog Quick Task', () => {
       stopImmediatePropagation: jest.fn()
     };
     expect(manager._ownsKeyboardEvent(shiftedDrive)).toBe(true);
+    ['r', 'v', 't'].forEach(key => {
+      expect(manager._ownsKeyboardEvent({ key, target: { tagName: 'DIV' } })).toBe(true);
+    });
 
     documentListeners.keydown(shiftedDrive);
     expect(manager._activeKeys.has('d')).toBe(true);
