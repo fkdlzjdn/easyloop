@@ -297,4 +297,36 @@ describe('Jog Quick Task', () => {
 
     expect(manager._setChargeRelay).not.toHaveBeenCalled();
   });
+
+  test('owns overlapping Quick Task keys while Jog is open, including shifted letters', () => {
+    const { manager, documentListeners } = loadJogControl();
+    manager._updateFromKeys = jest.fn();
+    manager._setupKeyboard();
+
+    const shiftedDrive = {
+      key: 'D',
+      shiftKey: true,
+      target: { tagName: 'DIV' },
+      preventDefault: jest.fn(),
+      stopImmediatePropagation: jest.fn()
+    };
+    expect(manager._ownsKeyboardEvent(shiftedDrive)).toBe(true);
+
+    documentListeners.keydown(shiftedDrive);
+    expect(manager._activeKeys.has('d')).toBe(true);
+    expect(manager._updateFromKeys).toHaveBeenCalledTimes(1);
+    expect(shiftedDrive.stopImmediatePropagation).toHaveBeenCalled();
+
+    documentListeners.keyup({ key: 'D' });
+    expect(manager._activeKeys.has('d')).toBe(false);
+  });
+
+  test('does not own shortcuts while a text field is focused', () => {
+    const { manager } = loadJogControl();
+
+    expect(manager._ownsKeyboardEvent({
+      key: 'w',
+      target: { tagName: 'INPUT' }
+    })).toBe(false);
+  });
 });
