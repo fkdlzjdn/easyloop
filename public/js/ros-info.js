@@ -183,6 +183,12 @@ const RosInfo = {
     this.renderFavorites();
   },
 
+  clearFavorites() {
+    this._favorites = [];
+    this.saveFavorites();
+    this.renderFavorites();
+  },
+
   isFavorite(name, type) {
     return this._favorites.some(f => f.name === name && f.type === type);
   },
@@ -242,6 +248,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Load favorites
   RosInfo.loadFavorites();
+
+  const favoritesClearBtn = document.getElementById('btn-ros-fav-clear');
+  if (favoritesClearBtn) {
+    favoritesClearBtn.addEventListener('click', () => {
+      RosInfo.clearFavorites();
+      App.toast('ROS 즐겨찾기를 모두 지웠습니다.', 'info');
+    });
+  }
 
   // Double-click on list items to toggle favorites
   ['ros-nodes', 'ros-topics', 'ros-services', 'ros-params'].forEach(selectId => {

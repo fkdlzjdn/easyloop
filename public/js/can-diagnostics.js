@@ -222,6 +222,8 @@ const CanDiag = {
   // ==================== 로봇 IP 헬퍼 ====================
 
   _getRobotIp() {
+    const activeRobot = typeof App.getActiveRobot === 'function' ? App.getActiveRobot() : null;
+    if (activeRobot && activeRobot.ip) return activeRobot.ip;
     if (App.currentRobot && App.currentRobot.ip) return App.currentRobot.ip;
     const sel = document.getElementById('active-robot-select');
     if (sel && sel.value) {
@@ -237,7 +239,7 @@ const CanDiag = {
     const ip = robotIp || this._getRobotIp();
     if (!ip) {
       this._log('\uB85C\uBD07\uC774 \uC120\uD0DD\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.', 'error');
-      App.showToast('\uB85C\uBD07\uC744 \uBA3C\uC800 \uC120\uD0DD\uD558\uC138\uC694.', 'error');
+      App.toast('\uB85C\uBD07\uC744 \uBA3C\uC800 \uC120\uD0DD\uD558\uC138\uC694.', 'error');
       return null;
     }
 

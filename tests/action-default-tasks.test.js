@@ -1455,6 +1455,50 @@ describe('built-in single-action tasks', () => {
     });
   });
 
+  test('Quick Task yields overlapping shortcuts to an open Jog panel', () => {
+    const { manager, context } = loadActionSender();
+    const buttons = {
+      'btn-quick-waypoint': { click: jest.fn() },
+      'btn-quick-trajectory': { click: jest.fn() },
+      'btn-quick-docking': { click: jest.fn() },
+      'btn-quick-docking-inline': { click: jest.fn() },
+      'btn-quick-docking-out': { click: jest.fn() },
+      'btn-quick-standby': { click: jest.fn() },
+      'btn-quick-trajectory-finish': { click: jest.fn() },
+      'btn-quick-task-edit': { click: jest.fn() }
+    };
+    context.document.getElementById.mockImplementation(id => {
+      if (id === 'quick-task-builder-view') return { hidden: false };
+      if (id === 'tab-action') return { classList: { contains: () => true } };
+      return buttons[id] || null;
+    });
+    context.JogControl = {
+      _ownsKeyboardEvent: jest.fn(event => ['w', 'd', 'o', 's', 'f', 'e'].includes(
+        String(event.key || '').toLowerCase()
+      ))
+    };
+    manager._builderMode = 'quick';
+    const shortcutEvent = (key, extra = {}) => ({
+      key,
+      target: { tagName: 'DIV' },
+      preventDefault: jest.fn(),
+      stopImmediatePropagation: jest.fn(),
+      ...extra
+    });
+
+    ['w', 'd', 'o', 's', 'f', 'e'].forEach(key => {
+      const event = shortcutEvent(key);
+      expect(manager._handleQuickTaskShortcut(event)).toBe(false);
+      expect(event.preventDefault).not.toHaveBeenCalled();
+      expect(event.stopImmediatePropagation).not.toHaveBeenCalled();
+    });
+    expect(manager._handleQuickTaskShortcut(shortcutEvent('D', { shiftKey: true }))).toBe(false);
+    Object.values(buttons).forEach(button => expect(button.click).not.toHaveBeenCalled());
+
+    expect(manager._handleQuickTaskShortcut(shortcutEvent('t'))).toBe(true);
+    expect(buttons['btn-quick-trajectory'].click).toHaveBeenCalledTimes(1);
+  });
+
   test('compiles Docking alone or with a map-selected start WayPoint', () => {
     const { manager } = loadActionSender();
 

@@ -176,6 +176,11 @@ const App = {
     setTimeout(remove, duration);
   },
 
+  // Compatibility entry point retained for older feature modules.
+  showToast(message, type = 'info', duration = 3200) {
+    return this.toast(message, type, duration);
+  },
+
   getEventLog() {
     try {
       const raw = localStorage.getItem(this.EVENT_LOG_KEY);
@@ -365,6 +370,15 @@ const App = {
     if (typeof Dashboard !== 'undefined' && Dashboard.render) {
       Dashboard.render();
     }
+  },
+
+  logEvent(event = {}) {
+    return this.addEvent(
+      event.type || 'system',
+      event.title || event.message || '',
+      event.detail || null,
+      event.level || 'info'
+    );
   },
 
   clearEventLog(type = null) {
@@ -1908,6 +1922,10 @@ const App = {
     }
   },
 
+  setActiveSlot(index) {
+    return this.switchActiveRobot(index);
+  },
+
   updateActionTargetLabel() {
     const labelEl = document.getElementById('action-target-robot-label');
     const statusEl = document.getElementById('action-target-status');
@@ -2287,6 +2305,20 @@ const App = {
   },
 
   // Get current connection info (for SSH etc., based on active slot)
+  getActiveRobot() {
+    const slot = this.activeSlotIndex >= 0 && this.activeSlotIndex < this.robotSlots.length
+      ? this.robotSlots[this.activeSlotIndex]
+      : null;
+    if (slot) {
+      return {
+        ...slot,
+        id: slot.id || slot.robotId || '',
+        name: slot.name || slot.robotId || ''
+      };
+    }
+    return this.currentRobot || null;
+  },
+
   getConnectionInfo() {
     const slot = this.activeSlotIndex >= 0 ? this.robotSlots[this.activeSlotIndex] : null;
     return {
@@ -3389,8 +3421,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const floatingWidget = document.getElementById('floating-widget');
   if (floatingWidget) {
     let fwDragging = false, fwOffX = 0, fwOffY = 0;
-    const fwHeader = floatingWidget.querySelector('.fw-header');
-    const fwClose = floatingWidget.querySelector('.fw-close');
+    const fwHeader = document.getElementById('floating-widget-header');
+    const fwClose = document.getElementById('floating-widget-close');
     if (fwHeader) {
       fwHeader.addEventListener('mousedown', (e) => {
         fwDragging = true;
