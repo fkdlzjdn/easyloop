@@ -172,42 +172,46 @@ const MapFileManager = {
   },
 
   async loadMap(mapName) {
-    if (!confirm(`Load map "${mapName}" on robot?\nThis will call TARU/change_map service.`)) return;
+    if (!confirm(`Load map "${mapName}" on robot?\n검증된 runtime map adapter만 사용합니다.`)) return;
 
     try {
-      // Call ROS service to change map
-      const robotId = (typeof RosManager !== 'undefined' && RosManager.getRobotId) ?
-        RosManager.getRobotId(App.activeSlotIndex) : 'R_001';
-
-      // Use ActionSender style service call
+      const slot = App.robotSlots?.[App.activeSlotIndex];
       const ros = typeof RosManager !== 'undefined' ? RosManager.getRos(App.activeSlotIndex) : null;
-
-      if (ros) {
-        const service = new ROSLIB.Service({
-          ros: ros,
-          name: `/${robotId}/TARU/change_map`,
-          serviceType: 'syscon_msgs/String_srv'
-        });
-
-        service.callService({ data: mapName }, (result) => {
-          if (result.success) {
-            App.toast(`Map "${mapName}" loaded successfully`, 'success');
-            // Unlock map and re-subscribe after map_server restarts
-            setTimeout(() => {
-              if (typeof RosManager !== 'undefined') {
-                RosManager._mapLocked = false;
-                RosManager._resubscribeMapTopic();
-              }
-            }, 3000);
-          } else {
-            App.toast(`Failed to load map: ${result.message}`, 'error');
-          }
-        }, (error) => {
-          App.toast(`Service error: ${error}`, 'error');
-        });
-      } else {
-        App.toast('ROS not connected', 'error');
+      if (!slot?.connected || !ros) throw new Error('ROS가 연결되어 있지 않습니다.');
+      if (typeof RobotCompatibility === 'undefined') {
+        throw new Error('중앙 호환성 검사기를 사용할 수 없습니다.');
       }
+      const profile = slot.compatibilityPromise
+        ? await slot.compatibilityPromise
+        : (RobotCompatibility.get(slot).discovered
+          ? RobotCompatibility.get(slot)
+          : await RobotCompatibility.discover(slot));
+      const map = RobotCompatibility.requireCapability(profile, 'map', 'Map 불러오기');
+      if (!map.reloadService || !map.reloadType) {
+        throw new Error('Map 불러오기 service/type이 ROS graph에서 검증되지 않았습니다.');
+      }
+      const yamlPath = `/home/syscon/ROS_DB/map/${mapName}.yaml`;
+      const request = RobotCompatibility.mapReloadRequest(profile, yamlPath);
+      const result = await new Promise((resolve, reject) => {
+        const service = new ROSLIB.Service({
+          ros,
+          name: map.reloadService,
+          serviceType: map.reloadType
+        });
+        service.callService(
+          new ROSLIB.ServiceRequest(request),
+          resolve,
+          error => reject(new Error(String(error || `${map.reloadService} 호출 실패`)))
+        );
+      });
+      if (result?.success === false || (result?.result !== undefined && Number(result.result) !== 0)) {
+        throw new Error(result?.message || `result=${result?.result}`);
+      }
+      App.toast(`Map "${mapName}" loaded successfully`, 'success');
+      setTimeout(() => {
+        RosManager._mapLocked = false;
+        RosManager._resubscribeMapTopic();
+      }, 3000);
     } catch (e) {
       App.toast('Error: ' + e.message, 'error');
     }

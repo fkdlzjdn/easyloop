@@ -1,5 +1,7 @@
 // Fleet control: render every connected robot on one verified map.
 const FleetControl = {
+  POSITION_THROTTLE_MS: 100,
+  POSITION_SOURCE_FRESH_MS: 250,
   _active: false,
   _positionSubscriptions: new Map(),
   _poses: new Map(),
@@ -270,34 +272,41 @@ const FleetControl = {
       this._poses.set(index, { ...slot.pose, source: 'cached', receivedAt: Date.now() });
     }
 
-    const robotStateTopic = new ROSLIB.Topic({
-      ros: slot.ros,
-      name: `/${rid}/robot_state`,
-      messageType: 'syscon_msgs/RobotState',
-      throttle_rate: 500,
-      queue_length: 1
-    });
-    robotStateTopic.subscribe((msg) => {
-      if (!this._active || generation !== this._generation || App.robotSlots[index] !== slot) return;
-      if (!msg.pose || msg.pose.x === undefined || msg.pose.y === undefined) return;
-      this._updatePose(index, {
-        x: Number(msg.pose.x),
-        y: Number(msg.pose.y),
-        yaw: Number(msg.pose.theta) || 0
-      }, 'robot_state');
-    });
+    const robotStateEndpoint = typeof RobotCompatibility !== 'undefined'
+      ? RobotCompatibility.get(slot)?.monitoring?.topics?.robotState
+      : null;
+    let robotStateTopic = null;
+    if (robotStateEndpoint?.name && robotStateEndpoint?.type) {
+      robotStateTopic = new ROSLIB.Topic({
+        ros: slot.ros,
+        name: robotStateEndpoint.name,
+        messageType: robotStateEndpoint.type,
+        throttle_rate: this.POSITION_THROTTLE_MS,
+        queue_length: 1
+      });
+      robotStateTopic.subscribe((msg) => {
+        if (!this._active || generation !== this._generation || App.robotSlots[index] !== slot) return;
+        if (!msg.pose || msg.pose.x === undefined || msg.pose.y === undefined) return;
+        this._updatePose(index, {
+          x: Number(msg.pose.x),
+          y: Number(msg.pose.y),
+          yaw: Number(msg.pose.theta) || 0
+        }, 'robot_state');
+      });
+    }
 
     const amclTopic = new ROSLIB.Topic({
       ros: slot.ros,
       name: `/${rid}/amcl_pose`,
       messageType: 'geometry_msgs/PoseWithCovarianceStamped',
-      throttle_rate: 500,
+      throttle_rate: this.POSITION_THROTTLE_MS,
       queue_length: 1
     });
     amclTopic.subscribe((msg) => {
       if (!this._active || generation !== this._generation || App.robotSlots[index] !== slot) return;
       const current = this._poses.get(index);
-      if (current?.source === 'robot_state' && Date.now() - current.receivedAt < 3000) return;
+      if (current?.source === 'robot_state'
+          && Date.now() - current.receivedAt < this.POSITION_SOURCE_FRESH_MS) return;
       const pose = msg?.pose?.pose;
       if (!pose?.position || !pose?.orientation) return;
       this._updatePose(index, {
@@ -307,7 +316,7 @@ const FleetControl = {
       }, 'amcl_pose');
     });
 
-    this._positionSubscriptions.set(index, [robotStateTopic, amclTopic]);
+    this._positionSubscriptions.set(index, [robotStateTopic, amclTopic].filter(Boolean));
   },
 
   _updatePose(index, pose, source) {

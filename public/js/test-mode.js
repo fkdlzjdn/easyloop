@@ -118,6 +118,18 @@ const TestMode = {
     }
     this.virtualRobots.forEach(robot => {
       robot.driveModel = selected;
+      const slot = App.robotSlots?.[robot.slotIndex];
+      const driveModel = slot?.compatibilityProfile?.chassis?.driveModel;
+      if (driveModel) {
+        Object.assign(driveModel, {
+          attempted: true,
+          verified: true,
+          kind: selected === 'qd' ? 'qd' : 'dd',
+          actionModelType: selected === 'qd' ? 1 : 0,
+          parameter: '[TestMode] drive model selector',
+          reason: ''
+        });
+      }
       const profile = robot.currentAction?.profile;
       if (!profile) return;
       profile.modelType = selected === 'action'
@@ -449,6 +461,78 @@ const TestMode = {
       slot.virtualTestRobot = true;
       slot.wsPort = this.ROSBRIDGE_PORT;
       slot.robotModel = 'Test AMR';
+      slot.projectHint = 'SR-AMR-Base';
+      if (typeof RobotCompatibility !== 'undefined') {
+        const ns = `/${robotId}`;
+        const services = [
+          `${ns}/spx/task/goal`, `${ns}/spx/task/pause`, `${ns}/spx/task/resume`,
+          `${ns}/spx/task/cancel`, `${ns}/spx/set_mode`, `${ns}/save_map`,
+          `${ns}/change_map`, `${ns}/Lift/cmd`, `${ns}/Lift/cancel`,
+          `${ns}/Turntable/cmd`, `${ns}/Turntable/cancel`, `${ns}/Turntable/sync_mode`,
+          `${ns}/Conv/cmd`
+        ];
+        const topics = [
+          `${ns}/spx/task/feedback`, `${ns}/spx/task/result`, `${ns}/spx/operation_mode`,
+          `${ns}/map`, `${ns}/cmd_vel`, `${ns}/bms`, `${ns}/robot_state`,
+          `${ns}/motor_status`, `${ns}/odom`, `${ns}/Lift/feedback`,
+          `${ns}/Turntable/feedback`
+        ];
+        const serviceTypes = {
+          [`${ns}/spx/task/goal`]: 'spx_task_msgs/TaskGoal',
+          [`${ns}/spx/task/pause`]: 'spx_task_msgs/TaskPause',
+          [`${ns}/spx/task/resume`]: 'spx_task_msgs/TaskResume',
+          [`${ns}/spx/task/cancel`]: 'spx_task_msgs/TaskCancel',
+          [`${ns}/spx/set_mode`]: 'spx_msgs/SetMode',
+          [`${ns}/save_map`]: 'spx_msgs/SaveMap',
+          [`${ns}/change_map`]: 'map_server/LoadMap',
+          [`${ns}/Lift/cmd`]: 'syscon_msgs/lift_cmd',
+          [`${ns}/Lift/cancel`]: 'syscon_msgs/string_srv',
+          [`${ns}/Turntable/cmd`]: 'syscon_msgs/turntable_cmd',
+          [`${ns}/Turntable/cancel`]: 'syscon_msgs/string_srv',
+          [`${ns}/Turntable/sync_mode`]: 'std_srvs/SetBool',
+          [`${ns}/Conv/cmd`]: 'syscon_msgs/conv_cmd'
+        };
+        const topicTypes = {
+          [`${ns}/spx/task/feedback`]: 'spx_task_msgs/TaskFeedback',
+          [`${ns}/spx/task/result`]: 'spx_task_msgs/TaskResult',
+          [`${ns}/spx/operation_mode`]: 'std_msgs/String',
+          [`${ns}/map`]: 'nav_msgs/OccupancyGrid',
+          [`${ns}/cmd_vel`]: 'geometry_msgs/Twist',
+          [`${ns}/bms`]: 'std_msgs/Float32MultiArray',
+          [`${ns}/robot_state`]: 'syscon_msgs/RobotState',
+          [`${ns}/motor_status`]: 'syscon_msgs/MotorState',
+          [`${ns}/odom`]: 'nav_msgs/Odometry',
+          [`${ns}/Lift/feedback`]: 'syscon_msgs/LiftFeedback',
+          [`${ns}/Turntable/feedback`]: 'syscon_msgs/LiftFeedback'
+        };
+        slot.compatibilityProfile = RobotCompatibility._buildProfile(
+          slot, services, topics, serviceTypes, topicTypes
+        );
+        const virtualActionTypes = [
+          0x01, 0x02, 0x07, 0x08, 0x10, 0x15,
+          0x16, 0x17, 0x18, 0x19, 0x21, 0x22
+        ];
+        slot.compatibilityProfile.task.actionCatalog = {
+          attempted: true,
+          verified: true,
+          service: '[TestMode] virtual action registry',
+          serviceType: 'virtual/GetActionsInfo',
+          types: virtualActionTypes,
+          actions: virtualActionTypes.map(type => ({
+            name: 'TestModeAction', type, key: `test_${type}`
+          })),
+          reason: ''
+        };
+        const virtualDriveModel = this._selectedVirtualDriveModel();
+        slot.compatibilityProfile.chassis.driveModel = {
+          attempted: true,
+          verified: true,
+          kind: virtualDriveModel === 'qd' ? 'qd' : 'dd',
+          actionModelType: virtualDriveModel === 'qd' ? 1 : 0,
+          parameter: '[TestMode] drive model selector',
+          reason: ''
+        };
+      }
       slot.conveyorCount = 2;
       const pose = { ...startPoses[index] };
       slot.pose = { ...pose };

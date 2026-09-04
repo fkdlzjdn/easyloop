@@ -74,6 +74,18 @@ function loadFleetControl(slotCount = 2) {
   const context = {
     App,
     ROSLIB: { Topic: FakeTopic, Service: FakeService, ServiceRequest: class ServiceRequest {} },
+    RobotCompatibility: {
+      get: slot => ({
+        monitoring: {
+          topics: {
+            robotState: {
+              name: `/${slot.robotId}/robot_state`,
+              type: 'syscon_msgs/RobotState'
+            }
+          }
+        }
+      })
+    },
     document: {
       addEventListener: jest.fn(),
       getElementById: jest.fn(id => elements[id] || null),
@@ -111,7 +123,10 @@ describe('fleet control map', () => {
     const poseTopics = topics.filter(topic => topic.options.messageType !== 'nav_msgs/OccupancyGrid');
     let mapTopics = topics.filter(topic => topic.options.messageType === 'nav_msgs/OccupancyGrid');
     expect(poseTopics).toHaveLength(6);
-    expect(poseTopics.every(topic => topic.options.throttle_rate === 500)).toBe(true);
+    expect(poseTopics.every(topic =>
+      topic.options.throttle_rate === manager.POSITION_THROTTLE_MS
+      && topic.options.queue_length === 1
+    )).toBe(true);
     expect(mapTopics).toHaveLength(2);
     expect(mapTopics.map(topic => topic.options.name).sort()).toEqual(['/R_001/map', '/map']);
     expect(manager._mapInFlight).toBe(1);

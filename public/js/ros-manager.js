@@ -1,11 +1,34 @@
 // ROS Connection Manager - Multi-robot slot based
 const RosManager = {
   throttleRate: 150,
+  // Pose sources are arbitrated by recent activity instead of a permanent
+  // "received once" flag. Map-referenced TF is the single live pose source;
+  // lower-rate messages are used only while that TF is unavailable.
+  POSE_FAST_THROTTLE_MS: 33,
+  // /tf multiplexes transforms from many publishers. Throttling the whole
+  // topic can discard the odom->base packet we need, so the dedicated pose
+  // connection receives every small TF packet and filters locally by RID.
+  TF_THROTTLE_MS: 0,
+  POSE_RECONNECT_MS: 1500,
+  POSE_SOURCE_FRESH_MS: 600,
+  AMCL_SOURCE_FRESH_MS: 1500,
+  POSE_MESSAGE_MAX_AGE_MS: 10000,
+  INITIAL_POSE_CONFIRM_MS: 10000,
+  INITIAL_POSE_TF_SETTLE_MS: 3000,
+  INITIAL_POSE_MATCH_DISTANCE_M: 1.5,
+  MAP_THROTTLE_MS: 1000,
+  MAP_COMPRESSION_FALLBACK_MS: 12000,
+  MAP_BUILD_BUDGET_MS: 6,
+  HEAVY_OVERLAY_THROTTLE_MS: 500,
+  LOCAL_COSTMAP_THROTTLE_MS: 1000,
+  MAP_SAVE_SETTLE_MS: 2000,
   ros: null,
   mapRotation: 0,
   lastMapMsg: null,
   _mapImageCanvas: null,
   _mapImageSource: null,
+  _mapImageBuildState: null,
+  _pendingMapImageMessage: null,
   mapZoom: 1.0,
   mapPanX: 0,
   mapPanY: 0,
@@ -123,7 +146,11 @@ const RosManager = {
   _mappingSaveBusy: false,
   // Render throttle for sync
   _renderPending: false,
-  _renderThrottleMs: 50,
+  _renderThrottleMs: 33,
+  _jogRenderThrottleMs: 33,
+  _lastRenderAt: 0,
+  _renderDelayTimer: null,
+  _jogActive: false,
   _lastAcceptedMapSignature: '',
   _lastAcceptedMapAt: 0,
   // Discharge tracking
@@ -165,6 +192,9 @@ const RosManager = {
         if (!this.lastMapMsg && profile.map?.topic && currentMapTopic !== profile.map.topic) {
           this._subscribeMapForSlot(index, profile.map.topic);
         }
+        // Monitoring endpoints/types become authoritative only after the shared
+        // graph snapshot has been verified.
+        this.subscribeSlotMonitoring(index);
         if (typeof JogControl !== 'undefined') JogControl._syncChassisModelUi?.(false);
       }
       if (typeof ActionSender !== 'undefined') {
@@ -195,6 +225,7 @@ const RosManager = {
     const url = `${wsProto}://${location.host}/ws-proxy?target=${ip}:${wsPort}`;
     const rosConn = new ROSLIB.Ros({ url });
     slot.ros = rosConn;
+    slot.rosUrl = url;
 
     rosConn.on('connection', () => {
       // Guard: ignore if this connection was replaced by a newer one
@@ -243,13 +274,22 @@ const RosManager = {
       if (slot.ros !== rosConn) return;
       console.log(`ROS slot[${index}] closed`);
       slot.connected = false;
+      this._closeSlotPoseConnection(index);
       slot.ros = null;
 
       if (index === App.activeSlotIndex) {
         this.ros = null;
+        if (typeof JogControl !== 'undefined') {
+          JogControl._stopJogControls?.();
+          JogControl._shutdownJogWorker?.();
+        }
       }
 
       if (index === App.activeSlotIndex) {
+        if (typeof JogControl !== 'undefined') {
+          JogControl._stopJogControls?.();
+          JogControl._shutdownJogWorker?.();
+        }
         App.updateActiveRobotStatus();
         // Clear robot model display
         const modelEl = document.getElementById('robot-model-name');
@@ -293,6 +333,10 @@ const RosManager = {
   disconnectSlot(index) {
     if (index < 0 || index >= App.robotSlots.length) return;
     const slot = App.robotSlots[index];
+    if (index === App.activeSlotIndex && typeof JogControl !== 'undefined') {
+      JogControl._stopJogControls?.();
+      JogControl._shutdownJogWorker?.();
+    }
 
     this.unsubscribeSlotData(index);
 
@@ -334,6 +378,8 @@ const RosManager = {
     const slot = App.robotSlots[index];
     if (!slot) return;
 
+    if (clearCachedData) this._closeSlotPoseConnection(index);
+
     if (slot.mapCompressionFallbackTimer) {
       clearTimeout(slot.mapCompressionFallbackTimer);
       slot.mapCompressionFallbackTimer = null;
@@ -353,8 +399,16 @@ const RosManager = {
     slot.dataSubscribed = false;
     slot.tfReceived = false;
     slot.robotStatePoseReceived = false;
+    slot.lastTfTime = 0;
+    slot.lastRobotStatePoseTime = 0;
+    slot.lastAmclTime = 0;
+    slot.lastOdomTime = 0;
 
     if (clearCachedData) {
+      slot.tfMapToOdom = null;
+      slot.tfOdomToBase = null;
+      slot.tfCacheRos = null;
+      slot.tfCacheTarget = null;
       slot.bms = { voltage: 0, current: 0, soc: 0, charging: false };
       slot.workState = null;
       slot.pose = null;
@@ -368,25 +422,36 @@ const RosManager = {
     const rid = slot.robotId;
     slot.dataSubscribed = true;
 
-    // BMS
-    this._subscribeSlotTopic(index, 'bms', `/${rid}/bms`, 'std_msgs/Float32MultiArray', (msg) => {
-      this._handleSlotBmsData(index, msg);
-    });
+    const monitoring = this._compatibilityForSlot(index)?.monitoring;
+    const bmsEndpoint = monitoring?.topics?.bms;
+    const robotStateEndpoint = monitoring?.topics?.robotState;
 
-    // Work state
-    this._subscribeSlotTopic(index, 'work-state', `/${rid}/robot_state`, 'syscon_msgs/RobotState', (msg) => {
-      this._handleSlotWorkState(index, msg);
-    });
+    // Model-independent telemetry may be absent. Subscribe only after its live
+    // topic/type pair has been verified by RobotCompatibility.
+    if (bmsEndpoint?.name && bmsEndpoint?.type) {
+      this._subscribeSlotTopic(index, 'bms', bmsEndpoint.name, bmsEndpoint.type, (msg) => {
+        this._handleSlotBmsData(index, msg);
+      });
+    }
+    if (robotStateEndpoint?.name && robotStateEndpoint?.type) {
+      this._subscribeSlotTopic(
+        index,
+        'work-state',
+        robotStateEndpoint.name,
+        robotStateEndpoint.type,
+        (msg) => this._handleSlotWorkState(index, msg)
+      );
+    }
 
-    // TF for pose (like RViz) - primary source for robot position
-    this._subscribeSlotTf(index);
+    // TF for pose (like RViz) - primary source for robot position. Start on the
+    // shared connection immediately, then move it to a dedicated WebSocket so
+    // OccupancyGrid/camera traffic cannot head-of-line block live movement.
+    const poseRos = slot.poseRosConnected ? slot.poseRos : slot.ros;
+    this._subscribeSlotTf(index, poseRos);
+    this._subscribeSlotAmcl(index, poseRos);
+    this._ensureSlotPoseConnection(index);
     this._subscribeSlotTopic(index, 'tf-static', '/tf_static', 'tf2_msgs/TFMessage', (msg) => {
       this._handleSlotTfStatic(index, msg);
-    });
-
-    // Pose from amcl (fallback if TF not available)
-    this._subscribeSlotTopic(index, 'robot-pose', `/${rid}/amcl_pose`, 'geometry_msgs/PoseWithCovarianceStamped', (msg) => {
-      this._handleSlotPose(index, msg, 'amcl');
     });
 
     // Pose from odom (SLAM mode fallback) - always subscribe
@@ -394,19 +459,16 @@ const RosManager = {
       this._handleSlotOdomPose(index, msg);
     });
 
-    // Routine mode status
-    this._subscribeSlotTopic(index, 'routine-status', `/${rid}/sp_routine_status`, 'std_msgs/String', (msg) => {
-      this._handleRoutineStatus(index, msg);
-    });
-
-    // Operation mode topics differ by software generation. Subscribe to both;
-    // whichever is published keeps the Mapping/Lifelong UI and path recording in sync.
-    this._subscribeSlotTopic(index, 'operation-mode', `/${rid}/spx/operation_mode`, 'std_msgs/String', (msg) => {
-      this._handleRoutineStatus(index, msg);
-    });
-    this._subscribeSlotTopic(index, 'legacy-operation-mode', `/${rid}/spcore/MODE`, 'std_msgs/String', (msg) => {
-      this._handleRoutineStatus(index, msg);
-    });
+    const modeEndpoint = this._compatibilityForSlot(index)?.mapping;
+    if (modeEndpoint?.verified && modeEndpoint.statusName && modeEndpoint.statusType) {
+      this._subscribeSlotTopic(
+        index,
+        'operation-mode',
+        modeEndpoint.statusName,
+        modeEndpoint.statusType,
+        (msg) => this._handleRoutineStatus(index, msg)
+      );
+    }
 
     // slam_toolbox pose graph. A new loop_slam_edges pair is the authoritative
     // signal that Loop Closure has actually been accepted by the mapper.
@@ -415,7 +477,8 @@ const RosManager = {
       'slam-graph',
       `/${rid}/slam_toolbox/karto_graph_visualization`,
       'visualization_msgs/MarkerArray',
-      (msg) => this._handleSlamGraph(index, msg)
+      (msg) => this._handleSlamGraph(index, msg),
+      { queue_length: 1, throttle_rate: this.HEAVY_OVERLAY_THROTTLE_MS }
     );
 
     // LIO-SAM publishes accepted 3D loop constraints as LINE_LIST markers
@@ -425,7 +488,8 @@ const RosManager = {
       'lio-loop-constraints',
       `/${rid}/lio_sam/mapping/loop_closure_constraints`,
       'visualization_msgs/MarkerArray',
-      (msg) => this._handleLioLoopConstraints(index, msg)
+      (msg) => this._handleLioLoopConstraints(index, msg),
+      { queue_length: 1, throttle_rate: this.HEAVY_OVERLAY_THROTTLE_MS }
     );
 
     // Dock pose (docking target detection result)
@@ -495,10 +559,80 @@ const RosManager = {
     });
   },
 
-  // Subscribe to TF for robot pose (like RViz does)
-  _subscribeSlotTf(index) {
+  _poseConnectionUrl(slot) {
+    if (slot?.rosUrl) return slot.rosUrl;
+    if (!slot?.ip || typeof location === 'undefined') return '';
+    const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+    return `${wsProto}://${location.host}/ws-proxy?target=${slot.ip}:${slot.wsPort || 9090}`;
+  },
+
+  // Keep high-rate pose traffic away from multi-megabyte map/camera frames.
+  _ensureSlotPoseConnection(index) {
     const slot = App.robotSlots[index];
-    if (!slot || !slot.ros) return;
+    if (!slot?.ros || !slot.connected || index !== App.activeSlotIndex) return null;
+    if (slot.poseRos) return slot.poseRos;
+
+    const url = this._poseConnectionUrl(slot);
+    if (!url) return null;
+    const poseRos = new ROSLIB.Ros({ url });
+    slot.poseRos = poseRos;
+    slot.poseRosConnected = false;
+
+    poseRos.on('connection', () => {
+      if (slot.poseRos !== poseRos || slot.ros === poseRos
+          || !slot.connected || index !== App.activeSlotIndex) {
+        try { poseRos.close(); } catch (e) { /* stale auxiliary socket */ }
+        return;
+      }
+      slot.poseRosConnected = true;
+      this._subscribeSlotTf(index, poseRos);
+      this._subscribeSlotAmcl(index, poseRos);
+      console.log(`[TF] Slot ${index}: dedicated pose WebSocket connected`);
+    });
+
+    poseRos.on('close', () => {
+      if (slot.poseRos !== poseRos) return;
+      slot.poseRos = null;
+      slot.poseRosConnected = false;
+      if (slot.ros && slot.connected && index === App.activeSlotIndex) {
+        this._subscribeSlotTf(index, slot.ros);
+        this._subscribeSlotAmcl(index, slot.ros);
+        clearTimeout(slot.poseRosReconnectTimer);
+        slot.poseRosReconnectTimer = setTimeout(() => {
+          slot.poseRosReconnectTimer = null;
+          this._ensureSlotPoseConnection(index);
+        }, this.POSE_RECONNECT_MS);
+      }
+    });
+
+    poseRos.on('error', error => {
+      if (slot.poseRos === poseRos) {
+        console.warn(`[TF] Slot ${index}: dedicated pose WebSocket error, shared fallback active`, error);
+      }
+    });
+    return poseRos;
+  },
+
+  _closeSlotPoseConnection(index) {
+    const slot = App.robotSlots[index];
+    if (!slot) return;
+    if (slot.poseRosReconnectTimer) {
+      clearTimeout(slot.poseRosReconnectTimer);
+      slot.poseRosReconnectTimer = null;
+    }
+    const poseRos = slot.poseRos;
+    slot.poseRos = null;
+    slot.poseRosConnected = false;
+    if (poseRos && poseRos !== slot.ros) {
+      try { poseRos.close(); } catch (e) { /* already closed */ }
+    }
+  },
+
+  // Subscribe to TF for robot pose (like RViz does)
+  _subscribeSlotTf(index, rosConnection = null) {
+    const slot = App.robotSlots[index];
+    const tfRos = rosConnection || slot?.poseRos || slot?.ros;
+    if (!slot || !tfRos) return;
 
     // Unsubscribe existing TF if any
     if (slot.tfTopic) {
@@ -506,15 +640,27 @@ const RosManager = {
       slot.tfTopic = null;
     }
 
-    slot.tfReceived = false;
-    slot.tfMapToOdom = null;
-    slot.tfOdomToBase = null;
+    const target = `${slot.ip || ''}:${slot.wsPort || 9090}`;
+    const sameRobotTarget = slot.tfCacheTarget === target;
+    // A compatibility refresh or shared->dedicated handoff may replace only
+    // the /tf transport. Preserve the last valid TF for the same robot target
+    // so a fallback cannot flash between unsubscribe and the next TF packet.
+    if (!sameRobotTarget) {
+      slot.tfReceived = false;
+      slot.lastTfTime = 0;
+      slot.tfMapToOdom = null;
+      slot.tfOdomToBase = null;
+    }
+    slot.tfCacheRos = tfRos;
+    slot.tfCacheTarget = target;
 
     // Subscribe to /tf
     slot.tfTopic = new ROSLIB.Topic({
-      ros: slot.ros,
+      ros: tfRos,
       name: '/tf',
-      messageType: 'tf2_msgs/TFMessage'
+      messageType: 'tf2_msgs/TFMessage',
+      throttle_rate: this.TF_THROTTLE_MS,
+      queue_length: 1
     });
 
     slot.tfTopic.subscribe((msg) => {
@@ -524,9 +670,54 @@ const RosManager = {
     console.log(`[TF] Slot ${index}: Subscribed to /tf`);
   },
 
+  _subscribeSlotAmcl(index, rosConnection = null) {
+    const slot = App.robotSlots[index];
+    const rid = slot?.robotId;
+    const poseRos = rosConnection || slot?.poseRos || slot?.ros;
+    if (!slot || !rid || !poseRos) return;
+    this._subscribeSlotTopic(
+      index,
+      'robot-pose',
+      `/${rid}/amcl_pose`,
+      'geometry_msgs/PoseWithCovarianceStamped',
+      msg => this._handleSlotPose(index, msg, 'amcl'),
+      { ros: poseRos, queue_length: 1, throttle_rate: this.POSE_FAST_THROTTLE_MS }
+    );
+  },
+
   _frameKey(frame) {
     const parts = String(frame || '').split('/').filter(Boolean);
     return parts[parts.length - 1] || '';
+  },
+
+  _frameNamespaceBelongsToSlot(frame, slot) {
+    const parts = String(frame || '').split('/').filter(Boolean);
+    if (!parts.length) return false;
+    const rid = String(slot?.robotId || '').replace(/^\//, '');
+    return parts.length === 1 || parts[0] === rid;
+  },
+
+  _frameBelongsToSlot(frame, slot, allowedKeys) {
+    const key = this._frameKey(frame);
+    return allowedKeys.includes(key) && this._frameNamespaceBelongsToSlot(frame, slot);
+  },
+
+  _messageStampMs(msg) {
+    const stamp = msg?.header?.stamp;
+    const seconds = Number(stamp?.secs ?? stamp?.sec);
+    const nanoseconds = Number(stamp?.nsecs ?? stamp?.nanosec) || 0;
+    return Number.isFinite(seconds) && seconds > 0
+      ? seconds * 1000 + nanoseconds / 1e6
+      : 0;
+  },
+
+  _isPoseMessageFresh(msg, now = Date.now()) {
+    const stampMs = this._messageStampMs(msg);
+    if (!stampMs) return true;
+    const age = now - stampMs;
+    // Accept future stamps to tolerate robot/browser clock offsets, but never
+    // replay an old latched AMCL pose after reconnect.
+    return age < 0 || age <= this.POSE_MESSAGE_MAX_AGE_MS;
   },
 
   _handleSlotTfStatic(index, msg) {
@@ -534,7 +725,10 @@ const RosManager = {
     if (!slot) return;
     const identity = { x: 0, y: 0, r00: 1, r01: 0, r10: 0, r11: 1 };
     const result = { base_link: identity, base_footprint: identity };
-    const remaining = Array.from(msg?.transforms || []);
+    const remaining = Array.from(msg?.transforms || []).filter(transform =>
+      this._frameNamespaceBelongsToSlot(transform?.header?.frame_id, slot)
+      && this._frameNamespaceBelongsToSlot(transform?.child_frame_id, slot)
+    );
 
     for (let pass = 0; pass < 10 && remaining.length > 0; pass++) {
       let changed = false;
@@ -574,9 +768,10 @@ const RosManager = {
     const slot = App.robotSlots[index];
     if (!slot) return;
 
-    const isMapFrame = (f) => f === 'map' || f.endsWith('/map');
-    const isOdomFrame = (f) => f === 'odom' || f.endsWith('/odom');
-    const isBaseFrame = (f) => f === 'base_link' || f.endsWith('/base_link') || f === 'base_footprint' || f.endsWith('/base_footprint');
+    const isMapFrame = frame => this._frameBelongsToSlot(frame, slot, ['map']);
+    const isOdomFrame = frame => this._frameBelongsToSlot(frame, slot, ['odom']);
+    const isBaseFrame = frame =>
+      this._frameBelongsToSlot(frame, slot, ['base_link', 'base_footprint']);
 
     let updated = false;
 
@@ -618,29 +813,40 @@ const RosManager = {
   },
 
   // Update slot pose from TF transform
-  _updateSlotPoseFromTf(index, transform) {
+  _updateSlotPoseFromTf(index, transform, source = 'tf') {
     const slot = App.robotSlots[index];
-    if (!slot) return;
-
-    // If robot_state pose is available, it's more stable — skip TF pose
-    if (slot.robotStatePoseReceived) return;
+    if (!slot) return false;
+    const now = Date.now();
 
     const pos = transform.translation;
     const orient = transform.rotation;
     const siny = 2.0 * (orient.w * orient.z + orient.x * orient.y);
     const cosy = 1.0 - 2.0 * (orient.y * orient.y + orient.z * orient.z);
     const yaw = Math.atan2(siny, cosy);
+    const pendingInitialPose = slot.pendingInitialPose;
+    const pendingInitialPoseFresh = pendingInitialPose
+      && now - pendingInitialPose.at <= this.INITIAL_POSE_CONFIRM_MS;
+    const matchesPendingInitialPose = pendingInitialPoseFresh
+      && Math.hypot(pos.x - pendingInitialPose.x, pos.y - pendingInitialPose.y)
+        <= this.INITIAL_POSE_MATCH_DISTANCE_M;
+    if (pendingInitialPose && !pendingInitialPoseFresh) slot.pendingInitialPose = null;
+    // After an initialpose request, old TF packets may still be in flight. Do
+    // not let three of those packets undo a just-confirmed AMCL relocation.
+    if (pendingInitialPoseFresh && !matchesPendingInitialPose
+        && now - pendingInitialPose.at <= this.INITIAL_POSE_TF_SETTLE_MS) {
+      return false;
+    }
 
     // Filter sudden jumps: reject if moved >2m in one tick (unless first pose)
     if (slot.pose) {
       const dx = pos.x - slot.pose.x;
       const dy = pos.y - slot.pose.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist > 2.0) {
+      if (dist > 2.0 && !matchesPendingInitialPose) {
         // Allow if jump persists (3 consecutive jumps = real relocation)
         slot._tfJumpCount = (slot._tfJumpCount || 0) + 1;
         if (slot._tfJumpCount < 3) {
-          return; // Skip this frame
+          return false; // Skip this frame
         }
         // 3+ consecutive jumps: accept as real (e.g. initialpose was set)
         console.warn(`[TF] Accepted jump ${dist.toFixed(2)}m after ${slot._tfJumpCount} frames`);
@@ -650,7 +856,13 @@ const RosManager = {
     }
 
     slot.pose = { x: pos.x, y: pos.y, yaw: yaw };
-    slot.lastTfTime = Date.now();
+    slot.poseSource = source;
+    slot.lastTfTime = now;
+    slot.tfReceived = true;
+    if (matchesPendingInitialPose) {
+      slot.pendingInitialPose = null;
+      slot._tfJumpCount = 0;
+    }
 
     // If this is the active slot, update UI
     if (index === App.activeSlotIndex) {
@@ -661,6 +873,7 @@ const RosManager = {
       this.displayPose(this.robotPose);
       this.requestRender();
     }
+    return true;
   },
 
   // Subscribe UI-bound topics (camera, map) for the active slot only
@@ -772,6 +985,7 @@ const RosManager = {
     this.stopLatencyMonitor();
 
     // Clear map, lidar, and footprint
+    this._resetMapImageBuild();
     this.lastMapMsg = null;
     this.lastScanMsg = null;
     this._scanMessages = { merged: null, front: null, rear: null };
@@ -830,6 +1044,9 @@ const RosManager = {
 
     // Reset BMS ETA state for new slot
     this._resetBmsEtaState();
+    this._lastDisplayedWorkState = null;
+    this._wsLastSampleAt = 0;
+    this._wsTimeline = [];
 
     // Always reset to NAV mode on slot switch (manual control only)
     this._currentRoutineMode = 'NAV';
@@ -854,6 +1071,7 @@ const RosManager = {
     this._bmsCurrentAh = null;
     this._bmsTotalAh = null;
     this._bmsTrend = [];
+    this._bmsTrendLastSampleAt = 0;
     if (this._bmsEtaTimer) {
       clearInterval(this._bmsEtaTimer);
       this._bmsEtaTimer = null;
@@ -868,7 +1086,10 @@ const RosManager = {
 
   // Internal: subscribe a topic for a specific slot
   // Fast topics (pose, lidar) use lower throttle for smoother updates
-  _fastTopicKeys: new Set(['robot-pose', 'lidar', 'cam1-color', 'cam2-color']),
+  _poseTopicKeys: new Set(['work-state', 'robot-pose', 'odom-pose']),
+  _fastTopicKeys: new Set(['lidar']),
+  _cameraTopicKeys: new Set(['cam1-color', 'cam2-color']),
+  _cameraThrottleRate: 100,
   _unthrottledTopicKeys: new Set(['loop-closure-log']),
   // Depth uses raw Image (heavy) - use separate slower rate
   _depthThrottleRate: 200,
@@ -882,17 +1103,27 @@ const RosManager = {
     }
 
     const isDepth = key.includes('depth');
+    const isCamera = this._cameraTopicKeys.has(key);
     const rate = this._unthrottledTopicKeys.has(key) ? 0 :
                  isDepth ? this._depthThrottleRate :
+                 isCamera ? this._cameraThrottleRate :
+                 this._poseTopicKeys.has(key) ? this.POSE_FAST_THROTTLE_MS :
                  this._fastTopicKeys.has(key) ? 50 : this.throttleRate;
 
-    const topic = new ROSLIB.Topic({
+    const options = {
       ros: slot.ros,
       name: name,
       messageType: messageType,
       throttle_rate: rate,
       ...topicOptions
-    });
+    };
+    if (topicOptions.queue_length === undefined
+        && (this._poseTopicKeys.has(key) || this._fastTopicKeys.has(key) || isCamera || isDepth)) {
+      // Do not replay an old movement backlog after the browser/main thread was
+      // temporarily busy. Visual telemetry only needs the newest sample.
+      options.queue_length = 1;
+    }
+    const topic = new ROSLIB.Topic(options);
 
     topic.subscribe(callback);
     slot.subscriptions[key] = topic;
@@ -906,9 +1137,13 @@ const RosManager = {
       slot.mapCompressionFallbackTimer = null;
     }
     const capturedRos = slot.ros;
+    let receivedMap = false;
     const options = {
       queue_length: 1,
-      compression: useCompression ? 'png' : 'none'
+      // PNG decompression in this bundled roslib builds a multi-megabyte JSON
+      // string on the UI thread. CBOR keeps large OccupancyGrid delivery binary.
+      compression: useCompression ? 'cbor' : 'none',
+      throttle_rate: this.MAP_THROTTLE_MS
     };
     this._subscribeSlotTopic(
       index,
@@ -917,21 +1152,23 @@ const RosManager = {
       'nav_msgs/OccupancyGrid',
       msg => {
         if (index !== App.activeSlotIndex || slot.ros !== capturedRos) return;
-        slot.mapReceivedAt = Date.now();
+        receivedMap = true;
         if (slot.mapCompressionFallbackTimer) {
           clearTimeout(slot.mapCompressionFallbackTimer);
           slot.mapCompressionFallbackTimer = null;
         }
-        this.renderMap(msg);
+        const accepted = this.renderMap(msg);
+        if (!accepted) return;
+        slot.mapReceivedAt = Date.now();
       },
       options
     );
     if (!useCompression) return;
     slot.mapCompressionFallbackTimer = setTimeout(() => {
-      if (slot.ros !== capturedRos || index !== App.activeSlotIndex || this.lastMapMsg) return;
-      console.warn(`[Map] ${topicName} PNG compression timeout; retrying without compression`);
+      if (slot.ros !== capturedRos || index !== App.activeSlotIndex || receivedMap) return;
+      console.warn(`[Map] ${topicName} CBOR/no-fresh-map timeout; retrying without compression`);
       this._subscribeMapForSlot(index, topicName, false);
-    }, 8000);
+    }, this.MAP_COMPRESSION_FALLBACK_MS);
   },
 
   _subscribeMapScan(index, key, topicName, target) {
@@ -996,7 +1233,8 @@ const RosManager = {
         this._localCostmapMsg = msg;
         this._localCostmapCanvas = null;
         this.requestRender();
-      }
+      },
+      { queue_length: 1, throttle_rate: this.LOCAL_COSTMAP_THROTTLE_MS }
     );
   },
 
@@ -1069,6 +1307,7 @@ const RosManager = {
   // BMS trend data
   _bmsTrend: [], // [{time, soc, voltage, current}]
   _bmsTrendMax: 600,
+  _bmsTrendLastSampleAt: 0,
 
   // Handle BMS data for a slot
   _handleSlotBmsData(index, msg) {
@@ -1089,9 +1328,13 @@ const RosManager = {
 
     // Record trend for active slot
     if (index === App.activeSlotIndex) {
-      this._bmsTrend.push({ time: Date.now(), soc, voltage, current });
-      if (this._bmsTrend.length > this._bmsTrendMax) this._bmsTrend.shift();
-      this._renderBmsTrend();
+      const now = Date.now();
+      if (now - this._bmsTrendLastSampleAt >= 1000) {
+        this._bmsTrend.push({ time: now, soc, voltage, current });
+        this._bmsTrendLastSampleAt = now;
+        if (this._bmsTrend.length > this._bmsTrendMax) this._bmsTrend.shift();
+        this._renderBmsTrend();
+      }
     }
 
     // If this is the active slot, update UI
@@ -1297,15 +1540,22 @@ const RosManager = {
       console.log(`[Footprint] Generated from radius: ${r.toFixed(3)}m`);
     }
 
-    // Use pose from robot_state as primary in NAV mode (most stable, from robotstate_pub)
-    // In SLAM/LIFELONG mode, TF is the correct source (AMCL not running)
+    // robot_state is a stable map-frame fallback. Live TF remains the primary
+    // visual source so motion can be rendered at up to 30Hz.
     const isNavMode = !slot.routineMode || slot.routineMode === 'NAV';
     if (isNavMode && msg.pose && (msg.pose.x !== undefined)) {
+      const now = Date.now();
       const pose = { x: msg.pose.x, y: msg.pose.y, yaw: msg.pose.theta };
-      slot.pose = pose;
       slot.robotStatePoseReceived = true;
+      slot.lastRobotStatePoseTime = now;
+      const tfFresh = slot.lastTfTime
+        && now - slot.lastTfTime <= this.POSE_SOURCE_FRESH_MS;
 
-      if (index === App.activeSlotIndex) {
+      if (!tfFresh) {
+        slot.pose = pose;
+        slot.poseSource = 'robot_state';
+      }
+      if (!tfFresh && index === App.activeSlotIndex) {
         this._hzCounters.pose++;
         if (App.alarmSystem) App.alarmSystem.recordTopicActivity('pose', index);
         this.robotPose = pose;
@@ -1315,6 +1565,7 @@ const RosManager = {
     } else if (!isNavMode) {
       // SLAM/LIFELONG: let TF handle pose
       slot.robotStatePoseReceived = false;
+      slot.lastRobotStatePoseTime = 0;
     }
 
     // If this is the active slot, update UI
@@ -1720,38 +1971,56 @@ const RosManager = {
   _handleSlotPose(index, msg, source = 'amcl') {
     const slot = App.robotSlots[index];
     if (!slot) return;
+    if (!this._isPoseMessageFresh(msg)) {
+      slot.lastRejectedPoseSource = source;
+      slot.lastRejectedPoseAt = Date.now();
+      return;
+    }
     if (source === 'amcl') {
       this._recordSlamDimension(index, '2d', 'AMCL', 'amcl_pose 데이터 수신', 90, 'localization');
     }
 
-    // If robot_state pose is available, skip amcl
-    if (slot.robotStatePoseReceived) return;
+    const now = Date.now();
+    const pos = msg.pose.pose.position;
+    const orient = msg.pose.pose.orientation;
+    const siny = 2.0 * (orient.w * orient.z + orient.x * orient.y);
+    const cosy = 1.0 - 2.0 * (orient.y * orient.y + orient.z * orient.z);
+    const yaw = Math.atan2(siny, cosy);
+    const pending = slot.pendingInitialPose;
+    const pendingFresh = pending && now - pending.at <= this.INITIAL_POSE_CONFIRM_MS;
+    const confirmsInitialPose = source === 'amcl' && pendingFresh
+      && Math.hypot(pos.x - pending.x, pos.y - pending.y)
+        <= this.INITIAL_POSE_MATCH_DISTANCE_M;
+    if (pending && !pendingFresh) slot.pendingInitialPose = null;
 
-    // If TF is working, ignore amcl_pose (TF is primary like RViz)
-    if (slot.tfReceived) {
-      return;
-    }
+    const tfFresh = slot.lastTfTime && now - slot.lastTfTime <= this.POSE_SOURCE_FRESH_MS;
+    const robotStateFresh = slot.lastRobotStatePoseTime
+      && now - slot.lastRobotStatePoseTime <= this.POSE_SOURCE_FRESH_MS;
+    // Normal AMCL is a fallback, but a matching response to the operator's
+    // initialpose command is authoritative confirmation and must be visible.
+    if ((tfFresh || robotStateFresh) && !confirmsInitialPose) return;
 
     // Mark that amcl is active
     slot.amclActive = true;
-    slot.lastAmclTime = Date.now();
+    slot.lastAmclTime = now;
 
     if (index === App.activeSlotIndex) {
       this._hzCounters.pose++;
       if (App.alarmSystem) App.alarmSystem.recordTopicActivity('pose', index);
     }
 
-    const pos = msg.pose.pose.position;
-    const orient = msg.pose.pose.orientation;
-    const siny = 2.0 * (orient.w * orient.z + orient.x * orient.y);
-    const cosy = 1.0 - 2.0 * (orient.y * orient.y + orient.z * orient.z);
-    const yaw = Math.atan2(siny, cosy);
-
     slot.pose = { x: pos.x, y: pos.y, yaw: yaw };
+    slot.poseSource = confirmsInitialPose ? 'amcl-confirmed' : source;
 
     // If this is the active slot, update UI
     if (index === App.activeSlotIndex) {
-      this.handleRobotPose(msg);
+      if (confirmsInitialPose) {
+        this.robotPose = { ...slot.pose };
+        this.displayPose(this.robotPose);
+        this.requestRender();
+      } else {
+        this.handleRobotPose(msg);
+      }
     }
   },
 
@@ -1777,33 +2046,43 @@ const RosManager = {
     this.requestRender();
   },
 
-  // Handle pose from odom (last resort fallback when TF and amcl not available)
+  // Raw controller odom is deliberately never combined with map->odom here.
+  // map->odom may be calculated from an EKF pose whose odometry differs from
+  // the controller topic; mixing those chains makes two nearby poses alternate.
+  // Keep raw odom as a startup-only last resort for older robots without TF.
   _handleSlotOdomPose(index, msg) {
     const slot = App.robotSlots[index];
     if (!slot) return;
+    if (!this._isPoseMessageFresh(msg)) return;
 
-    // If robot_state pose is available, skip odom
-    if (slot.robotStatePoseReceived) return;
-
-    // If TF is working, ignore odom (TF is primary like RViz)
-    if (slot.tfReceived) {
-      return;
-    }
-
-    // If amcl is active, ignore odom
-    const amclTimeout = 5000;
-    const amclActive = slot.amclActive && slot.lastAmclTime && (Date.now() - slot.lastAmclTime < amclTimeout);
-    if (amclActive) {
+    const now = Date.now();
+    const tfFresh = slot.lastTfTime && now - slot.lastTfTime <= this.POSE_SOURCE_FRESH_MS;
+    const robotStateFresh = slot.lastRobotStatePoseTime
+      && now - slot.lastRobotStatePoseTime <= this.POSE_SOURCE_FRESH_MS;
+    const amclFresh = slot.lastAmclTime
+      && now - slot.lastAmclTime <= this.AMCL_SOURCE_FRESH_MS;
+    if (tfFresh || robotStateFresh || amclFresh || slot.tfMapToOdom) {
+      slot.lastOdomTime = now;
       return;
     }
 
     const pos = msg.pose.pose.position;
     const orient = msg.pose.pose.orientation;
+
+    // Raw odom is not a map-frame pose. Once a map-referenced source has been
+    // shown, hold the last good pose instead of jumping to another coordinate
+    // system while TF reconnects.
+    if (slot.pose && ['robot_state', 'tf', 'amcl'].includes(slot.poseSource)) {
+      slot.lastOdomTime = now;
+      return;
+    }
     const siny = 2.0 * (orient.w * orient.z + orient.x * orient.y);
     const cosy = 1.0 - 2.0 * (orient.y * orient.y + orient.z * orient.z);
     const yaw = Math.atan2(siny, cosy);
 
     slot.pose = { x: pos.x, y: pos.y, yaw: yaw };
+    slot.poseSource = 'odom';
+    slot.lastOdomTime = now;
 
     // If this is the active slot, update UI
     if (index === App.activeSlotIndex) {
@@ -1819,6 +2098,8 @@ const RosManager = {
   // Work state timeline history
   _wsTimeline: [], // [{state, time}]
   _wsTimelineMax: 600, // ~10min at 1 sample/sec
+  _wsLastSampleAt: 0,
+  _lastDisplayedWorkState: null,
 
   // Display work state on UI (dashboard section + header indicator)
   displayWorkState(state) {
@@ -1830,24 +2111,33 @@ const RosManager = {
     const barEl = document.getElementById('work-state-bar');
     const headerBarEl = document.getElementById('header-ws-bar');
     const headerTextEl = document.getElementById('header-ws-text');
+    const stateChanged = stateStr !== this._lastDisplayedWorkState;
 
     if (state === null || state === undefined) {
-      if (valueEl) valueEl.textContent = '--';
-      if (barEl) barEl.style.backgroundColor = '#9ca3af';
-      if (headerBarEl) headerBarEl.style.backgroundColor = '#9ca3af';
-      if (headerTextEl) headerTextEl.textContent = '--';
+      if (stateChanged) {
+        if (valueEl) valueEl.textContent = '--';
+        if (barEl) barEl.style.backgroundColor = '#9ca3af';
+        if (headerBarEl) headerBarEl.style.backgroundColor = '#9ca3af';
+        if (headerTextEl) headerTextEl.textContent = '--';
+        this._lastDisplayedWorkState = stateStr;
+      }
       return;
     }
 
     const color = this._workStateColorMap[stateStr] || '#9ca3af';
-    if (valueEl) valueEl.textContent = `${label} (${stateStr})`;
-    if (barEl) barEl.style.backgroundColor = color;
-    if (headerBarEl) headerBarEl.style.backgroundColor = color;
-    if (headerTextEl) headerTextEl.textContent = label;
+    if (stateChanged) {
+      if (valueEl) valueEl.textContent = `${label} (${stateStr})`;
+      if (barEl) barEl.style.backgroundColor = color;
+      if (headerBarEl) headerBarEl.style.backgroundColor = color;
+      if (headerTextEl) headerTextEl.textContent = label;
+      this._lastDisplayedWorkState = stateStr;
+    }
 
-    // Record to timeline
+    // Keep state changes immediate, but sample an unchanged state at only 1Hz.
     const now = Date.now();
+    if (!stateChanged && now - this._wsLastSampleAt < 1000) return;
     this._wsTimeline.push({ state: stateStr, color, time: now });
+    this._wsLastSampleAt = now;
     if (this._wsTimeline.length > this._wsTimelineMax) this._wsTimeline.shift();
     this._renderWsTimeline();
   },
@@ -1993,9 +2283,14 @@ const RosManager = {
     const xEl = document.getElementById('robot-pos-x');
     const yEl = document.getElementById('robot-pos-y');
     const yawEl = document.getElementById('robot-pos-yaw');
+    const sourceEl = document.getElementById('robot-pose-source');
     if (xEl) xEl.textContent = pose.x.toFixed(3) + ' m';
     if (yEl) yEl.textContent = pose.y.toFixed(3) + ' m';
     if (yawEl) yawEl.textContent = (pose.yaw * 180 / Math.PI).toFixed(1) + '\u00B0';
+    if (sourceEl) {
+      const source = App.robotSlots?.[App.activeSlotIndex]?.poseSource || '--';
+      sourceEl.textContent = source === 'tf' ? 'map(tf)' : source;
+    }
   },
 
   // Checkbox IDs that are persisted to localStorage
@@ -2558,8 +2853,12 @@ const RosManager = {
   // Handle robot pose from amcl_pose (active slot UI) - fallback only
   handleRobotPose(msg) {
     const slot = App.robotSlots[App.activeSlotIndex];
-    // If robot_state or TF is providing pose, skip amcl
-    if (slot && (slot.robotStatePoseReceived || slot.tfReceived)) {
+    const now = Date.now();
+    const tfFresh = slot?.lastTfTime && now - slot.lastTfTime <= this.POSE_SOURCE_FRESH_MS;
+    const robotStateFresh = slot?.lastRobotStatePoseTime
+      && now - slot.lastRobotStatePoseTime <= this.POSE_SOURCE_FRESH_MS;
+    // If a higher-priority source is currently live, skip amcl.
+    if (tfFresh || robotStateFresh) {
       return;
     }
 
@@ -2619,14 +2918,124 @@ const RosManager = {
     return this._mapImageCanvas;
   },
 
-  // Throttled render request - ensures pose/lidar/map stay in sync
+  _resetMapImageBuild() {
+    if (this._mapImageBuildState) this._mapImageBuildState.cancelled = true;
+    this._mapImageBuildState = null;
+    this._pendingMapImageMessage = null;
+  },
+
+  // Mapping grids can contain millions of cells. Convert a few rows per task
+  // so keyboard/pointer events and the Jog publish timer keep running.
+  _queueMapImageBuild(msg) {
+    const width = Number(msg?.info?.width) || 0;
+    const height = Number(msg?.info?.height) || 0;
+    const data = msg?.data;
+    if (!width || !height || !data) return null;
+    if (this._mapImageCanvas && this._mapImageSource === data
+        && this._mapImageCanvas.width === width && this._mapImageCanvas.height === height) {
+      return this._mapImageCanvas;
+    }
+
+    this._pendingMapImageMessage = msg;
+    if (!this._mapImageBuildState) this._startPendingMapImageBuild();
+
+    // Keep the previous Mapping revision visible while the newest grid is
+    // converted, but never stretch a canvas from different map geometry.
+    return this._mapImageCanvas?.width === width && this._mapImageCanvas?.height === height
+      ? this._mapImageCanvas
+      : null;
+  },
+
+  _startPendingMapImageBuild() {
+    if (this._mapImageBuildState || !this._pendingMapImageMessage) return;
+    const msg = this._pendingMapImageMessage;
+    this._pendingMapImageMessage = null;
+    const width = Number(msg?.info?.width) || 0;
+    const height = Number(msg?.info?.height) || 0;
+    const data = msg?.data;
+    if (!width || !height || !data) return;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext('2d');
+    const imageData = context.createImageData(width, height);
+    const pixels = imageData.data;
+    const gray = new Uint8Array(102);
+    gray[0] = 128;
+    for (let value = 0; value <= 100; value += 1) {
+      gray[value + 1] = value === 0 ? 255 : Math.max(0, 255 - Math.round(value * 2.55));
+    }
+    const state = { msg, canvas, context, imageData, pixels, gray, row: 0, cancelled: false };
+    this._mapImageBuildState = state;
+
+    const buildChunk = () => {
+      if (state.cancelled || this._mapImageBuildState !== state) return;
+      const startedAt = Date.now();
+      let rowsBuilt = 0;
+      while (state.row < height
+          && (rowsBuilt < 4 || Date.now() - startedAt < this.MAP_BUILD_BUDGET_MS)) {
+        const y = state.row;
+        const srcBase = (height - 1 - y) * width;
+        let dstIdx = y * width * 4;
+        for (let x = 0; x < width; x += 1) {
+          const raw = data[srcBase + x];
+          const value = Number.isFinite(raw) ? raw : -1;
+          const color = gray[value < -1 ? 0 : (value > 100 ? 101 : value + 1)];
+          pixels[dstIdx] = color;
+          pixels[dstIdx + 1] = color;
+          pixels[dstIdx + 2] = color;
+          pixels[dstIdx + 3] = 255;
+          dstIdx += 4;
+        }
+        state.row += 1;
+        rowsBuilt += 1;
+      }
+
+      if (state.row < height) {
+        setTimeout(buildChunk, 0);
+        return;
+      }
+      context.putImageData(imageData, 0, 0);
+      this._mapImageCanvas = canvas;
+      this._mapImageSource = data;
+      this._mapImageBuildState = null;
+      this.requestRender();
+      if (this._pendingMapImageMessage?.data !== data) {
+        setTimeout(() => this._startPendingMapImageBuild(), 0);
+      } else {
+        this._pendingMapImageMessage = null;
+      }
+    };
+    setTimeout(buildChunk, 0);
+  },
+
+  setJogActive(active) {
+    this._jogActive = Boolean(active);
+    this.requestRender();
+  },
+
+  // Coalesce pose/lidar/map updates. During Jog, reserve most of the main
+  // thread for input/telemetry while the dedicated Worker owns cmd_vel.
   requestRender() {
     if (this._renderPending) return;
     this._renderPending = true;
-    requestAnimationFrame(() => {
-      this._renderPending = false;
-      if (this.lastMapMsg) this._doRenderMap(this.lastMapMsg);
-    });
+    const now = Date.now();
+    const minInterval = this._jogActive ? this._jogRenderThrottleMs : this._renderThrottleMs;
+    const delay = Math.max(0, minInterval - (now - this._lastRenderAt));
+    const render = () => {
+      this._renderDelayTimer = null;
+      const requestFrame = typeof requestAnimationFrame === 'function'
+        ? requestAnimationFrame
+        : callback => setTimeout(callback, 0);
+      requestFrame(() => {
+        this._renderPending = false;
+        this._lastRenderAt = Date.now();
+        if (this.lastMapMsg) this._doRenderMap(this.lastMapMsg);
+      });
+    };
+    if (delay > 0) this._renderDelayTimer = setTimeout(render, delay);
+    else render();
   },
 
   // When true, incoming map topic messages are ignored to protect restored/edited map
@@ -2634,6 +3043,8 @@ const RosManager = {
 
   _mapMessageSignature(msg) {
     const info = msg?.info || {};
+    const header = msg?.header || {};
+    const stamp = header.stamp || {};
     const data = msg?.data || [];
     const length = Number(data.length) || 0;
     let sample = 2166136261;
@@ -2644,6 +3055,9 @@ const RosManager = {
     }
     const origin = info.origin?.position || {};
     return [
+      header.seq ?? '',
+      stamp.secs ?? stamp.sec ?? '',
+      stamp.nsecs ?? stamp.nanosec ?? '',
       info.width, info.height, info.resolution,
       Number(origin.x || 0).toFixed(4), Number(origin.y || 0).toFixed(4),
       length, sample >>> 0
@@ -2655,27 +3069,32 @@ const RosManager = {
     // Block map updates while in edit mode (prevent overwriting edits)
     if (this._mapEditMode) {
       this.requestRender();
-      return;
+      return false;
     }
     // Block map_server's stale latched messages from overwriting restored/edited map
     if (this._mapLocked) {
-      return;
+      return false;
     }
     // map_server and localization slam_toolbox may both replay the same multi-MB
     // latched map when a client connects. Drop only the short initial duplicate;
     // mapping updates (normally seconds apart) remain untouched.
     const signature = this._mapMessageSignature(msg);
     const now = Date.now();
+    if (this._slamRunning && this._mappingStaleMapSignature
+        && signature === this._mappingStaleMapSignature) {
+      return false;
+    }
     if (!this._slamRunning && !this._lifelongRunning
         && signature === this._lastAcceptedMapSignature
         && now - this._lastAcceptedMapAt < 2500) {
-      return;
+      return false;
     }
     this._lastAcceptedMapSignature = signature;
     this._lastAcceptedMapAt = now;
     this.lastMapMsg = msg;
     // Use throttled render for sync
     this.requestRender();
+    return true;
   },
 
   _doRenderMap(msg) {
@@ -2688,11 +3107,14 @@ const RosManager = {
     const rotation = this.mapRotation;
 
     const showMap = this._isLayerEnabled('chk-map');
-    const mapImg = showMap ? this._buildMapImage(msg) : null;
+    const mappingActive = this._slamRunning || this._lifelongRunning;
+    const mapImg = showMap
+      ? (mappingActive ? this._queueMapImageBuild(msg) : this._buildMapImage(msg))
+      : null;
 
     const containerRect = container.getBoundingClientRect();
-    const newW = containerRect.width || 600;
-    const newH = containerRect.height || 600;
+    const newW = Math.max(1, Math.round(containerRect.width || 600));
+    const newH = Math.max(1, Math.round(containerRect.height || 600));
     // P1 fix: 캔버스 크기가 변경된 경우에만 재설정 (깜빡임 방지)
     if (canvas.width !== newW || canvas.height !== newH) {
       canvas.width = newW;
@@ -2735,7 +3157,6 @@ const RosManager = {
       this._renderPathLayer(ctx, this._navigationPath, width, height, resolution, origin, '#38bdf8', 3);
     }
 
-    const mappingActive = this._slamRunning || this._lifelongRunning;
     if (mappingActive && this._isLayerEnabled('chk-mapping-path')) {
       if (this._mappingTopicPath.length > 1) {
         this._renderPathLayer(ctx, this._mappingTopicPath, width, height, resolution, origin, '#19ff00', 3.5);
@@ -3845,6 +4266,12 @@ const RosManager = {
     });
   },
 
+  _disableFollowRobotForManualPan() {
+    if (!this._followRobot) return;
+    this._followRobot = false;
+    document.getElementById('btn-follow-robot')?.classList.remove('active');
+  },
+
   setupMapInteraction() {
     const canvas = document.getElementById('map-canvas');
     if (!canvas) return;
@@ -3920,11 +4347,7 @@ const RosManager = {
       this.mapPanStartX = this.mapPanX;
       this.mapPanStartY = this.mapPanY;
       canvas.style.cursor = 'grabbing';
-      if (this._followRobot) {
-        this._followRobot = false;
-        const btnFollow = document.getElementById('btn-follow-robot');
-        if (btnFollow) btnFollow.classList.remove('active');
-      }
+      this._disableFollowRobotForManualPan();
     });
 
     // Mouse move: pan, pose preview, or nav goal preview
@@ -4961,6 +5384,7 @@ const RosManager = {
     }
 
     const rid = this.getRobotId(slotIndex);
+    const slot = App.robotSlots[slotIndex];
     const qz = Math.sin(yawRad / 2);
     const qw = Math.cos(yawRad / 2);
     const yawDeg = (yawRad * 180 / Math.PI).toFixed(1);
@@ -4992,6 +5416,10 @@ const RosManager = {
       }
     });
 
+    if (slot) {
+      slot.pendingInitialPose = { x, y, yaw: yawRad, at: Date.now() };
+      slot._tfJumpCount = 0;
+    }
     topic.publish(msg);
     App.toast(`Initial pose: X=${x.toFixed(2)}, Y=${y.toFixed(2)}, Yaw=${yawDeg}°`, 'success');
     App.addEvent('map', 'Initial pose set', `X=${x.toFixed(2)}, Y=${y.toFixed(2)}, Yaw=${yawDeg}°`, 'info');
@@ -5482,35 +5910,163 @@ const RosManager = {
     }
 
     const profile = this._compatibilityForSlot(slotIndex);
-    const topicName = profile?.mapping?.commandTopic || `/${rid}/sp_routine`;
+    const modeCapability = profile?.mapping;
+    if (!profile?.discovered || !modeCapability?.verified
+        || !modeCapability.commandName || !modeCapability.commandType) {
+      const reason = modeCapability?.reason || profile?.reason || 'ROS graph 미검증';
+      if (statusEl) {
+        statusEl.textContent = `Blocked: ${reason}`;
+        statusEl.style.color = '#ff6b6b';
+      }
+      App.toast(`Mapping mode 차단: ${reason}`, 'error');
+      if (callback) callback(false);
+      return;
+    }
+    const endpointName = modeCapability.commandName;
     if (statusEl) {
-      statusEl.textContent = 'Publishing...';
+      statusEl.textContent = modeCapability.commandInterface === 'service' ? 'Calling...' : 'Publishing...';
       statusEl.style.color = '#f0ad4e';
     }
-
+    const complete = success => {
+      if (success && typeof TestMode !== 'undefined' && TestMode.enabled) {
+        TestMode.setMappingMode?.(slotIndex, mode);
+      }
+      if (statusEl) {
+        statusEl.textContent = success ? successMsg : 'Mode change failed';
+        statusEl.style.color = success ? '#4ade80' : '#ff6b6b';
+      }
+      App.toast(
+        success ? `${endpointName}: ${mode}` : `${endpointName}: mode 변경 실패`,
+        success ? 'success' : 'error'
+      );
+      if (callback) callback(success);
+    };
+    if (modeCapability.commandInterface === 'service') {
+      const service = new ROSLIB.Service({
+        ros,
+        name: endpointName,
+        serviceType: modeCapability.commandType
+      });
+      service.callService(
+        new ROSLIB.ServiceRequest({ mode }),
+        result => complete(result?.success !== false),
+        error => {
+          console.warn(`[Mapping] ${endpointName} 실패:`, error);
+          complete(false);
+        }
+      );
+      return;
+    }
     const topic = new ROSLIB.Topic({
-      ros: ros,
-      name: topicName,
-      messageType: 'std_msgs/String'
+      ros,
+      name: endpointName,
+      messageType: modeCapability.commandType
     });
-
-    const msg = new ROSLIB.Message({ data: mode });
-    topic.publish(msg);
-    if (typeof TestMode !== 'undefined' && TestMode.enabled) {
-      TestMode.setMappingMode?.(slotIndex, mode);
-    }
-    console.log(`[Mapping] Published ${topicName}: "${mode}"`);
-
-    if (statusEl) {
-      statusEl.textContent = successMsg;
-      statusEl.style.color = '#4ade80';
-    }
-    App.toast(`${topicName}: ${mode}`, 'success');
-    if (callback) callback(true);
+    topic.publish(new ROSLIB.Message({ data: mode }));
+    console.log(`[Mapping] Published ${endpointName}: "${mode}"`);
+    complete(true);
   },
 
   // Backup of lastMapMsg before SLAM/Lifelong, so edits survive the round-trip
   _preMapModeBackup: null,
+  _mappingStaleMapSignature: '',
+
+  _clearMappingMapSubscriptions() {
+    const slot = App.robotSlots?.[App.activeSlotIndex];
+    if (!slot?.subscriptions) return;
+    Object.keys(slot.subscriptions)
+      .filter(key => key.startsWith('mapping-map-'))
+      .forEach(key => {
+        try { slot.subscriptions[key]?.unsubscribe(); } catch (error) { /* ignore stale subscription */ }
+        delete slot.subscriptions[key];
+      });
+  },
+
+  _subscribeFreshMappingMaps() {
+    const slotIndex = App.activeSlotIndex;
+    const slot = App.robotSlots?.[slotIndex];
+    if (!slot?.ros) return;
+    this._clearMappingMapSubscriptions();
+    const rid = slot.robotId;
+    const namespaced = '/' + rid + '/map';
+    const toolbox = '/' + rid + '/slam_toolbox/map';
+    const mapProfile = this._compatibilityForSlot(slotIndex)?.map;
+    // Keep the verified NAV map topic as primary. On R_013 the mapper takes
+    // /R_013/slam_toolbox/map as input but publishes its live grid on /R_013/map.
+    const primary = mapProfile?.topic || mapProfile?.mappingTopic || namespaced;
+    this._subscribeMapForSlot(slotIndex, primary);
+    // Keep generation-specific candidates as fallbacks. A subscriber-only
+    // candidate is harmless; it must never replace the known primary by name.
+    Array.from(new Set([
+      ...(mapProfile?.mappingTopicCandidates || []),
+      toolbox,
+      ...(primary === '/map' ? [namespaced] : [])
+    ]))
+      .filter(name => name && name !== primary)
+      .forEach((name, index) => {
+        this._subscribeSlotTopic(
+          slotIndex,
+          'mapping-map-' + index,
+          name,
+          'nav_msgs/OccupancyGrid',
+          msg => {
+            if (slotIndex !== App.activeSlotIndex) return;
+            if (!this.renderMap(msg)) return;
+            slot.mapReceivedAt = Date.now();
+            if (slot.mapCompressionFallbackTimer) {
+              clearTimeout(slot.mapCompressionFallbackTimer);
+              slot.mapCompressionFallbackTimer = null;
+            }
+          },
+          {
+            queue_length: 1,
+            compression: 'none',
+            throttle_rate: this.MAP_THROTTLE_MS
+          }
+        );
+      });
+  },
+
+  _prepareFreshSlamMap() {
+    const previousMap = this._preMapModeBackup
+      ? {
+        header: this._preMapModeBackup.header,
+        info: this._preMapModeBackup.info,
+        data: this._preMapModeBackup.data
+      }
+      : this.lastMapMsg;
+    this._mappingStaleMapSignature = previousMap
+      ? this._mapMessageSignature(previousMap)
+      : '';
+    this.lastMapMsg = null;
+    this._resetMapImageBuild();
+    this._mapImageCanvas = null;
+    this._mapImageSource = null;
+    this._lastAcceptedMapSignature = '';
+    this._lastAcceptedMapAt = 0;
+
+    const canvas = document.getElementById('map-canvas');
+    const context = canvas?.getContext?.('2d');
+    if (context && canvas) context.clearRect(0, 0, canvas.width, canvas.height);
+    const info = document.getElementById('map-info');
+    if (info) info.textContent = 'Mapping 맵 수신 대기 · 로봇 publish 주기에 따라 5~10초 소요';
+
+    this._subscribeFreshMappingMaps();
+  },
+
+  _refreshMappingRuntimeProfile(slotIndex = App.activeSlotIndex) {
+    const slot = App.robotSlots?.[slotIndex];
+    if (!slot?.ros || typeof RobotCompatibility === 'undefined'
+        || typeof RobotCompatibility.discover !== 'function') {
+      return Promise.resolve(this._compatibilityForSlot(slotIndex));
+    }
+    return RobotCompatibility.discover(slot, { force: true }).then(profile => {
+      if (slotIndex === App.activeSlotIndex && (this._slamRunning || this._lifelongRunning)) {
+        this._subscribeFreshMappingMaps();
+      }
+      return profile;
+    });
+  },
 
   _startSlam() {
     if (this._lifelongRunning) {
@@ -5523,6 +6079,7 @@ const RosManager = {
     }
     // Backup current map (including unsaved edits) before SLAM overwrites it
     this._preMapModeBackup = this.lastMapMsg ? {
+      header: this.lastMapMsg.header,
       info: this.lastMapMsg.info,
       data: new Int8Array(this.lastMapMsg.data)
     } : null;
@@ -5541,10 +6098,16 @@ const RosManager = {
         this._syncLoopClosureLogSubscription(App.activeSlotIndex);
         this._subscribeSlamPose();
         this._enableMappingPathLayer();
-        // Clear map cache for fresh SLAM map
-        this._mapImageCanvas = null;
+        // A new SLAM session must start from an empty UI. Ignore the old NAV
+        // latch and accept only a changed live Mapping OccupancyGrid.
+        this._prepareFreshSlamMap();
+        this._refreshMappingRuntimeProfile().catch(error => {
+          console.warn('[Mapping] runtime graph refresh failed:', error?.message || error);
+        });
         this._mappingTopicPath = [];
         this._startSlamTrail(false);
+      } else {
+        this._preMapModeBackup = null;
       }
     });
   },
@@ -5791,8 +6354,8 @@ const RosManager = {
         ctx.fillStyle = '#00ff88';
         ctx.strokeStyle = '#000';
         ctx.lineWidth = lw;
-        ctx.strokeText('LOOP?', mx, my - 4);
-        ctx.fillText('LOOP?', mx, my - 4);
+        ctx.strokeText('LOOP 후보', mx, my - 4);
+        ctx.fillText('LOOP 후보', mx, my - 4);
       }
 
       // Also check proximity to ANY earlier trail segment (not just start)
@@ -5867,6 +6430,8 @@ const RosManager = {
   // Also unlocks map so incoming messages are accepted
   _resubscribeMapTopic() {
     this._mapLocked = false;
+    this._clearMappingMapSubscriptions();
+    this._mappingStaleMapSignature = '';
     const slotIndex = App.activeSlotIndex;
     const slot = App.robotSlots[slotIndex];
     if (!slot || !slot.ros) return;
@@ -5879,6 +6444,7 @@ const RosManager = {
     }
 
     // Clear cached map so we see the fresh one
+    this._resetMapImageBuild();
     this.lastMapMsg = null;
     this._mapImageCanvas = null;
 
@@ -5918,9 +6484,13 @@ const RosManager = {
   // if the .pgm on disk was updated, until map_server is restarted.
   // Lock is released when: user toggles map checkbox, loadMap, or SLAM/Lifelong start.
   _restorePreMapModeBackup() {
+    this._clearMappingMapSubscriptions();
+    this._mappingStaleMapSignature = '';
+    this._resetMapImageBuild();
     if (this._preMapModeBackup) {
       this._mapLocked = true;
       this.lastMapMsg = {
+        header: this._preMapModeBackup.header,
         info: this._preMapModeBackup.info,
         data: this._preMapModeBackup.data
       };
@@ -5937,6 +6507,8 @@ const RosManager = {
   },
 
   _finishMappingMapTransition() {
+    this._clearMappingMapSubscriptions();
+    this._mappingStaleMapSignature = '';
     const committed = this._mappingMapCommitted;
     this._mappingMapCommitted = false;
     Promise.resolve(this._killSlamToolbox()).finally(() => {
@@ -5965,6 +6537,7 @@ const RosManager = {
     }
     // Backup current map (including unsaved edits) before Lifelong overwrites it
     this._preMapModeBackup = this.lastMapMsg ? {
+      header: this.lastMapMsg.header,
       info: this.lastMapMsg.info,
       data: new Int8Array(this.lastMapMsg.data)
     } : null;
@@ -5983,8 +6556,13 @@ const RosManager = {
         this._syncLoopClosureLogSubscription(App.activeSlotIndex);
         this._subscribeSlamPose();
         this._enableMappingPathLayer();
+        this._refreshMappingRuntimeProfile().catch(error => {
+          console.warn('[Mapping] runtime graph refresh failed:', error?.message || error);
+        });
         // Clear map cache for fresh mapping
+        this._resetMapImageBuild();
         this._mapImageCanvas = null;
+        this._mapImageSource = null;
         this._startSlamTrail(true);
       }
     });
@@ -6135,7 +6713,7 @@ const RosManager = {
     const poseGraphChecks = profile?.map?.poseGraphSaveService
       ? ` && [ ${mapDirectory}/map.posegraph -nt ${markerPath} ] && [ ${mapDirectory}/map.data -nt ${markerPath} ]`
       : '';
-    const command = `i=0; while [ $i -lt 100 ]; do if [ ${mapDirectory}/map.pgm -nt ${markerPath} ] && [ ${mapDirectory}/map.yaml -nt ${markerPath} ]${poseGraphChecks}; then rm -f ${markerPath}; exit 0; fi; i=$((i+1)); sleep 0.1; done; rm -f ${markerPath}; exit 1`;
+    const command = `i=0; while [ $i -lt 200 ]; do if [ ${mapDirectory}/map.pgm -nt ${markerPath} ] && [ ${mapDirectory}/map.yaml -nt ${markerPath} ]${poseGraphChecks}; then rm -f ${markerPath}; exit 0; fi; i=$((i+1)); sleep 0.1; done; rm -f ${markerPath}; exit 1`;
     const result = await this._mapExec(command);
     if (!result?.success
         || (result.exitCode !== undefined && Number(result.exitCode) !== 0)) {
@@ -6143,53 +6721,94 @@ const RosManager = {
     }
   },
 
+  _waitForMapSaverSettle() {
+    return new Promise(resolve => setTimeout(resolve, this.MAP_SAVE_SETTLE_MS));
+  },
+
   async _saveMap(options = {}) {
-    const mapName = 'map';
     const slot = App.robotSlots?.[App.activeSlotIndex];
     const statusEl = document.getElementById('save-map-status');
     try {
       if (!slot?.ros) throw new Error('Robot not connected');
       if (statusEl) statusEl.textContent = '맵 인터페이스 확인 중...';
+      const cachedProfile = this._compatibilityForSlot(App.activeSlotIndex);
+      let profile = cachedProfile;
       if (typeof RobotCompatibility !== 'undefined'
-          && !slot.compatibilityProfile?.discovered) {
-        await RobotCompatibility.discover(slot);
+          && typeof RobotCompatibility.discover === 'function') {
+        // save_map/serialize_map can appear only after Mapping starts.
+        const refreshed = await RobotCompatibility.discover(slot, { force: true });
+        if (refreshed?.map?.saveService || !cachedProfile?.map?.saveService) {
+          profile = refreshed;
+        }
       }
-      const profile = this._compatibilityForSlot(App.activeSlotIndex);
 
       if (typeof TestMode !== 'undefined' && TestMode.enabled) {
         if (!TestMode.saveActiveMap?.()) throw new Error('저장할 Mapping 결과가 없습니다.');
       } else {
         if (statusEl) statusEl.textContent = '기존 map 파일 백업 중...';
-        const backup = await this._backupCanonicalMap(profile);
+        let backup = null;
+        try {
+          backup = await this._backupCanonicalMap(profile);
+        } catch (backupError) {
+          // ROS map saving must remain available when SSH backup credentials are
+          // unavailable. Report the reduced safety level and continue.
+          const reason = backupError?.message || backupError;
+          console.warn('[Mapping] Pre-save SSH backup skipped:', reason);
+          App.toast(`기존 맵 백업 생략 · ${reason}`, 'warning');
+          if (statusEl) statusEl.textContent = 'SSH 백업 불가 · ROS 저장 계속...';
+        }
 
-        const poseGraphService = profile?.map?.poseGraphSaveService;
+        if (statusEl) statusEl.textContent = '맵 저장 서비스 호출 중...';
+        if (typeof RobotCompatibility === 'undefined') {
+          throw new Error('중앙 호환성 검사기를 사용할 수 없습니다.');
+        }
+        const mapCapability = RobotCompatibility.requireCapability(profile, 'map', 'Map 저장');
+        if (!mapCapability.saveService || !mapCapability.saveType) {
+          throw new Error('Map 저장 endpoint/type이 ROS graph에서 검증되지 않았습니다.');
+        }
+
+        // Current SaveMap services own the complete transaction: serialize the
+        // pose graph, then run map_saver. Only the historical String_srv
+        // adapter needs an explicit pose-graph call.
+        const poseGraphService = mapCapability.saveType === 'syscon_msgs/String_srv'
+          ? profile?.map?.poseGraphSaveService
+          : null;
         if (poseGraphService) {
           if (statusEl) statusEl.textContent = 'Pose graph 저장 중...';
           const poseGraphArgs = typeof RobotCompatibility !== 'undefined'
             ? RobotCompatibility.mapPoseGraphSaveRequest(profile)
             : { filename: '/home/syscon/ROS_DB/map/map' };
-          await this._callRosServicePromise(
+          const poseGraphResult = await this._callRosServicePromise(
             slot.ros,
             poseGraphService,
             profile?.map?.poseGraphSaveType || 'slam_toolbox_msgs/SerializePoseGraph',
             poseGraphArgs
           );
+          if (poseGraphResult?.success === false
+              || (poseGraphResult?.result !== undefined && Number(poseGraphResult.result) !== 0)) {
+            throw new Error(poseGraphResult?.message || `Pose graph 저장 result=${poseGraphResult?.result}`);
+          }
         }
 
         if (statusEl) statusEl.textContent = 'map.pgm 저장 중...';
-        const saveService = profile?.map?.saveService || `/${slot.robotId}/save_map`;
-        const saveType = profile?.map?.saveType || 'syscon_msgs/String_srv';
-        const saveArgs = typeof RobotCompatibility !== 'undefined'
-          ? RobotCompatibility.mapSaveRequest(profile)
-          : { data: mapName };
+        const saveService = mapCapability.saveService;
+        const saveType = mapCapability.saveType;
+        const saveArgs = RobotCompatibility.mapSaveRequest(profile);
         const result = await this._callRosServicePromise(
           slot.ros, saveService, saveType, saveArgs
         );
         if (result?.success === false) {
           throw new Error(result.message || 'Map save service failed');
         }
-        if (statusEl) statusEl.textContent = '저장 파일 동기화 확인 중...';
-        await this._waitForCanonicalMapSet(profile, backup?.markerPath);
+        if (backup?.markerPath) {
+          if (statusEl) statusEl.textContent = '저장 파일 동기화 확인 중...';
+          await this._waitForCanonicalMapSet(profile, backup.markerPath);
+        } else {
+          // Legacy spcore returns immediately after spawning map_saver. Keep
+          // the Mapping publisher alive until that subscriber receives /map.
+          if (statusEl) statusEl.textContent = 'map_saver 완료 대기 중...';
+          await this._waitForMapSaverSettle();
+        }
       }
 
       this._mappingSessionSaved = true;
@@ -6205,7 +6824,8 @@ const RosManager = {
       console.error('[Mapping] Canonical map save failed:', error);
       App.toast(`Map save failed: ${message}`, 'error');
       if (statusEl) {
-        statusEl.textContent = '저장 실패';
+        statusEl.textContent = `저장 실패 · ${message}`;
+        statusEl.title = message;
         statusEl.style.color = '#ff6b6b';
       }
       options.onFailure?.(message);
@@ -6722,10 +7342,26 @@ const RosManager = {
     };
   },
 
-  // Apply scan-fill: clear region to free, then stamp LiDAR hits as obstacles
+  _scanFillMode() {
+    const value = document.getElementById('scan-fill-mode')?.value || 'both';
+    return ['draw', 'both', 'clear'].includes(value) ? value : 'both';
+  },
+
+  _scanFillModeLabel(mode = this._scanFillMode()) {
+    return mode === 'draw' ? '그리기만' : mode === 'clear' ? '지우기만' : '그리기 + 지우기';
+  },
+
+  // Apply scan-fill using the selected draw/clear policy.
   _applyScanFillRegion(canvasX1, canvasY1, canvasX2, canvasY2) {
-    if (!this.lastMapMsg || !this.lastScanMsg || !this.robotPose) {
-      App.toast('Need map + LiDAR + robot pose data', 'error');
+    const mode = this._scanFillMode();
+    const doDraw = mode === 'draw' || mode === 'both';
+    const doClear = mode === 'clear' || mode === 'both';
+    if (!this.lastMapMsg) {
+      App.toast('Need map data', 'error');
+      return;
+    }
+    if (doDraw && (!this.lastScanMsg || !this.robotPose)) {
+      App.toast('그리기에는 LiDAR와 robot pose 데이터가 필요합니다.', 'error');
       return;
     }
 
@@ -6766,22 +7402,24 @@ const RosManager = {
     // Save undo snapshot
     this._saveEditHistorySnapshot();
 
-    // Step 1: Clear region to free space (value 0)
-    for (let py = minPY; py <= maxPY; py++) {
-      for (let px = minPX; px <= maxPX; px++) {
-        const idx = (height - 1 - py) * width + px;
-        data[idx] = 0; // free
+    // Step 1: optionally clear the selected region to free space (value 0)
+    if (doClear) {
+      for (let py = minPY; py <= maxPY; py++) {
+        for (let px = minPX; px <= maxPX; px++) {
+          const idx = (height - 1 - py) * width + px;
+          data[idx] = 0;
+        }
       }
     }
 
-    // Step 2: Stamp LiDAR scan points as obstacles within the region
+    // Step 2: optionally stamp LiDAR scan points as obstacles within the region
     const scan = this.lastScanMsg;
     const pose = this.robotPose;
-    const angleMin = scan.angle_min;
-    const angleIncrement = scan.angle_increment;
-    const ranges = scan.ranges;
-    const rangeMin = scan.range_min || 0.01;
-    const rangeMax = scan.range_max || 30.0;
+    const angleMin = scan?.angle_min || 0;
+    const angleIncrement = scan?.angle_increment || 0;
+    const ranges = doDraw ? (scan?.ranges || []) : [];
+    const rangeMin = scan?.range_min || 0.01;
+    const rangeMax = scan?.range_max || 30.0;
     const brushR = 1; // 3px diameter stamp per lidar point
 
     let hitCount = 0;
@@ -6823,7 +7461,10 @@ const RosManager = {
 
     const regionW = maxPX - minPX + 1;
     const regionH = maxPY - minPY + 1;
-    App.toast(`Scan fill: ${regionW}x${regionH}px, ${hitCount} LiDAR points`, 'success');
+    App.toast(
+      `Scan Fill (${this._scanFillModeLabel(mode)}): ${regionW}x${regionH}px, ${hitCount} LiDAR points`,
+      'success'
+    );
   },
 
   // LiDAR Ray-casting update: trace each ray, mark path as free, endpoint as obstacle
@@ -6959,7 +7600,11 @@ const RosManager = {
     // Size label
     ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
     ctx.font = 'bold 11px monospace';
-    ctx.fillText(`SCAN FILL ${Math.round(w)}x${Math.round(h)}`, x1 + 4, y1 - 6);
+    ctx.fillText(
+      `SCAN FILL · ${this._scanFillModeLabel()} · ${Math.round(w)}x${Math.round(h)}`,
+      x1 + 4,
+      y1 - 6
+    );
 
     ctx.restore();
   },
@@ -7120,11 +7765,12 @@ const RosManager = {
 
     // Sync brush UI with current brush size
     this._syncBrushUI();
+    this._setEditTool(this._mapEditTool);
 
     const canvas = document.getElementById('map-canvas');
     if (canvas) {
       canvas.classList.add('map-edit-active');
-      canvas.style.cursor = 'crosshair';
+      canvas.style.cursor = this._mapEditTool === 'move' ? 'grab' : 'crosshair';
     }
 
     App.toast('Map edit mode started', 'info');
@@ -7391,32 +8037,37 @@ free_thresh: 0.196
       return;
     }
 
-    const slot = App.robotSlots[slotIndex];
     const profile = this._compatibilityForSlot(slotIndex);
     const yamlPath = `/home/syscon/ROS_DB/map/${mapName}.yaml`;
     const currentPose = this.robotPose || { x: 0, y: 0, yaw: 0 };
     App.toast('Applying map...', 'info');
     try {
-      // Newer/Melodic cores expose map_server/LoadMap. Prefer it because the core
-      // owns map_server/slam_toolbox and killing either node races NAV startup.
-      if (profile?.map?.reloadService) {
-        const reloadArgs = typeof RobotCompatibility !== 'undefined'
-          ? RobotCompatibility.mapReloadRequest(profile, yamlPath)
-          : { map_url: yamlPath };
-        const reloadResult = await this._callRosServicePromise(
-          ros,
-          profile.map.reloadService,
-          profile.map.reloadType || 'map_server/LoadMap',
-          reloadArgs
-        );
-        if (reloadResult?.result !== undefined && Number(reloadResult.result) !== 0) {
-          throw new Error(`map_server LoadMap result=${reloadResult.result}`);
-        }
+      if (typeof RobotCompatibility === 'undefined') {
+        throw new Error('중앙 호환성 검사기를 사용할 수 없습니다.');
+      }
+      const map = RobotCompatibility.requireCapability(profile, 'map', 'Map 적용');
+      if (!map.reloadService || !map.reloadType) {
+        throw new Error('Map reload endpoint/type이 ROS graph에서 검증되지 않았습니다.');
+      }
+      const reloadArgs = RobotCompatibility.mapReloadRequest(profile, yamlPath);
+      const reloadResult = await this._callRosServicePromise(
+        ros,
+        map.reloadService,
+        map.reloadType,
+        reloadArgs
+      );
+      if (reloadResult?.success === false
+          || (reloadResult?.result !== undefined && Number(reloadResult.result) !== 0)) {
+        throw new Error(reloadResult?.message || `Map reload result=${reloadResult?.result}`);
+      }
 
+      // AMCL synchronization is optional, but never guessed. Call it only when
+      // its endpoint/type was part of the same verified snapshot.
+      if (map.amclChangeService && map.amclChangeType) {
         const amclResult = await this._callRosServicePromise(
           ros,
-          profile.map.amclChangeService || `/${rid}/amcl/change_map`,
-          profile.map.amclChangeType || 'syscon_msgs/ChangeMap',
+          map.amclChangeService,
+          map.amclChangeType,
           {
             path: yamlPath,
             pose: { x: currentPose.x, y: currentPose.y, theta: currentPose.yaw }
@@ -7425,44 +8076,14 @@ free_thresh: 0.196
         if (amclResult?.success === false) {
           throw new Error(`AMCL change_map error_code=${amclResult.error_code ?? '-'}`);
         }
-        this._mapLocked = false;
-        this._resubscribeMapTopic();
-        App.toast('Map server and AMCL updated', 'success');
-        return;
       }
-
-      // Existing robots without a reload service keep the historical restart path.
-      await this._callRosServicePromise(
-        ros,
-        `/${rid}/amcl/change_map`,
-        'syscon_msgs/ChangeMap',
-        {
-          path: yamlPath,
-          pose: { x: currentPose.x, y: currentPose.y, theta: currentPose.yaw }
-        }
-      );
-      if (!slot?.ip) {
-        console.warn('[MapEdit] No robot IP for map_server restart');
-        return;
-      }
-
-      App.toast('Restarting map_server...', 'info');
-
-      const result = await this._mapExec(`. /opt/ros/noetic/setup.bash 2>/dev/null; . ~/catkin_ws/devel/setup.bash 2>/dev/null; rosnode kill /${rid}/map_server`);
-      if (result.success) {
-        App.toast('map_server restarting with new map...', 'success');
-        console.log('[MapEdit] map_server killed, will respawn with new map');
-      } else {
-        console.warn('[MapEdit] map_server kill failed:', result.error);
-        App.toast('map_server restart failed (map will apply on next robot reboot)', 'warning');
-      }
-
-      // Step 3: Kill slam_toolbox — it also latches the old map in memory
-      this._killSlamToolbox();
+      this._mapLocked = false;
+      this._resubscribeMapTopic();
+      App.toast(map.amclChangeService ? 'Map server and AMCL updated' : 'Map server updated', 'success');
 
     } catch (err) {
-      console.error('[MapEdit] map_server restart error:', err);
-      App.toast('map_server restart failed (map will apply on next robot reboot)', 'warning');
+      console.error('[MapEdit] map apply blocked/failed:', err);
+      App.toast(`Map apply blocked/failed: ${err.message}`, 'error');
     }
   },
 
@@ -7954,6 +8575,7 @@ free_thresh: 0.196
     const toolBtns = document.querySelectorAll('.btn-edit-tool');
     const brushSlider = document.getElementById('map-edit-brush-size');
     const brushValue = document.getElementById('map-edit-brush-value');
+    const scanFillMode = document.getElementById('scan-fill-mode');
     const undoBtn = document.getElementById('btn-map-edit-undo');
     const resetBtn = document.getElementById('btn-map-edit-reset');
     const saveBtn = document.getElementById('btn-map-edit-save');
@@ -7978,11 +8600,12 @@ free_thresh: 0.196
     // Tool selection
     toolBtns.forEach(btn => {
       btn.addEventListener('click', () => {
-        toolBtns.forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        this._mapEditTool = btn.dataset.tool;
+        this._setEditTool(btn.dataset.tool);
       });
     });
+    if (scanFillMode) {
+      scanFillMode.addEventListener('change', () => this.requestRender());
+    }
 
     // Brush size
     if (brushSlider) {
@@ -8086,6 +8709,7 @@ free_thresh: 0.196
 
       // Right-click or middle-click or Space+click or move tool left-click = pan
       if (e.button === 1 || e.button === 2 || this._mapEditSpaceKey || (this._mapEditTool === 'move' && e.button === 0)) {
+        this._disableFollowRobotForManualPan();
         this._mapEditPanning = true;
         this._mapEditPanStartX = e.clientX;
         this._mapEditPanStartY = e.clientY;
@@ -8374,10 +8998,13 @@ free_thresh: 0.196
   // Set edit tool and update UI
   _setEditTool(tool) {
     this._mapEditTool = tool;
+    if (tool === 'move') this._disableFollowRobotForManualPan();
     const toolBtns = document.querySelectorAll('.btn-edit-tool');
     toolBtns.forEach(b => {
       b.classList.toggle('active', b.dataset.tool === tool);
     });
+    const scanFillMode = document.getElementById('scan-fill-mode');
+    if (scanFillMode) scanFillMode.disabled = tool !== 'scan-fill';
     const canvas = document.getElementById('map-canvas');
     if (canvas) {
       canvas.style.cursor = tool === 'move' ? 'grab' : 'crosshair';
@@ -8446,6 +9073,7 @@ free_thresh: 0.196
     if (slot.robotModelFetchPromise) return slot.robotModelFetchPromise;
 
     const modelEl = document.getElementById('robot-model-name');
+    const sourceRos = slot.ros;
     if (modelEl) modelEl.textContent = '...';
     const sessionId = `robot_model_${index}_${Date.now()}`;
     const request = async (url, body) => {
@@ -8476,6 +9104,7 @@ free_thresh: 0.196
         const model = data?.success ? String(data.stdout || '').trim() : '';
         if (!data?.success) throw new Error(data?.message || 'ROBOT_MODEL 조회 실패');
 
+        if (slot.ros !== sourceRos) return slot.robotModel || null;
         const previousModel = slot.robotModel || '';
         slot.robotModel = model || null;
         if (index === App.activeSlotIndex && modelEl) modelEl.textContent = model || '';

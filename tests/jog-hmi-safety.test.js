@@ -76,6 +76,52 @@ function loadJog() {
     connected: true,
     ros: {}
   };
+  const compatibilityProfile = {
+    discovered: true,
+    controlReady: true,
+    id: 'ros1_legacy',
+    task: { verified: true, protocol: 'ros1_legacy', goalName: '/R_013/TARU/goal' },
+    mapping: { verified: true, protocol: 'ros1_legacy' },
+    lift: {
+      verified: true,
+      interface: 'service',
+      service: '/R_013/Lift/cmd',
+      serviceType: 'syscon_msgs/lift_cmd',
+      feedbackTopic: '/R_013/Lift/feedback',
+      feedbackType: 'syscon_msgs/LiftFeedback',
+      commands: { stop: 0, up: 1, down: 2 }
+    },
+    actions: {
+      turntable: {
+        verified: true,
+        service: '/R_013/Turntable/cmd',
+        serviceType: 'syscon_msgs/turntable_cmd',
+        feedbackTopic: '/R_013/Turntable/feedback',
+        feedbackType: 'syscon_msgs/LiftFeedback',
+        syncService: '/R_013/Turntable/sync_mode',
+        syncType: 'std_srvs/SetBool'
+      }
+    },
+    chassis: {
+      verified: true,
+      drive: { verified: true, topic: '/R_013/cmd_vel', topicType: 'geometry_msgs/Twist' },
+      conveyor: { verified: false, reason: '미지원' }
+    },
+    monitoring: {
+      verified: true,
+      topics: {
+        manualSelect: { name: '/R_013/io/select', type: 'std_msgs/Bool' },
+        robotState: { name: '/R_013/robot_state', type: 'syscon_msgs/RobotState' },
+        emergency: { name: '/R_013/emergency_sensor', type: 'std_msgs/Int32MultiArray' },
+        sto: { name: '/R_013/sto_stop', type: 'std_msgs/Bool' },
+        lidarField: { name: '/R_013/io/lidar_field', type: 'std_msgs/UInt8' },
+        brakeReleased: { name: '/R_013/io/break_released', type: 'std_msgs/Bool' },
+        motorStatus: { name: '/R_013/motor_status', type: 'syscon_msgs/MotorState' },
+        odom: { name: '/R_013/odom', type: 'nav_msgs/Odometry' }
+      }
+    }
+  };
+  slot.compatibilityProfile = compatibilityProfile;
   const context = {
     App: {
       activeSlotIndex: 0,
@@ -88,10 +134,12 @@ function loadJog() {
     },
     RobotCompatibility: {
       isStlUlsanModel: model => String(model).toLowerCase() === 'stl1500w',
-      get: () => ({
-        task: { goalName: '/R_013/TARU/goal' },
-        actions: { turntable: { syncService: '/R_013/Turntable/sync_mode' } }
-      })
+      get: () => compatibilityProfile,
+      requireCapability: (profile, name) => {
+        const capability = name === 'turntable' ? profile.actions.turntable : profile[name];
+        if (!capability?.verified) throw new Error(`${name} 미검증`);
+        return capability;
+      }
     },
     ActionSender: {
       sendJogActionToSlot: jest.fn().mockResolvedValue({}),
@@ -135,7 +183,29 @@ describe('HMI-derived Jog safety and telemetry', () => {
     expect(html).toContain('<kbd>R</kbd><kbd>V</kbd><kbd>T</kbd>');
   });
 
-  test('fails closed until every STL safety signal is fresh and safe', () => {
+  test('holds drive input with pointer capture until release', () => {
+    const { manager, getElement } = loadJog();
+    const button = getElement('jog-fwd');
+    button.setPointerCapture = jest.fn();
+    button.hasPointerCapture = jest.fn(() => true);
+    button.releasePointerCapture = jest.fn();
+    manager._setVel = jest.fn(() => true);
+    manager._stopVel = jest.fn();
+    manager._setupButtons();
+    const listener = name => button.addEventListener.mock.calls
+      .find(([event]) => event === name)?.[1];
+
+    listener('pointerdown')({ pointerId: 7, preventDefault: jest.fn() });
+    expect(button.setPointerCapture).toHaveBeenCalledWith(7);
+    expect(manager._setVel).toHaveBeenCalledTimes(1);
+    expect(manager._stopVel).not.toHaveBeenCalled();
+
+    listener('pointerup')({ pointerId: 7 });
+    expect(button.releasePointerCapture).toHaveBeenCalledWith(7);
+    expect(manager._stopVel).toHaveBeenCalledTimes(1);
+  });
+
+  test('fails closed until every required STL safety signal is fresh and safe', () => {
     const { manager } = loadJog();
     manager._stopVel = jest.fn();
     manager._safetyState = manager._emptySafetyState();
@@ -151,6 +221,40 @@ describe('HMI-derived Jog safety and telemetry', () => {
 
     manager._safetyState.sto.at = at - manager.SAFETY_STALE_MS - 1;
     expect(manager._safetyEvaluation().reasons).toContain('STO 정상 미확인');
+  });
+
+  test('treats unavailable event safety topics as N/A but blocks an explicit unsafe event', () => {
+    const { manager, getElement } = loadJog();
+    const at = Date.now();
+    manager._safetyState = manager._emptySafetyState();
+    ['manual', 'idle', 'sto', 'brake'].forEach(key => {
+      manager._safetyState[key] = { value: true, at };
+    });
+
+    expect(manager._safetyEvaluation()).toMatchObject({ safe: true, strict: true });
+    manager._refreshSafetyUi();
+    expect(getElement('jog-safety-emo').textContent).toBe('EMO N/A');
+    expect(getElement('jog-safety-lidar').textContent).toBe('LIDAR N/A');
+
+    manager._safetyState.emo = { value: false, at };
+    expect(manager._safetyEvaluation().reasons).toContain('EMO 정상 미확인');
+  });
+
+  test('routes cmd_vel through the dedicated worker when it is ready', () => {
+    const { manager } = loadJog();
+    manager._jogWorker = { postMessage: jest.fn() };
+    manager._jogWorkerReady = true;
+    manager._publishing = true;
+    manager._currentLx = 0.2;
+    manager._currentLy = 0;
+    manager._currentAz = -0.1;
+
+    expect(manager._publishOnce()).toBe(true);
+    expect(manager._jogWorker.postMessage).toHaveBeenCalledWith({
+      type: 'command',
+      active: true,
+      velocity: { lx: 0.2, ly: 0, az: -0.1 }
+    });
   });
 
   test('subscribes safety, feedback, and actual velocity topics and renders values', () => {
@@ -171,6 +275,11 @@ describe('HMI-derived Jog safety and telemetry', () => {
     send('/R_013/Turntable/feedback', { height: -9000, status: 6, error_code: 2 });
 
     expect(manager._safetyEvaluation().safe).toBe(true);
+    ['/R_013/motor_status', '/R_013/odom'].forEach(name => {
+      const topic = topics.find(item => item.options.name === name);
+      expect(topic.options.throttle_rate).toBe(manager.VELOCITY_THROTTLE_MS);
+      expect(topic.options.queue_length).toBe(1);
+    });
     expect(getElement('jog-actual-velocity').textContent).toContain('Lx 0.12');
     expect(getElement('jog-lift-height').textContent).toBe('12.34°');
     expect(getElement('jog-lift-feedback-status').textContent).toBe('RUNNING');
@@ -179,6 +288,20 @@ describe('HMI-derived Jog safety and telemetry', () => {
     expect(getElement('jog-turntable-error').textContent).toBe('0x0002');
     manager._stopTelemetry();
     expect(topics.every(topic => topic.unsubscribed)).toBe(true);
+  });
+
+  test('uses fresh odometry instead of holding a slower motor velocity sample', () => {
+    const { manager, getElement } = loadJog();
+    const now = Date.now();
+    manager._actualVelocity = {
+      motor: { lx: 0.05, ly: 0, az: 0, at: now - 500 },
+      odom: { lx: 0.42, ly: 0, az: -0.1, at: now }
+    };
+
+    manager._renderVelocityComparison();
+
+    expect(getElement('jog-actual-velocity').textContent).toContain('Lx 0.42');
+    expect(getElement('jog-velocity-source').textContent).toContain('odom.twist');
   });
 
   test('maps R, V, T shortcuts to target, cancel, and Sync toggle', () => {

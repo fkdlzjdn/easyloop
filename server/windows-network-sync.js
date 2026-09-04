@@ -3,6 +3,11 @@ const os = require('os');
 const { execFile } = require('child_process');
 
 const DEFAULT_INTERVAL_MS = 30000;
+const DEFAULT_SYSCON_AP_IPV4 = Object.freeze({
+  ssid: 'SYSCON_AP',
+  ipAddress: '192.168.30.39',
+  prefixLength: 24
+});
 const POWERSHELL_STATIC_IPV4_QUERY = [
   '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;',
   '@(Get-NetAdapter | Where-Object Status -eq "Up" | ForEach-Object {',
@@ -67,6 +72,22 @@ function normalizeWindowsEntries(rawOutput) {
   }));
 }
 
+function parseWindowsWlanInterfaces(rawOutput) {
+  return String(rawOutput || '')
+    .replace(/^\uFEFF/, '')
+    .split(/\r?\n\s*\r?\n/)
+    .map(block => {
+      const ssidMatch = block.match(/^\s*SSID\s*:\s*(.+?)\s*$/mi);
+      const macMatches = block.match(/(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}/ig) || [];
+      if (!ssidMatch || macMatches.length === 0) return null;
+      return {
+        ssid: ssidMatch[1].trim(),
+        macAddress: normalizeMac(macMatches[0])
+      };
+    })
+    .filter(entry => entry && entry.ssid && entry.macAddress.length === 12);
+}
+
 function readLinuxInterfaces(fsImpl = fs, sysClassNet = '/sys/class/net') {
   const interfaces = [];
   let names = [];
@@ -118,6 +139,31 @@ async function queryWindowsStaticIpv4(runProcessFn = runProcess) {
   return normalizeWindowsEntries(output);
 }
 
+async function queryWindowsWlanInterfaces(runProcessFn = runProcess) {
+  const output = await runProcessFn('netsh.exe', ['wlan', 'show', 'interfaces']);
+  return parseWindowsWlanInterfaces(output);
+}
+
+function withSysconApFallback(windowsEntries, wlanInterfaces, fallback = DEFAULT_SYSCON_AP_IPV4) {
+  const entries = [...windowsEntries];
+  const manualMacs = new Set(windowsEntries.map(entry => entry.macAddress));
+  const fallbackSsid = String(fallback.ssid || '').toLowerCase();
+
+  wlanInterfaces.forEach(wlan => {
+    if (String(wlan.ssid || '').toLowerCase() !== fallbackSsid) return;
+    if (manualMacs.has(wlan.macAddress)) return;
+    entries.push({
+      interfaceAlias: wlan.ssid,
+      macAddress: wlan.macAddress,
+      ipAddress: fallback.ipAddress,
+      prefixLength: fallback.prefixLength,
+      source: 'ssid-default'
+    });
+  });
+
+  return entries;
+}
+
 async function syncWindowsStaticIpv4(options = {}) {
   const {
     platform = process.platform,
@@ -144,13 +190,19 @@ async function syncWindowsStaticIpv4(options = {}) {
   }
 
   const windowsEntries = await queryWindowsStaticIpv4(runProcessFn);
+  const wlanInterfaces = await queryWindowsWlanInterfaces(runProcessFn);
+  const desiredEntries = withSysconApFallback(
+    windowsEntries,
+    wlanInterfaces,
+    options.sysconApFallback || DEFAULT_SYSCON_AP_IPV4
+  );
   const linuxInterfaces = readLinuxInterfaces(fsImpl, options.sysClassNet);
   const linuxAddresses = networkInterfacesFn();
   const changed = [];
   const alreadySynced = [];
   const unmatched = [];
 
-  for (const entry of windowsEntries) {
+  for (const entry of desiredEntries) {
     const target = linuxInterfaces.find(item => item.macAddress === entry.macAddress);
     if (!target) {
       unmatched.push(entry);
@@ -158,26 +210,45 @@ async function syncWindowsStaticIpv4(options = {}) {
     }
 
     const cidr = `${entry.ipAddress}/${entry.prefixLength}`;
-    const current = Array.from(linuxAddresses[target.name] || []).some(address =>
+    const targetAddresses = Array.from(linuxAddresses[target.name] || []);
+    const current = targetAddresses.some(address =>
       address.family === 'IPv4'
       && address.address === entry.ipAddress
       && Number(address.cidr?.split('/')[1]) === entry.prefixLength
     );
-    if (current) {
+    const apipaAddresses = targetAddresses.filter(address =>
+      address.family === 'IPv4'
+      && address.address.startsWith('169.254.')
+      && address.cidr
+    );
+    if (current && apipaAddresses.length === 0) {
       alreadySynced.push({ ...entry, linuxInterface: target.name });
       continue;
     }
 
     await runProcessFn('sudo', ['-n', 'ip', 'link', 'set', 'dev', target.name, 'up']);
-    await runProcessFn('sudo', [
-      '-n',
-      'ip',
-      'address',
-      'replace',
-      cidr,
-      'dev',
-      target.name
-    ]);
+    if (!current) {
+      await runProcessFn('sudo', [
+        '-n',
+        'ip',
+        'address',
+        'replace',
+        cidr,
+        'dev',
+        target.name
+      ]);
+    }
+    for (const apipa of apipaAddresses) {
+      await runProcessFn('sudo', [
+        '-n',
+        'ip',
+        'address',
+        'delete',
+        apipa.cidr,
+        'dev',
+        target.name
+      ]);
+    }
     const result = { ...entry, linuxInterface: target.name };
     changed.push(result);
     logger.info?.(
@@ -223,13 +294,17 @@ function startWindowsNetworkSync(options = {}) {
 
 module.exports = {
   DEFAULT_INTERVAL_MS,
+  DEFAULT_SYSCON_AP_IPV4,
   POWERSHELL_STATIC_IPV4_QUERY,
   isWslEnvironment,
   normalizeMac,
   isWindowsInteropAvailable,
   normalizeWindowsEntries,
+  parseWindowsWlanInterfaces,
   readLinuxInterfaces,
   queryWindowsStaticIpv4,
+  queryWindowsWlanInterfaces,
+  withSysconApFallback,
   syncWindowsStaticIpv4,
   startWindowsNetworkSync
 };

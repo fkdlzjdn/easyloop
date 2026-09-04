@@ -44,6 +44,12 @@ function loadJogControl() {
       getRos: jest.fn(() => slot.ros),
       getRobotId: jest.fn(() => slot.robotId)
     },
+    RobotCompatibility: {
+      get: target => target.compatibilityProfile || {
+        discovered: true,
+        chassis: { charge: { verified: false, reason: '미검증' } }
+      }
+    },
     ROSLIB: {},
     document: {
       addEventListener: jest.fn(),
@@ -85,31 +91,45 @@ describe('Jog charging control status', () => {
     expect(elements['jog-charge-progress'].textContent).toContain('충전 전류가 확인되지 않습니다');
   });
 
-  test('includes the SPX IO manager charge relay service used by newer software', () => {
-    const { manager } = loadJogControl();
-
-    const candidates = manager._chargeServiceCandidates('R_001');
-    expect(candidates[0]).toBe('/R_001/io/set/auto_charge_relay');
-    expect(candidates).toContain('/R_001/io/set/charge_relay');
+  test('keeps charge endpoint candidates in the central compatibility resolver', () => {
+    const compatibility = fs.readFileSync(
+      path.join(__dirname, '..', 'public', 'js', 'robot-compatibility.js'), 'utf8'
+    );
+    expect(compatibility).toContain('`${ns}/io/set/auto_charge_relay`');
+    expect(compatibility).toContain('`${ns}/io/set/charge_relay`');
+    expect(compatibility).toContain("['std_srvs/SetBool', 'std_srvs/srv/SetBool']");
   });
 
   test('detects the available charge service instead of reusing a stale software-version cache', async () => {
-    const { manager, slot, context } = loadJogControl();
+    const { manager, slot } = loadJogControl();
     slot.chargeServiceName = '/R_001/SUBCON_/charge_relay_cmd';
-    context.ROSLIB.ServiceRequest = class ServiceRequest {};
-    context.ROSLIB.Service = class Service {
-      callService(request, success) {
-        success({
-          services: [
-            '/R_001/io/set/charge_relay',
-            '/R_001/io/set/auto_charge_relay'
-          ]
-        });
+    slot.compatibilityProfile = {
+      discovered: true,
+      chassis: {
+        charge: {
+          verified: true,
+          service: '/R_001/io/set/auto_charge_relay',
+          serviceType: 'std_srvs/SetBool'
+        }
       }
     };
 
     await expect(manager._resolveChargeService({}, 'R_001', slot))
-      .resolves.toBe('/R_001/io/set/auto_charge_relay');
+      .resolves.toEqual({
+        verified: true,
+        service: '/R_001/io/set/auto_charge_relay',
+        serviceType: 'std_srvs/SetBool'
+      });
+  });
+
+  test('does not construct a ROSLIB service when charge endpoint/type is unverified', async () => {
+    const { manager, context } = loadJogControl();
+    context.ROSLIB.Service = jest.fn();
+
+    await manager._setChargeRelay(true);
+
+    expect(context.ROSLIB.Service).not.toHaveBeenCalled();
+    expect(context.App.toast).toHaveBeenCalledWith(expect.stringContaining('충전 명령 차단'), 'error');
   });
 
   test('changes the active virtual robot charge state in Test Mode', async () => {

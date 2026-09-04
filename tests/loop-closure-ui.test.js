@@ -114,7 +114,7 @@ describe('Beginner-friendly Loop Closure UI', () => {
     expect(source).toContain("namespace === 'loop_edges'");
     expect(source).toContain("'rosgraph_msgs/Log'");
     expect(source).toContain('visualization_msgs/MarkerArray');
-    expect(source).toContain("ctx.fillText('LOOP?'");
+    expect(source).toContain("ctx.fillText('LOOP 후보'");
   });
 
   test('announces only when the accepted loop edge count increases', () => {

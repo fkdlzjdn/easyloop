@@ -33,6 +33,7 @@ const { startWindowsNetworkSync } = require('./server/windows-network-sync');
 const { stopLocalRosMaster } = require('./server/ros-master-cleanup');
 const { validateRosProxyTarget } = require('./server/ws-proxy-target');
 const { waitForRosService } = require('./server/ros-service-wait');
+const { createWebSocketForwarder } = require('./server/ws-backpressure');
 
 // npm start/start.sh/package 실행 모두 동일하게 로컬 인증 설정을 사용한다.
 // 셸에서 명시한 환경 변수는 .env보다 우선하며 비밀번호 값은 로그에 남기지 않는다.
@@ -389,10 +390,13 @@ server.on('upgrade', (req, socket, head) => {
     console.log(`[WS-Proxy] Connecting to ws://${target} ...`);
     const robotWs = new WebSocket(`ws://${target}`, {
       maxPayload: 50 * 1024 * 1024,
-      handshakeTimeout: 5000
+      handshakeTimeout: 5000,
+      perMessageDeflate: false
     });
+    let robotOpened = false;
 
     robotWs.on('open', () => {
+      robotOpened = true;
       console.log(`[WS-Proxy] Robot reachable: ${target}, completing client upgrade`);
       // Robot confirmed reachable — now complete the client WS upgrade
       rosProxyWss.handleUpgrade(req, socket, head, (clientWs) => {
@@ -404,25 +408,41 @@ server.on('upgrade', (req, socket, head) => {
             if (ws && ws.readyState !== WebSocket.CLOSED) ws.terminate();
           } catch (e) { /* ignore stale socket cleanup */ }
         };
-        // Wire up bidirectional proxy
-        robotWs.on('message', (data, isBinary) => {
-          if (clientWs.readyState === WebSocket.OPEN) {
-            clientWs.send(data, { binary: isBinary });
-          }
-        });
-        clientWs.on('message', (data, isBinary) => {
-          if (robotWs.readyState === WebSocket.OPEN) {
-            robotWs.send(data, { binary: isBinary });
-          }
-        });
-        robotWs.on('close', () => terminatePeer(clientWs));
-        clientWs.on('close', () => terminatePeer(robotWs));
-        robotWs.on('error', () => terminatePeer(clientWs));
-        clientWs.on('error', () => terminatePeer(robotWs));
+        // Pause the upstream socket when its peer cannot drain quickly enough.
+        // Without this, repeated OccupancyGrid frames are retained by ws.send()
+        // and can grow the EasyLoop process to several GB while pose is delayed.
+        let proxyClosed = false;
+        const forwarders = [];
+        const closeProxy = (reason = '') => {
+          if (proxyClosed) return;
+          proxyClosed = true;
+          forwarders.forEach(forwarder => forwarder.cleanup());
+          if (reason) console.warn(`[WS-Proxy] Closing ${target}: ${reason}`);
+          terminatePeer(clientWs);
+          terminatePeer(robotWs);
+        };
+        const onBackpressureFailure = event => {
+          closeProxy(`${event.label}: ${event.reason} (${event.bufferedAmount} buffered bytes)`);
+        };
+        forwarders.push(createWebSocketForwarder(robotWs, clientWs, {
+          label: 'robot->browser',
+          openState: WebSocket.OPEN,
+          onFatal: onBackpressureFailure
+        }));
+        forwarders.push(createWebSocketForwarder(clientWs, robotWs, {
+          label: 'browser->robot',
+          openState: WebSocket.OPEN,
+          onFatal: onBackpressureFailure
+        }));
+        robotWs.on('close', () => closeProxy());
+        clientWs.on('close', () => closeProxy());
+        robotWs.on('error', () => closeProxy('robot WebSocket error'));
+        clientWs.on('error', () => closeProxy('browser WebSocket error'));
       });
     });
 
     robotWs.on('error', (e) => {
+      if (robotOpened) return;
       console.error(`[WS-Proxy] Robot unreachable (${target}):`, e.message);
       // Robot connection failed — reject the client upgrade
       if (!socket.destroyed) {
@@ -523,6 +543,9 @@ process.on('exit', () => { cleanupProcesses(); });
 const serverReady = listenOnAvailablePort(server, {
   startPort: REQUESTED_PORT,
   host: '0.0.0.0',
+  // The Windows sharing launcher pins port 3000 so every department can use
+  // the same LAN URL. Development keeps the existing next-port fallback.
+  allowPortFallback: process.env.EASYLOOP_STRICT_PORT !== '1',
   onPortInUse: (occupiedPort, nextPort) => {
     console.warn(`[Server] Port ${occupiedPort} is already in use. Trying ${nextPort}...`);
   }

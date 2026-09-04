@@ -6,6 +6,7 @@ function normalizePort(value, fallback = 3000) {
 function listenOnAvailablePort(server, options = {}) {
   const host = options.host || '0.0.0.0';
   const startPort = normalizePort(options.startPort);
+  const allowPortFallback = options.allowPortFallback !== false;
   const onPortInUse = typeof options.onPortInUse === 'function'
     ? options.onPortInUse
     : () => {};
@@ -22,7 +23,7 @@ function listenOnAvailablePort(server, options = {}) {
       const handleError = (error) => {
         server.removeListener('listening', handleListening);
 
-        if (error.code !== 'EADDRINUSE') {
+        if (error.code !== 'EADDRINUSE' || !allowPortFallback) {
           reject(error);
           return;
         }

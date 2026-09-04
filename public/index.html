@@ -507,7 +507,13 @@
               <button class="btn btn-small btn-edit-tool" data-tool="free" title="Free space (white) [2]">Free</button>
               <button class="btn btn-small btn-edit-tool" data-tool="unknown" title="Unknown area (gray) [3]">Unknown</button>
               <span class="edit-group-divider">|</span>
-              <button class="btn btn-small btn-edit-tool btn-scan-fill" data-tool="scan-fill" title="Drag area → clear + fill from LiDAR [4]">Scan Fill</button>
+              <button class="btn btn-small btn-edit-tool btn-scan-fill" data-tool="scan-fill" title="영역을 드래그해 선택한 Scan Fill 모드 적용 [4]">Scan Fill</button>
+              <select id="scan-fill-mode" class="scan-fill-mode-select"
+                      title="Scan Fill 적용 방식" aria-label="Scan Fill 적용 방식" disabled>
+                <option value="draw">그리기만</option>
+                <option value="both" selected>그리기 + 지우기</option>
+                <option value="clear">지우기만</option>
+              </select>
               <button class="btn btn-small btn-edit-tool btn-move-tool" data-tool="move" title="Move/pan map [5]">&#9995;</button>
             </div>
             <div class="map-edit-brush">
@@ -565,6 +571,7 @@
             <span>X: <b id="robot-pos-x">-</b></span>
             <span>Y: <b id="robot-pos-y">-</b></span>
             <span>Yaw: <b id="robot-pos-yaw">-</b></span>
+            <span>Source: <b id="robot-pose-source">--</b></span>
             <span id="slam-dimension-status" class="slam-dimension-status"
                   title="수신 중인 ROS topic을 기준으로 SLAM 차원을 자동 판별합니다">
               <b id="slam-active-dimension">SLAM 판별 중</b>
@@ -1485,6 +1492,10 @@
                 <option value="0x22">0x22 · Turntable</option>
               </select>
             </div>
+            <div id="action-compatibility-status" class="action-compatibility-status"
+                 role="status" aria-live="polite">
+              로봇 연결 후 등록 Action과 차상 model_type을 자동 확인합니다.
+            </div>
 
             <!-- Action Args -->
             <div class="action-args-section">
@@ -2382,15 +2393,24 @@ free -h"></textarea>
     <div class="jog-panel-body">
       <div class="jog-chassis-selector">
         <div class="jog-chassis-header">
-          <span>차상 선택</span>
-          <strong id="jog-chassis-current">선택 안 함 (기본) · DD</strong>
+          <span>프로젝트 · 차상</span>
+          <strong id="jog-chassis-current">자동 감지 (권장) · DD</strong>
         </div>
+        <label class="jog-project-field" for="jog-project-select">
+          <span>4계보 프로젝트</span>
+          <select id="jog-project-select" aria-describedby="jog-generation-status">
+            <option value="">프로젝트 자동/미지정</option>
+          </select>
+        </label>
+        <div id="jog-generation-status" class="jog-generation-status">계보 미지정 · runtime graph 우선</div>
+        <div id="jog-compatibility-summary" class="jog-compatibility-summary blocked"
+             role="status" aria-live="polite">명령 차단 · ROS graph 확인 중</div>
         <details id="jog-chassis-picker" class="jog-chassis-picker">
-          <summary>모델 목록 펼치기</summary>
+          <summary>차상 기능 프로필 펼치기</summary>
           <div id="jog-chassis-options" class="jog-chassis-options"
                role="radiogroup" aria-label="Jog 차상 모델 선택"></div>
         </details>
-        <small>모델 선택에 따라 주행 타입과 차상 제어가 함께 변경됩니다.</small>
+        <small>계보/모델은 안내용이며, 명령은 실제 ROS endpoint와 type이 검증된 기능만 허용됩니다.</small>
       </div>
       <div class="jog-speed-panel">
         <div class="jog-speed-row">
@@ -2413,7 +2433,7 @@ free -h"></textarea>
         </div>
         <div class="jog-speed-row">
           <label>Topic:</label>
-          <input type="text" id="jog-topic" value="/cmd_vel" class="jog-topic-input">
+          <input type="text" id="jog-topic" value="runtime 자동 감지" class="jog-topic-input" disabled>
         </div>
       </div>
       <section id="jog-safety-gate" class="jog-safety-gate" aria-live="polite">
@@ -3022,9 +3042,9 @@ free -h"></textarea>
   <script src="js/i18n.js"></script>
   <script src="js/app.js?v=20260731-manual-on-robot-switch&health=3"></script>
   <script src="js/dashboard.js"></script>
-  <script src="js/robot-compatibility.js?v=20260813-jog-safety"></script>
-  <script src="js/ros-manager.js?v=20260806-stl-ulsan-jog&health=3"></script>
-  <script src="js/test-mode.js?v=20260728-drive-lab"></script>
+  <script src="js/robot-compatibility.js?v=20260815-action-contract"></script>
+  <script src="js/ros-manager.js?v=20260815-four-generation"></script>
+  <script src="js/test-mode.js?v=20260815-action-contract"></script>
   <script src="js/ros-info.js"></script>
   <script src="js/map-context-menu.js"></script>
   <!-- Test Mode Loading Overlay -->
@@ -3317,8 +3337,8 @@ free -h"></textarea>
   <script src="js/ssh-terminal.js"></script>
   <script src="js/file-transfer.js?v=20260723-active-robot-session"></script>
   <script src="js/commands.js"></script>
-  <script src="js/action-sender.js?v=20260815-jog-safety-priority"></script>
-  <script src="js/jog-control.js?v=20260815-jog-safety-priority"></script>
+  <script src="js/action-sender.js?v=20260815-action-contract"></script>
+  <script src="js/jog-control.js?v=20260815-four-generation"></script>
   <script src="js/vel-monitor.js"></script>
   <script src="js/docking-test.js"></script>
   <script src="js/init-setup.js"></script>
@@ -3330,7 +3350,7 @@ free -h"></textarea>
   <script src="js/rosbag-control.js"></script>
   <script src="js/incident-report.js"></script>
   <script src="js/file-diff.js"></script>
-  <script src="js/map-file-manager.js"></script>
+  <script src="js/map-file-manager.js?v=20260815-four-generation"></script>
   <script src="js/network-config.js"></script>
   <script src="js/param-tuning.js"></script>
   <script src="js/diagnostic-tree.js"></script>

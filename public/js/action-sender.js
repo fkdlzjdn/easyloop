@@ -497,6 +497,7 @@ const ActionSender = {
     this._loadRecentTaskRuns();
     this.renderRecentTaskRuns();
     this._subscribeTaskTelemetry();
+    this._syncActionCompatibilityUi();
   },
 
   _fieldLabel(field) {
@@ -885,12 +886,18 @@ const ActionSender = {
       this._syncTaskInterfaceSelector();
       this._subscribeTaskTelemetry();
       this._syncActiveRunningTask();
+      this._syncActionCompatibilityUi();
       const typeSelect = document.getElementById('action-type');
       if (typeSelect?.value !== '0x08') return;
       this._closeTargetCfgDetails();
       const config = this.actionTypes['0x08'];
       const targetCfgIndex = config.params.findIndex(param => param.name === 'target_cfg');
       if (targetCfgIndex >= 0) this._loadTargetCfgOptions(targetCfgIndex, true);
+    });
+    document.addEventListener('amr:compatibility-updated', () => {
+      this._syncActionCompatibilityUi();
+      const typeSelect = document.getElementById('action-type');
+      if (typeSelect?.value) this.updateActionForm(typeSelect.value);
     });
 
     // Add to queue button
@@ -1415,10 +1422,24 @@ const ActionSender = {
     const button = document.getElementById('btn-run-quick-task');
     if (!button || button.classList.contains('loading')) return;
     const slot = App.robotSlots?.[this.getTargetSlot()];
-    button.disabled = !slot?.connected || !slot.ros;
-    button.title = button.disabled
-      ? '활성 로봇이 연결되면 저장 후 바로 실행할 수 있습니다.'
-      : `${slot.robotId}에 현재 Quick Task를 저장 후 실행합니다.`;
+    const { profile, catalog } = this._taskActionCatalog(slot);
+    const actionTypes = this.compileQuickTaskItems().map(item => parseInt(item.actionType));
+    const unsupported = actionTypes.find(type => !this._actionTypeSupported(type, slot));
+    button.disabled = !slot?.connected || !slot.ros || unsupported !== undefined
+      || Boolean(catalog?.attempted && !catalog.verified);
+    if (!slot?.connected || !slot.ros) {
+      button.title = '활성 로봇이 연결되면 저장 후 바로 실행할 수 있습니다.';
+    } else if (catalog?.attempted && !catalog.verified) {
+      button.title = catalog.reason || '등록 Action 목록 미검증';
+    } else if (unsupported !== undefined) {
+      const model = profile?.chassis?.driveModel;
+      button.title = this._requiresDetectedActionModel(unsupported)
+          && model?.attempted && !model.verified
+        ? model.reason || '차상 model_type 미검증'
+        : `현재 로봇에 Action 0x${unsupported.toString(16).padStart(2, '0')}가 등록되지 않았습니다.`;
+    } else {
+      button.title = `${slot.robotId}에 현재 Quick Task를 저장 후 실행합니다.`;
+    }
   },
 
   startQuickMapCapture(mode) {
@@ -2908,28 +2929,144 @@ const ActionSender = {
 
   _updateTaskControlsAvailability() {
     const slot = App.robotSlots?.[this.getTargetSlot()];
-    const disabled = !slot?.connected || !slot.ros;
-    ['btn-pause-task', 'btn-resume-task', 'btn-cancel-task'].forEach(id => {
-      const button = document.getElementById(id);
-      if (button && !button.classList.contains('loading')) button.disabled = disabled;
-    });
-  },
-
-  _turntableUsesAsyncArg(slot = App.robotSlots?.[this.getTargetSlot()]) {
-    if (typeof RobotCompatibility !== 'undefined'
-        && RobotCompatibility.isStlUlsanModel?.(slot?.robotModel)) {
-      return true;
-    }
     const profile = typeof RobotCompatibility !== 'undefined'
       ? RobotCompatibility.get(slot)
       : slot?.compatibilityProfile;
-    return Boolean(profile?.actions?.turntable?.asyncModeArg);
+    const controls = {
+      'btn-pause-task': 'pause',
+      'btn-resume-task': 'resume',
+      'btn-cancel-task': 'cancel'
+    };
+    Object.entries(controls).forEach(([id, kind]) => {
+      const button = document.getElementById(id);
+      if (!button || button.classList.contains('loading')) return;
+      const operationVerified = Boolean(profile?.task?.verified
+        && profile.task[`${kind}Name`] && profile.task[`${kind}Type`]);
+      button.disabled = !slot?.connected || !slot.ros || !operationVerified;
+      button.title = operationVerified
+        ? `${profile.task[`${kind}Name`]} · ${profile.task[`${kind}Type`]}`
+        : profile?.task?.operations?.[kind]?.reason || profile?.reason || 'Task graph 미검증';
+    });
+  },
+
+  _taskActionCatalog(slot = App.robotSlots?.[this.getTargetSlot()]) {
+    const profile = typeof RobotCompatibility !== 'undefined'
+      ? RobotCompatibility.get(slot)
+      : slot?.compatibilityProfile;
+    return { profile, catalog: profile?.task?.actionCatalog };
+  },
+
+  _actionTypeSupported(actionType, slot = App.robotSlots?.[this.getTargetSlot()]) {
+    const { profile, catalog } = this._taskActionCatalog(slot);
+    if (!catalog?.attempted) return true;
+    if (!catalog.verified || !catalog.types.includes(Number(actionType))) return false;
+    const model = profile?.chassis?.driveModel;
+    return !(this._requiresDetectedActionModel(actionType)
+      && model?.attempted && !model.verified);
+  },
+
+  _requiresDetectedActionModel(actionType) {
+    return [0x01, 0x08, 0x15].includes(Number(actionType));
+  },
+
+  _syncActionCompatibilityUi() {
+    const slot = App.robotSlots?.[this.getTargetSlot()];
+    const { profile, catalog } = this._taskActionCatalog(slot);
+    const status = document.getElementById('action-compatibility-status');
+    const model = profile?.chassis?.driveModel;
+    if (status) {
+      if (!slot?.connected || !slot.ros) {
+        status.textContent = '로봇 연결 후 등록 Action과 차상 model_type을 자동 확인합니다.';
+        status.className = 'action-compatibility-status';
+      } else if (catalog?.verified && model?.attempted && !model.verified) {
+        status.textContent = `${slot.robotId} · Action ${catalog.types.length}개 · 차상 model_type 미확인 · 모델 의존 Action 차단`;
+        status.className = 'action-compatibility-status blocked';
+        status.title = model.reason || '차상 model_type 자동감지 실패';
+      } else if (catalog?.verified) {
+        const modelLabel = model?.verified
+          ? `${String(model.kind).toUpperCase()} · model_type=${model.actionModelType}`
+          : '차상 model_type 미확인';
+        status.textContent = `${slot.robotId} · Action ${catalog.types.length}개 자동감지 · ${modelLabel}`;
+        status.className = 'action-compatibility-status ready';
+        status.title = `${catalog.service} · ${catalog.serviceType}`;
+      } else if (catalog?.attempted) {
+        status.textContent = `Task 실행 차단 · ${catalog.reason}`;
+        status.className = 'action-compatibility-status blocked';
+      } else {
+        status.textContent = '등록 Action 목록 확인 중...';
+        status.className = 'action-compatibility-status';
+      }
+    }
+
+    const select = document.getElementById('action-type');
+    if (select?.options) {
+      Array.from(select.options).forEach(option => {
+        if (!option.dataset.baseLabel) option.dataset.baseLabel = option.textContent;
+        const supported = this._actionTypeSupported(parseInt(option.value), slot);
+        option.disabled = !supported;
+        option.textContent = `${option.dataset.baseLabel}${supported ? '' : ' · 미지원'}`;
+      });
+      const selected = select.options[select.selectedIndex];
+      if (selected?.disabled) {
+        const firstSupported = Array.from(select.options).find(option => !option.disabled);
+        if (firstSupported) select.value = firstSupported.value;
+      }
+    }
+
+    const selectedType = select?.value ? parseInt(select.value) : null;
+    const addButton = document.getElementById('btn-add-to-queue');
+    if (addButton) {
+      const supported = selectedType === null || this._actionTypeSupported(selectedType, slot);
+      addButton.disabled = !supported;
+      addButton.title = supported
+        ? '현재 Action을 Task 대기열에 추가합니다.'
+        : catalog?.reason || '현재 로봇에 등록되지 않은 Action입니다.';
+    }
+
+    const quickTypes = {
+      'btn-quick-waypoint': 0x01,
+      'btn-quick-trajectory': 0x15,
+      'btn-quick-freehand': 0x15,
+      'btn-quick-docking': 0x08,
+      'btn-quick-docking-inline': 0x08,
+      'btn-quick-docking-out': 0x10,
+      'btn-quick-docking-out-inline': 0x10,
+      'btn-quick-docking-out-map': 0x10,
+      'btn-quick-standby': 0x07
+    };
+    Object.entries(quickTypes).forEach(([id, type]) => {
+      const button = document.getElementById(id);
+      if (!button) return;
+      const supported = this._actionTypeSupported(type, slot);
+      button.disabled = !supported;
+      if (!supported) {
+        button.title = catalog?.verified
+          ? `현재 로봇 scheduler에 Action 0x${type.toString(16).padStart(2, '0')} 미등록`
+          : catalog?.reason || '등록 Action 목록 미검증';
+      }
+    });
+    this._updateQuickTaskRunAvailability();
+  },
+
+  _turntableUsesAsyncArg(slot = App.robotSlots?.[this.getTargetSlot()]) {
+    const profile = typeof RobotCompatibility !== 'undefined'
+      ? RobotCompatibility.get(slot)
+      : slot?.compatibilityProfile;
+    return Boolean(profile?.actions?.turntable?.verified
+      && profile.actions.turntable.asyncModeArg);
   },
 
   _actionArgDefinitions(actionType, existingArgs = null, slot = App.robotSlots?.[this.getTargetSlot()]) {
     const config = this.actionTypes[actionType];
     if (!config) return [];
     const definitions = Array.from(config.args || []);
+    if (actionType === '0x02' && this._usesNativeSpxBasicMove(slot)) {
+      definitions[0] = {
+        ...definitions[0],
+        desc: 'SPX BasicMove는 직진만 지원하며 전송 시 거리(m)를 mm로 자동 변환합니다.',
+        enumValues: [{ value: 0, label: '직진 · SPX 자동 변환' }]
+      };
+    }
     const hasSavedAsyncArg = actionType === '0x22'
       && Array.isArray(existingArgs)
       && existingArgs.length >= 3;
@@ -3059,6 +3196,7 @@ const ActionSender = {
 
     // Apply saved values after form is rendered
     this.applySavedParams(actionType);
+    this._applyDetectedModelToForm(actionType);
 
     if (actionType === '0x08') {
       const targetCfgIndex = config.params.findIndex(param => param.name === 'target_cfg');
@@ -3067,6 +3205,34 @@ const ActionSender = {
         this._loadTargetCfgOptions(targetCfgIndex);
       }
     }
+  },
+
+  _usesNativeSpxBasicMove(slot = App.robotSlots?.[this.getTargetSlot()]) {
+    const { profile, catalog } = this._taskActionCatalog(slot);
+    if (!['ros1_spx', 'ros2_spx'].includes(profile?.task?.protocol) || !catalog?.verified) {
+      return false;
+    }
+    const action = catalog.actions.find(item => Number(item.type) === 0x02);
+    return Boolean(action && (
+      String(action.key).toLowerCase() === 'basic_move'
+      || /basicmoveplugin/i.test(String(action.name))
+    ));
+  },
+
+  _applyDetectedModelToForm(actionType) {
+    if (!['0x01', '0x08', '0x15'].includes(actionType)) return;
+    const slot = App.robotSlots?.[this.getTargetSlot()];
+    const { profile } = this._taskActionCatalog(slot);
+    const model = profile?.chassis?.driveModel;
+    if (!model?.verified || !Number.isInteger(model.actionModelType)) return;
+    const config = this.actionTypes[actionType];
+    const index = config?.params?.findIndex(param => param.name === 'model_type');
+    if (index < 0) return;
+    const input = document.getElementById(`action-param-${index}`);
+    if (!input) return;
+    input.value = String(model.actionModelType);
+    input.readOnly = true;
+    input.title = `${model.parameter}에서 ${String(model.kind).toUpperCase()} 자동감지`;
   },
 
   // Read current form values and return an action object
@@ -3757,7 +3923,7 @@ const ActionSender = {
       const slot = App.robotSlots?.[slotIndex] || { ros, robotId };
       actions = await this._prepareActionsForSlot(actions, slot);
     } catch (error) {
-      const message = `컨베이어 명령 준비 실패: ${error.message}`;
+      const message = `Task Action 준비 실패: ${error.message}`;
       this.showResult(message, true);
       App.addEvent('action', 'Send failed', message, 'error');
       return;
@@ -3778,7 +3944,7 @@ const ActionSender = {
       missions: [mission]
     };
 
-    let serviceName = `/${robotId}/TARU/goal`;
+    let serviceName = '[runtime Task adapter 확인 전]';
     App.setButtonLoading(sendButton, true, 'Sending');
     // Record to action history
     const currentForHistory = this.readCurrentAction();
@@ -5328,15 +5494,30 @@ const ActionSender = {
       }
       profile = RobotCompatibility.get(slot);
     }
-    const isStlUlsan = typeof RobotCompatibility !== 'undefined'
-      && RobotCompatibility.isStlUlsanModel?.(slot?.robotModel);
-    const turntableAsyncMode = isStlUlsan
-      ? true
-      : (profile?.discovered ? Boolean(profile?.actions?.turntable?.asyncModeArg) : null);
+    const catalog = profile?.task?.actionCatalog;
+    if (catalog?.attempted && !catalog.verified) {
+      throw new Error(`등록 Action 자동감지 실패: ${catalog.reason || 'ActionInfo 미검증'}`);
+    }
+    if (catalog?.verified) {
+      prepared.forEach(action => {
+        const type = Number(action.action_type);
+        if (!catalog.types.includes(type)) {
+          throw new Error(
+            `Action 0x${type.toString(16).padStart(2, '0')} 차단: 현재 scheduler에 등록되지 않았습니다.`
+          );
+        }
+      });
+    }
+    const turntableActions = prepared.filter(action => Number(action.action_type) === 0x22);
+    if (turntableActions.length > 0 && (!profile?.discovered
+        || !profile?.actions?.turntable?.verified)) {
+      throw new Error(
+        `Turntable action 차단: ${profile?.actions?.turntable?.reason || profile?.reason || 'endpoint/type 미검증'}`
+      );
+    }
+    const turntableAsyncMode = Boolean(profile?.actions?.turntable?.asyncModeArg);
 
-    prepared
-      .filter(action => Number(action.action_type) === 0x22)
-      .forEach(action => {
+    turntableActions.forEach(action => {
         const args = Array.from(action.action_args || []).map(value => Number(value) || 0);
         if (turntableAsyncMode === true) {
           action.action_args = [args[0] || 0, args[1] || 0, args[2] ? 1 : 0];
@@ -5366,8 +5547,121 @@ const ActionSender = {
       });
     }
 
+    prepared.forEach(action => this._normalizeActionContractForProfile(action, profile));
     prepared.forEach(action => delete action.conveyorFloor);
     return prepared;
+  },
+
+  _registeredAction(profile, actionType) {
+    return profile?.task?.actionCatalog?.actions?.find(
+      item => Number(item.type) === Number(actionType)
+    ) || null;
+  },
+
+  _actionParamValue(action, name, fallback = undefined) {
+    const param = Array.from(action?.action_params || []).find(item =>
+      String(item?.param_name || item?.name || '') === name
+    );
+    return param ? param.value : fallback;
+  },
+
+  _setActionWireParam(action, name, type, value) {
+    const params = Array.from(action.action_params || []);
+    const index = params.findIndex(item => String(item?.param_name || item?.name || '') === name);
+    const next = { param_name: name, type, value: String(value) };
+    if (index >= 0) params[index] = { ...params[index], ...next };
+    else params.push(next);
+    action.action_params = params;
+  },
+
+  _usesNativeSpxBasicMoveProfile(profile) {
+    if (!['ros1_spx', 'ros2_spx'].includes(profile?.task?.protocol)) return false;
+    const registered = this._registeredAction(profile, 0x02);
+    return Boolean(registered && (
+      String(registered.key).toLowerCase() === 'basic_move'
+      || /basicmoveplugin/i.test(String(registered.name))
+    ));
+  },
+
+  _normalizeNativeSpxBasicMove(action) {
+    const args = Array.from(action.action_args || []).map(Number);
+    if (args.length !== 2 || !args.every(Number.isFinite)) {
+      throw new Error('SPX Basic_Move 변환 실패: EasyLoop 입력 [move_type, move_amount] 2개가 필요합니다.');
+    }
+    const [moveType, moveAmount] = args;
+    if (moveType !== 0) {
+      throw new Error('SPX BasicMovePlugin은 직진만 지원합니다. 회전 입력은 전송하지 않았습니다.');
+    }
+    if (moveAmount <= 0 || moveAmount > 10) {
+      throw new Error('SPX BasicMovePlugin 직진 거리는 0 초과 10 m 이하여야 합니다.');
+    }
+    const speed = Number(this._actionParamValue(action, 'move_vel', 0.3));
+    if (!Number.isFinite(speed) || speed <= 0 || speed > 1.8) {
+      throw new Error('SPX BasicMovePlugin 속도는 0 초과 1.8 m/s 이하여야 합니다.');
+    }
+    action.action_args = [moveAmount * 1000, speed];
+    action.action_params = Array.from(action.action_params || []).filter(item =>
+      String(item?.param_name || item?.name || '') !== 'move_vel'
+    );
+  },
+
+  _validateActionWireShape(action, profile) {
+    const type = Number(action.action_type);
+    const args = Array.from(action.action_args || []).map(Number);
+    if (!Number.isInteger(type) || type <= 0) throw new Error(`잘못된 action_type: ${action.action_type}`);
+    if (!args.every(Number.isFinite)) {
+      throw new Error(`Action 0x${type.toString(16).padStart(2, '0')} 인자에 숫자가 아닌 값이 있습니다.`);
+    }
+    const exactCounts = new Map([
+      [0x01, 3], [0x02, 2], [0x07, 1], [0x08, 4], [0x10, 1], [0x12, 1],
+      [0x16, 2], [0x17, 3], [0x19, 2], [0x21, 2]
+    ]);
+    if (type === 0x22) exactCounts.set(type, profile?.actions?.turntable?.argCount || 2);
+    const expected = exactCounts.get(type);
+    if (expected !== undefined && args.length !== expected) {
+      throw new Error(
+        `Action 0x${type.toString(16).padStart(2, '0')} 인자는 ${expected}개여야 합니다. 현재 ${args.length}개입니다.`
+      );
+    }
+    if (type === 0x15 && (args.length < 3 || args.length % 2 !== 1)) {
+      throw new Error('TrajectoryFollowing 인자는 [x,y,...,final_theta] 형태의 홀수 개여야 합니다.');
+    }
+    if (type === 0x18 && (args.length < 2 || args.length % 2 !== 0)) {
+      throw new Error('Conveyor 인자는 [cmd_type,count] 쌍으로 구성되어야 합니다.');
+    }
+    if (type === 0x08) {
+      const [isCharge, direction, scanType, endCondition] = args;
+      if (![0, 1].includes(isCharge)
+          || ![1, -1, 2, 3].includes(direction)
+          || scanType < 1 || scanType > 7
+          || endCondition < 1 || endCondition > 3) {
+        throw new Error('Docking 인자 범위가 현재 로봇 계약과 맞지 않습니다.');
+      }
+    }
+    if (type === 0x17) {
+      const mapId = String(this._actionParamValue(action, 'map_id', '')).trim();
+      if (!mapId) throw new Error('Change_Map Action에는 map_id 파라미터가 필요합니다.');
+    }
+    action.action_args = args;
+  },
+
+  _normalizeActionContractForProfile(action, profile) {
+    const type = Number(action.action_type);
+    if (this._usesNativeSpxBasicMoveProfile(profile) && type === 0x02) {
+      this._normalizeNativeSpxBasicMove(action);
+    }
+    const driveModel = profile?.chassis?.driveModel;
+    if (this._requiresDetectedActionModel(type)
+        && driveModel?.attempted && !driveModel.verified) {
+      throw new Error(
+        `Action 0x${type.toString(16).padStart(2, '0')} 차단: ${driveModel.reason || '차상 model_type 자동감지 실패'}`
+      );
+    }
+    if (driveModel?.verified && Number.isInteger(driveModel.actionModelType)
+        && this._requiresDetectedActionModel(type)) {
+      this._setActionWireParam(action, 'model_type', 'int', driveModel.actionModelType);
+    }
+    this._validateActionWireShape(action, profile);
   },
 
   async _resolveConveyorCount(slot) {
@@ -6107,57 +6401,11 @@ const ActionSender = {
     return normalized;
   },
 
-  _taskInterfaceDefinitions(slot) {
-    const rid = String(slot?.robotId || '').replace(/^\//, '');
-    const spx = {
-      goalName: `/${rid}/spx/task/goal`,
-      goalType: 'spx_task_msgs/TaskGoal',
-      pauseName: `/${rid}/spx/task/pause`,
-      pauseType: 'spx_task_msgs/TaskPause',
-      pauseArgs: {},
-      resumeName: `/${rid}/spx/task/resume`,
-      resumeType: 'spx_task_msgs/TaskResume',
-      resumeArgs: {},
-      cancelName: `/${rid}/spx/task/cancel`,
-      cancelType: 'spx_task_msgs/TaskCancel',
-      cancelArgs: {},
-      feedbackName: `/${rid}/spx/task/feedback`,
-      feedbackType: 'spx_task_msgs/TaskFeedback',
-      resultName: `/${rid}/spx/task/result`,
-      resultType: 'spx_task_msgs/TaskResult',
-      variant: 'spx'
-    };
-    const legacy = {
-      goalName: `/${rid}/TARU/goal`,
-      goalType: 'sp_task/TaskGoal',
-      pauseName: `/${rid}/TARU/pause`,
-      pauseType: 'sp_task/Int32_srv',
-      pauseArgs: { data: 0 },
-      resumeName: `/${rid}/TARU/resume`,
-      resumeType: 'sp_task/Int32_srv',
-      resumeArgs: { data: 0 },
-      cancelName: `/${rid}/TARU/cancel`,
-      cancelType: 'sp_task/String_srv',
-      cancelArgs: { data: '' },
-      feedbackName: `/${rid}/TARU/feedback`,
-      feedbackType: 'sp_task/Feedback',
-      resultName: `/${rid}/TARU/result`,
-      resultType: 'sp_task/Result',
-      stateName: `/${rid}/taru_state`,
-      stateType: 'std_msgs/Int32',
-      variant: 'sp_task'
-    };
-    return { spx, legacy };
-  },
-
-  _taskInterfaceDiscoveryTimeout(slot) {
-    return slot?.tunnelMode
-      ? this.TUNNEL_TASK_INTERFACE_DISCOVERY_TIMEOUT_MS
-      : this.TASK_INTERFACE_DISCOVERY_TIMEOUT_MS;
-  },
-
   _taskInterfaceLabel(taskInterface) {
-    return taskInterface?.variant === 'spx' ? 'SPX' : 'Legacy (TARU)';
+    if (taskInterface?.protocol === 'ros2_spx') return 'SPX ROS2';
+    if (taskInterface?.protocol === 'ros1_spx') return 'SPX ROS1';
+    if (taskInterface?.protocol === 'ros1_legacy') return 'Legacy (TARU)';
+    return '미검증';
   },
 
   _setTaskInterfaceStatus(state, message) {
@@ -6245,9 +6493,12 @@ const ActionSender = {
     return slot.taskInterface;
   },
 
-  _resolveTaskInterface(slot, options = {}) {
+  async _resolveTaskInterface(slot, options = {}) {
     if (!slot?.robotId || !slot.ros) {
-      return Promise.reject(new Error('Task 인터페이스를 확인할 로봇 연결이 없습니다.'));
+      throw new Error('Task 인터페이스를 확인할 로봇 연결이 없습니다.');
+    }
+    if (typeof RobotCompatibility === 'undefined') {
+      throw new Error('중앙 호환성 검사기를 사용할 수 없어 Task 제어를 차단했습니다.');
     }
     const mode = this._getTaskInterfaceMode(slot);
     if (!options.forceDiscovery && slot.taskInterface && (
@@ -6255,108 +6506,27 @@ const ActionSender = {
       (!slot.taskInterfaceModeResolved && mode === 'auto')
     )) {
       slot.taskInterfaceModeResolved = mode;
-      return Promise.resolve(slot.taskInterface);
+      return slot.taskInterface;
     }
-
-    // Connection startup already asks RobotCompatibility for the same large
-    // rosapi service list. Share that in-flight result instead of issuing a
-    // second request over a high-latency SSH tunnel and racing short timers.
-    if (!options.compatibilityWaited && slot.compatibilityPromise) {
-      return Promise.resolve(slot.compatibilityPromise).then(() => this._resolveTaskInterface(slot, {
-        ...options,
-        forceDiscovery: false,
-        compatibilityWaited: true
-      }));
+    const profile = options.forceDiscovery
+      ? await RobotCompatibility.discover(slot, { force: true })
+      : (slot.compatibilityPromise
+        ? await slot.compatibilityPromise
+        : (RobotCompatibility.get(slot).discovered
+          ? RobotCompatibility.get(slot)
+          : await RobotCompatibility.discover(slot)));
+    if (!profile?.discovered) {
+      throw new Error(`Task 제어 차단: ${profile?.reason || 'ROS graph 검증 실패'}`);
     }
-
-    const definitions = this._taskInterfaceDefinitions(slot);
-    const compatibility = typeof RobotCompatibility !== 'undefined'
-      ? RobotCompatibility.get(slot)
-      : null;
-    const discoveredServices = !options.forceDiscovery
-      && compatibility?.discovered && Array.isArray(compatibility.services)
-      ? compatibility.services
-      : null;
-    const selectFromServices = services => {
-      if (mode === 'spx' || mode === 'legacy') {
-        const selected = definitions[mode];
-        if (!services.includes(selected.goalName)) {
-          throw new Error(`${this._taskInterfaceLabel(selected)} 서비스가 로봇에 없습니다.`);
-        }
-        if (compatibility?.task?.goalName === selected.goalName) {
-          return { ...selected, ...compatibility.task };
-        }
-        return selected;
-      }
-      if (services.includes(definitions.spx.goalName)) return definitions.spx;
-      if (services.includes(definitions.legacy.goalName)) {
-        if (compatibility?.task?.goalName === definitions.legacy.goalName) {
-          return compatibility.task;
-        }
-        return definitions.legacy;
-      }
-      return null;
-    };
-
-    if (discoveredServices) {
-      try {
-        const selected = selectFromServices(discoveredServices);
-        if (selected) {
-          return Promise.resolve(this._cacheTaskInterface(slot, selected, mode));
-        }
-        return Promise.reject(new Error('SPX 또는 Legacy Task 서비스가 로봇에 없습니다.'));
-      } catch (error) {
-        return Promise.reject(error);
-      }
+    const adapters = profile.task?.adapters || {};
+    let selected = profile.task;
+    if (mode === 'legacy') selected = adapters.ros1_legacy;
+    if (mode === 'spx') selected = adapters.ros2_spx || adapters.ros1_spx;
+    if (!selected?.verified || !selected.goalName || !selected.goalType) {
+      const requested = mode === 'auto' ? '지원 Task' : (mode === 'spx' ? 'SPX' : 'Legacy (TARU)');
+      throw new Error(`${requested} endpoint/type이 실제 ROS graph에서 검증되지 않았습니다.`);
     }
-
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      const done = (services, discoveryFailed = false) => {
-        if (settled) return;
-        settled = true;
-        const list = Array.isArray(services) ? services : [];
-        if (discoveryFailed) {
-          if (mode === 'auto') {
-            resolve(this._cacheTaskInterface(slot, definitions.legacy, mode));
-            return;
-          }
-          reject(new Error('Task 서비스 목록 응답 시간이 초과되었습니다. 연결 상태를 확인한 뒤 다시 시도하세요.'));
-          return;
-        }
-        try {
-          const selected = selectFromServices(list);
-          if (selected) {
-            resolve(this._cacheTaskInterface(slot, selected, mode));
-            return;
-          }
-          reject(new Error('SPX 또는 Legacy Task 서비스가 로봇에 없습니다.'));
-        } catch (error) {
-          reject(error);
-        }
-      };
-      const timer = setTimeout(
-        () => done([], true),
-        this._taskInterfaceDiscoveryTimeout(slot)
-      );
-      try {
-        const service = new ROSLIB.Service({
-          ros: slot.ros,
-          name: '/rosapi/services',
-          serviceType: 'rosapi/Services'
-        });
-        service.callService(new ROSLIB.ServiceRequest({}), result => {
-          clearTimeout(timer);
-          done(result?.services || [], false);
-        }, () => {
-          clearTimeout(timer);
-          done([], true);
-        });
-      } catch (error) {
-        clearTimeout(timer);
-        done([], true);
-      }
-    });
+    return this._cacheTaskInterface(slot, selected, mode);
   },
 
   _callTaskService(ros, name, serviceType, args, timeoutMs = 0) {

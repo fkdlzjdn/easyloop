@@ -63,13 +63,47 @@ function loadJogControl(savedConfig = null, compatibilityProfile = null) {
       success({ success: true, err_code: 0 });
     }
   }
+  const stl = Boolean(compatibilityProfile);
+  const baseProfile = {
+    discovered: true,
+    controlReady: true,
+    id: 'ros1_legacy',
+    task: { verified: true, protocol: 'ros1_legacy' },
+    mapping: { verified: true, protocol: 'ros1_legacy' },
+    lift: {
+      verified: true,
+      interface: 'topic',
+      topic: '/R_051/Lift/manual_cmd',
+      topicType: 'std_msgs/Int8',
+      commands: { stop: 0, up: 1, down: -1 }
+    },
+    actions: {
+      turntable: {
+        verified: stl,
+        service: '/R_051/Turntable/cmd',
+        serviceType: 'syscon_msgs/turntable_cmd'
+      }
+    },
+    chassis: {
+      verified: true,
+      drive: { verified: true, topic: '/R_051/cmd_vel', topicType: 'geometry_msgs/Twist' },
+      conveyor: { verified: false, reason: '미지원' }
+    }
+  };
+  const resolvedProfile = compatibilityProfile ? {
+    ...baseProfile,
+    ...compatibilityProfile,
+    lift: { ...baseProfile.lift, ...compatibilityProfile.lift },
+    actions: { ...baseProfile.actions, ...compatibilityProfile.actions },
+    chassis: { ...baseProfile.chassis, ...compatibilityProfile.chassis }
+  } : baseProfile;
   const context = {
     App: {
       activeSlotIndex: 0,
       robotSlots: [{
         robotId: 'R_051', connected: true, ros: {},
         robotModel: compatibilityProfile ? 'stl1500w' : null,
-        compatibilityProfile
+        compatibilityProfile: resolvedProfile
       }],
       toast: jest.fn()
     },
@@ -111,13 +145,16 @@ function loadJogControl(savedConfig = null, compatibilityProfile = null) {
     setInterval,
     clearInterval
   };
-  if (compatibilityProfile) {
-    context.RobotCompatibility = {
-      get: jest.fn(() => compatibilityProfile),
-      discover: jest.fn().mockResolvedValue(compatibilityProfile),
-      isStlUlsanModel: jest.fn(model => ['stl1000w', 'stl1500w'].includes(String(model).toLowerCase()))
-    };
-  }
+  context.RobotCompatibility = {
+    get: jest.fn(() => resolvedProfile),
+    discover: jest.fn().mockResolvedValue(resolvedProfile),
+    isStlUlsanModel: jest.fn(model => ['stl1000w', 'stl1500w'].includes(String(model).toLowerCase())),
+    requireCapability: (profile, name) => {
+      const capability = name === 'turntable' ? profile.actions.turntable : profile[name];
+      if (!capability?.verified) throw new Error(`${name} 미검증`);
+      return capability;
+    }
+  };
   vm.createContext(context);
   vm.runInContext(`${source}\nglobalThis.__JogControl = JogControl;`, context);
   return {
@@ -200,6 +237,7 @@ describe('Jog Quick Task', () => {
     const compatibilityProfile = {
       discovered: true,
       lift: {
+        verified: true,
         interface: 'service',
         service: '/R_051/Lift/cmd',
         serviceType: 'syscon_msgs/lift_cmd',
@@ -316,7 +354,7 @@ describe('Jog Quick Task', () => {
     };
     expect(manager._ownsKeyboardEvent(shiftedDrive)).toBe(true);
     ['r', 'v', 't'].forEach(key => {
-      expect(manager._ownsKeyboardEvent({ key, target: { tagName: 'DIV' } })).toBe(true);
+      expect(manager._ownsKeyboardEvent({ key, target: { tagName: 'DIV' } })).toBe(false);
     });
 
     documentListeners.keydown(shiftedDrive);

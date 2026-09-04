@@ -4,6 +4,9 @@ const path = require('path');
 const root = path.join(__dirname, '..');
 const html = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');
 const source = fs.readFileSync(path.join(root, 'public', 'js', 'ros-manager.js'), 'utf8');
+const compatibilitySource = fs.readFileSync(
+  path.join(root, 'public', 'js', 'robot-compatibility.js'), 'utf8'
+);
 const style = fs.readFileSync(path.join(root, 'public', 'css', 'style.css'), 'utf8');
 
 describe('Map layer controls contract', () => {
@@ -37,10 +40,12 @@ describe('Map layer controls contract', () => {
       '/best_local_trajectories_nav',
       '/move_base/WaypointsGlobalPlanner/current_goal',
       '/lio_sam/mapping/path',
-      '/lio_sam/mapping/footprint',
-      '/spx/operation_mode',
-      '/spcore/MODE'
+      '/lio_sam/mapping/footprint'
     ].forEach(topic => expect(source).toContain(topic));
+    ['/spx/operation_mode', '/spcore/MODE'].forEach(topic => {
+      expect(compatibilitySource).toContain(topic);
+    });
+    expect(source).toContain('modeEndpoint.statusName');
     expect(source).toContain("'tf-static', '/tf_static'");
   });
 
@@ -72,8 +77,8 @@ describe('Map layer controls contract', () => {
     expect(style).toMatch(/\.map-layer-popover\s*\{[\s\S]*?max-height:[\s\S]*?overflow-y:\s*auto/);
     expect(style).toContain('.map-layer-count');
     expect(style).toContain('.map-correction-badge[hidden]');
-    expect(html).toContain('js/ros-manager.js?v=20260806-stl-ulsan-jog');
-    expect(html).toContain('js/test-mode.js?v=20260728-drive-lab');
+    expect(html).toContain('js/ros-manager.js?v=20260815-four-generation');
+    expect(html).toContain('js/test-mode.js?v=20260815-action-contract');
     expect(html).toContain('id="test-mapping-status"');
     expect(html).toContain('id="btn-test-mapping-demo"');
     expect(html).toContain('id="btn-save-map"');

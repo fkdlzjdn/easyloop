@@ -100,9 +100,47 @@ function loadJogControl(robotId = 'R_051', robotModel = null) {
     ROSLIB: { Service, ServiceRequest },
     RobotCompatibility: {
       isStlUlsanModel: model => ['stl1000w', 'stl1500w'].includes(String(model || '').toLowerCase()),
+      PROJECT_GENERATIONS: [],
+      projectGeneration: () => null,
       get: slot => slot.compatibilityProfile || {
         discovered: true,
-        lift: { interface: 'topic' }
+        controlReady: true,
+        id: 'ros1_legacy',
+        task: { verified: true, protocol: 'ros1_legacy' },
+        mapping: { verified: true, protocol: 'ros1_legacy' },
+        lift: {
+          verified: true,
+          interface: ['stl1000w', 'stl1500w'].includes(String(slot.robotModel || '').toLowerCase())
+            ? 'service' : 'topic',
+          service: '/R_051/Lift/cmd',
+          serviceType: 'syscon_msgs/lift_cmd',
+          topic: '/R_051/Lift/manual_cmd',
+          topicType: 'std_msgs/Int8',
+          commands: { stop: 0, up: 1, down: 2 }
+        },
+        actions: {
+          turntable: {
+            verified: ['stl1000w', 'stl1500w'].includes(String(slot.robotModel || '').toLowerCase()),
+            service: '/R_051/Turntable/cmd',
+            serviceType: 'syscon_msgs/turntable_cmd',
+            syncService: '/R_051/Turntable/sync_mode',
+            syncType: 'std_srvs/SetBool'
+          }
+        },
+        chassis: {
+          verified: true,
+          drive: { verified: true, topic: '/R_051/cmd_vel', topicType: 'geometry_msgs/Twist' },
+          conveyor: {
+            verified: true,
+            service: '/R_051/Conv/cmd',
+            serviceType: 'syscon_msgs/conv_cmd'
+          }
+        }
+      },
+      requireCapability: (profile, name) => {
+        const capability = name === 'turntable' ? profile.actions.turntable : profile[name];
+        if (!capability?.verified) throw new Error(`${name} 미검증`);
+        return capability;
       }
     },
     ActionSender: {
@@ -149,7 +187,8 @@ function loadJogControl(robotId = 'R_051', robotModel = null) {
     turntableStatus,
     commandButtons,
     commandPreview,
-    chassisCurrent
+    chassisCurrent,
+    chassisButtons
   };
 }
 
@@ -174,7 +213,7 @@ describe('Jog chassis model control', () => {
     manager._syncChassisModelUi();
 
     expect(driveType.value).toBe('dd');
-    expect(liftControl.hidden).toBe(true);
+    expect(liftControl.hidden).toBe(false);
     expect(modelIoControl.hidden).toBe(false);
     expect(chassisCurrent.textContent).toBe('sr3_ls_1st · DD');
     expect(manager._stopVel).toHaveBeenCalled();
@@ -195,8 +234,8 @@ describe('Jog chassis model control', () => {
     expect(manager._getSelectedChassisModel().id).toBe('default_lift_dd');
     expect(driveType.value).toBe('dd');
     expect(liftControl.hidden).toBe(false);
-    expect(modelIoControl.hidden).toBe(true);
-    expect(chassisCurrent.textContent).toBe('선택 안 함 (기본) · DD');
+    expect(modelIoControl.hidden).toBe(false);
+    expect(chassisCurrent.textContent).toBe('자동 감지 (권장) · DD');
   });
 
   test.each(['stl1000w', 'stl1500w'])('auto-selects stl_ulsan controls only for ROBOT_MODEL %s', robotModel => {
@@ -209,7 +248,7 @@ describe('Jog chassis model control', () => {
 
     expect(manager._getSelectedChassisModel().id).toBe('stl_ulsan');
     expect(stlUlsanControl.hidden).toBe(false);
-    expect(modelIoControl.hidden).toBe(true);
+    expect(modelIoControl.hidden).toBe(false);
     expect(chassisCurrent.textContent).toBe('stl_ulsan · Lift / Turntable · DD');
   });
 
@@ -294,5 +333,29 @@ describe('Jog chassis model control', () => {
     expect(stopButton.title).toContain('Type: syscon_msgs/conv_cmd');
     expect(stopButton.title).toContain('"cmd_type":2,"count":0');
     expect(commandPreview.textContent).toBe(stopButton.title);
+  });
+
+  test('keeps unsupported profiles visible but disabled with a reason', () => {
+    const { manager, context, chassisButtons, stlUlsanControl, modelIoControl } = loadJogControl();
+    context.App.robotSlots[0].compatibilityProfile = {
+      discovered: true,
+      controlReady: false,
+      reason: '지원 endpoint/type 없음',
+      task: { verified: false },
+      mapping: { verified: false },
+      lift: { verified: false, reason: 'Lift 미검증' },
+      actions: { turntable: { verified: false, reason: 'Turntable 미검증' } },
+      chassis: {
+        drive: { verified: false, reason: 'cmd_vel 미검증' },
+        conveyor: { verified: false, reason: 'Conv/cmd 미검증' }
+      }
+    };
+
+    manager._syncChassisModelUi(false);
+
+    expect(chassisButtons.every(button => button.hidden === false)).toBe(true);
+    expect(chassisButtons.every(button => button.disabled === true)).toBe(true);
+    expect(stlUlsanControl.hidden).toBe(false);
+    expect(modelIoControl.hidden).toBe(false);
   });
 });

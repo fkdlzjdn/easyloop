@@ -9,6 +9,7 @@ const source = fs.readFileSync(
 
 function loadManager() {
   const topics = [];
+  const createdCanvases = [];
   class Topic {
     constructor(options) {
       this.options = options;
@@ -36,7 +37,18 @@ function loadManager() {
     console,
     document: {
       getElementById: jest.fn(),
-      addEventListener: jest.fn()
+      addEventListener: jest.fn(),
+      createElement: jest.fn(() => {
+        const context2d = {
+          createImageData: jest.fn((width, height) => ({
+            data: new Uint8ClampedArray(width * height * 4)
+          })),
+          putImageData: jest.fn()
+        };
+        const canvas = { width: 0, height: 0, getContext: jest.fn(() => context2d) };
+        createdCanvases.push({ canvas, context2d });
+        return canvas;
+      })
     },
     window: { addEventListener: jest.fn() },
     setTimeout,
@@ -46,6 +58,7 @@ function loadManager() {
   vm.runInContext(`${source}\nglobalThis.__RosManager = RosManager;`, context);
   context.__RosManager.requestRender = jest.fn();
   context.__RosManager._testTopics = topics;
+  context.__RosManager._testCreatedCanvases = createdCanvases;
   return context.__RosManager;
 }
 
@@ -111,7 +124,7 @@ describe('Footprint frame handling', () => {
 });
 
 describe('Map image cache', () => {
-  test('requests PNG-compressed single-item map delivery', () => {
+  test('requests CBOR-compressed throttled single-item map delivery', () => {
     const manager = loadManager();
 
     manager._subscribeMapForSlot(0, '/R_001/map');
@@ -119,8 +132,9 @@ describe('Map image cache', () => {
     expect(manager._testTopics[0].options).toMatchObject({
       name: '/R_001/map',
       messageType: 'nav_msgs/OccupancyGrid',
-      compression: 'png',
-      queue_length: 1
+      compression: 'cbor',
+      queue_length: 1,
+      throttle_rate: manager.MAP_THROTTLE_MS
     });
     manager.unsubscribeSlotData(0, false);
   });
@@ -141,6 +155,34 @@ describe('Map image cache', () => {
 
     expect(manager.lastMapMsg).toBe(first);
     expect(manager.requestRender).toHaveBeenCalledTimes(1);
+  });
+
+  test('accepts a new Mapping revision even when sampled cells are unchanged', () => {
+    const manager = loadManager();
+    const info = {
+      width: 100,
+      height: 100,
+      resolution: 0.02,
+      origin: { position: { x: 0, y: 0 } }
+    };
+    const data = new Array(10000).fill(-1);
+    const navMap = {
+      header: { seq: 10, stamp: { secs: 100, nsecs: 0 } },
+      info,
+      data
+    };
+    const mappingRevision = {
+      header: { seq: 11, stamp: { secs: 105, nsecs: 0 } },
+      info,
+      data: [...data]
+    };
+    // Change a cell that the old 64-cell sample would not necessarily inspect.
+    mappingRevision.data[1234] = 100;
+    manager._slamRunning = true;
+    manager._mappingStaleMapSignature = manager._mapMessageSignature(navMap);
+
+    expect(manager.renderMap(mappingRevision)).toBe(true);
+    expect(manager.lastMapMsg).toBe(mappingRevision);
   });
 
   test('reuses pixels while only robot pose changes', () => {
@@ -171,5 +213,25 @@ describe('Map image cache', () => {
 
     manager._buildMapImage({ ...message, data: [...data] });
     expect(context2d.createImageData).toHaveBeenCalledTimes(2);
+  });
+
+  test('builds live Mapping pixels in yielded chunks', () => {
+    jest.useFakeTimers();
+    const manager = loadManager();
+    manager.MAP_BUILD_BUDGET_MS = 0;
+    const data = new Array(100).fill(-1);
+    data[55] = 100;
+    const message = { info: { width: 10, height: 10 }, data };
+
+    expect(manager._queueMapImageBuild(message)).toBe(null);
+    expect(manager._mapImageSource).not.toBe(data);
+
+    jest.runAllTimers();
+
+    expect(manager._mapImageSource).toBe(data);
+    expect(manager._mapImageCanvas).toBe(manager._testCreatedCanvases[0].canvas);
+    expect(manager._testCreatedCanvases[0].context2d.putImageData).toHaveBeenCalledTimes(1);
+    expect(manager.requestRender).toHaveBeenCalledTimes(1);
+    jest.useRealTimers();
   });
 });

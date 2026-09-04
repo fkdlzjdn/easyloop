@@ -59,6 +59,44 @@ function loadActionSender() {
       cancelArgs: { data: '' }
     }
   };
+  const legacyAdapter = {
+    verified: true,
+    protocol: 'ros1_legacy',
+    variant: 'sp_task',
+    goalName: '/R_002/TARU/goal', goalType: 'sp_task/TaskGoal',
+    pauseName: '/R_002/TARU/pause', pauseType: 'sp_task/Int32_srv', pauseArgs: { data: 0 },
+    resumeName: '/R_002/TARU/resume', resumeType: 'sp_task/Int32_srv', resumeArgs: { data: 0 },
+    cancelName: '/R_002/TARU/cancel', cancelType: 'sp_task/String_srv', cancelArgs: { data: '' },
+    feedbackName: '/R_002/TARU/feedback', feedbackType: 'sp_task/Feedback',
+    resultName: '/R_002/TARU/result', resultType: 'sp_task/Result',
+    stateName: '/R_002/taru_state', stateType: 'std_msgs/Int32'
+  };
+  const spxAdapter = {
+    verified: true,
+    protocol: 'ros1_spx',
+    variant: 'spx',
+    goalName: '/R_002/spx/task/goal', goalType: 'spx_task_msgs/TaskGoal',
+    pauseName: '/R_002/spx/task/pause', pauseType: 'spx_task_msgs/TaskPause', pauseArgs: {},
+    resumeName: '/R_002/spx/task/resume', resumeType: 'spx_task_msgs/TaskResume', resumeArgs: {},
+    cancelName: '/R_002/spx/task/cancel', cancelType: 'spx_task_msgs/TaskCancel', cancelArgs: {},
+    feedbackName: '/R_002/spx/task/feedback', feedbackType: 'spx_task_msgs/TaskFeedback',
+    resultName: '/R_002/spx/task/result', resultType: 'spx_task_msgs/TaskResult'
+  };
+  const compatibilityForServices = () => {
+    const adapters = {};
+    if (availableServices.includes(spxAdapter.goalName)) adapters.ros1_spx = spxAdapter;
+    if (availableServices.includes(legacyAdapter.goalName)) adapters.ros1_legacy = legacyAdapter;
+    const task = adapters.ros1_spx || adapters.ros1_legacy || {
+      verified: false,
+      adapters,
+      reason: 'Task endpoint/type 미검증'
+    };
+    return {
+      discovered: true,
+      controlReady: task.verified === true,
+      task: { ...task, adapters }
+    };
+  };
   const context = {
     App: {
       robotSlots: [slot],
@@ -66,6 +104,10 @@ function loadActionSender() {
       toast: jest.fn()
     },
     ROSLIB: { Service: FakeService, ServiceRequest: FakeServiceRequest },
+    RobotCompatibility: {
+      get: jest.fn(compatibilityForServices),
+      discover: jest.fn(async () => compatibilityForServices())
+    },
     localStorage: {
       getItem: jest.fn(key => key === 'actionSenderSavedQueues' ? JSON.stringify(saved) : null),
       setItem: jest.fn()
@@ -136,7 +178,7 @@ describe('fleet saved task sending', () => {
     context.RobotCompatibility = {
       get: jest.fn(() => ({
         discovered: true,
-        actions: { turntable: { argCount: 3, asyncModeArg: true } }
+        actions: { turntable: { verified: true, argCount: 3, asyncModeArg: true } }
       }))
     };
 
@@ -153,14 +195,14 @@ describe('fleet saved task sending', () => {
     });
   });
 
-  test.each(['stl1000w', 'stl1500w'])('always sends three Turntable args for ROBOT_MODEL %s', async robotModel => {
+  test.each(['stl1000w', 'stl1500w'])('does not let ROBOT_MODEL %s override the verified Turntable contract', async robotModel => {
     const { manager, context, slot } = loadActionSender();
     slot.robotModel = robotModel;
     context.RobotCompatibility = {
       isStlUlsanModel: model => ['stl1000w', 'stl1500w'].includes(String(model).toLowerCase()),
       get: jest.fn(() => ({
         discovered: true,
-        actions: { turntable: { argCount: 2, asyncModeArg: false } }
+        actions: { turntable: { verified: true, argCount: 2, asyncModeArg: false } }
       }))
     };
 
@@ -169,8 +211,8 @@ describe('fleet saved task sending', () => {
       action_args: [3, 45]
     }], slot);
 
-    expect(prepared[0].action_args).toEqual([3, 45, 0]);
-    expect(manager._actionArgDefinitions('0x22', null, slot)).toHaveLength(3);
+    expect(prepared[0].action_args).toEqual([3, 45]);
+    expect(manager._actionArgDefinitions('0x22', null, slot)).toHaveLength(2);
   });
 
   test('sends stl_ulsan Turntable Jog through Task goal with mode, target, asyncmode', async () => {
@@ -180,7 +222,7 @@ describe('fleet saved task sending', () => {
       isStlUlsanModel: model => model === 'stl1500w',
       get: jest.fn(() => ({
         discovered: true,
-        actions: { turntable: { argCount: 3, asyncModeArg: true } }
+        actions: { turntable: { verified: true, argCount: 3, asyncModeArg: true } }
       }))
     };
 
@@ -199,7 +241,7 @@ describe('fleet saved task sending', () => {
     context.RobotCompatibility = {
       get: jest.fn(() => ({
         discovered: true,
-        actions: { turntable: { argCount: 2, asyncModeArg: false } }
+        actions: { turntable: { verified: true, argCount: 2, asyncModeArg: false } }
       }))
     };
 
@@ -218,7 +260,7 @@ describe('fleet saved task sending', () => {
     slot.compatibilityPromise = Promise.resolve().then(() => {
       slot.compatibilityProfile = {
         discovered: true,
-        actions: { turntable: { argCount: 3, asyncModeArg: true } }
+        actions: { turntable: { verified: true, argCount: 3, asyncModeArg: true } }
       };
     });
     context.RobotCompatibility = {
@@ -238,7 +280,7 @@ describe('fleet saved task sending', () => {
     context.RobotCompatibility = {
       get: jest.fn(() => ({
         discovered: true,
-        actions: { turntable: { argCount: 3, asyncModeArg: true } }
+        actions: { turntable: { verified: true, argCount: 3, asyncModeArg: true } }
       }))
     };
     const inputs = {
@@ -323,12 +365,11 @@ describe('fleet saved task sending', () => {
   });
 
   test('uses robot-local TARU telemetry for legacy Task state', () => {
-    const { manager, slot } = loadActionSender();
-    const legacy = manager._taskInterfaceDefinitions(slot).legacy;
+    const { context } = loadActionSender();
+    const legacy = context.RobotCompatibility.get().task.adapters.ros1_spx;
 
-    expect(legacy.feedbackName).toBe('/R_002/TARU/feedback');
-    expect(legacy.resultName).toBe('/R_002/TARU/result');
-    expect(legacy.stateName).toBe('/R_002/taru_state');
+    expect(legacy.feedbackName).toBe('/R_002/spx/task/feedback');
+    expect(legacy.resultName).toBe('/R_002/spx/task/result');
   });
 
   test('coalesces duplicate cancel clicks while the first request is pending', async () => {
@@ -377,7 +418,7 @@ describe('fleet saved task sending', () => {
     delete slot.taskInterface;
 
     await expect(manager._resolveTaskInterface(slot)).rejects.toThrow(
-      'Legacy (TARU) 서비스가 로봇에 없습니다.'
+      'Legacy (TARU) endpoint/type이 실제 ROS graph에서 검증되지 않았습니다.'
     );
     expect(slot.taskInterface).toBeUndefined();
   });
@@ -388,41 +429,253 @@ describe('fleet saved task sending', () => {
     delete slot.taskInterface;
 
     await expect(manager._resolveTaskInterface(slot)).rejects.toThrow(
-      'SPX 또는 Legacy Task 서비스가 로봇에 없습니다.'
+      '지원 Task endpoint/type이 실제 ROS graph에서 검증되지 않았습니다.'
     );
-  });
-
-  test('uses a longer Task discovery window for SSH tunnel robots', () => {
-    const { manager, slot } = loadActionSender();
-    slot.tunnelMode = true;
-
-    expect(manager._taskInterfaceDiscoveryTimeout(slot)).toBe(6000);
-    expect(manager._taskInterfaceDiscoveryTimeout({ tunnelMode: false })).toBe(2500);
   });
 
   test('does not report a manual interface as absent when rosapi discovery timed out', async () => {
-    const { manager, slot, unresponsiveServices } = loadActionSender();
+    const { manager, context, slot } = loadActionSender();
     manager._taskInterfaceModes = { R_002: 'legacy' };
-    manager._taskInterfaceDiscoveryTimeout = () => 5;
-    unresponsiveServices.add('/rosapi/services');
+    context.RobotCompatibility.get = jest.fn(() => ({
+      discovered: false,
+      reason: 'ROS graph discovery 실패: rosapi timeout',
+      task: { verified: false, adapters: {} }
+    }));
+    context.RobotCompatibility.discover = jest.fn(async () => context.RobotCompatibility.get());
     delete slot.taskInterface;
 
     await expect(manager._resolveTaskInterface(slot)).rejects.toThrow(
-      'Task 서비스 목록 응답 시간이 초과되었습니다.'
+      'rosapi timeout'
     );
+  });
+
+  test('performs zero control writes when compatibility discovery fails', async () => {
+    const { manager, context, slot, calls } = loadActionSender();
+    const failedProfile = {
+      discovered: false,
+      controlReady: false,
+      reason: 'ROS graph discovery 실패: rosapi timeout',
+      task: { verified: false, adapters: {} }
+    };
+    context.RobotCompatibility.get = jest.fn(() => failedProfile);
+    context.RobotCompatibility.discover = jest.fn(async () => failedProfile);
+    delete slot.taskInterface;
+
+    await expect(
+      manager.sendJogActionToSlot(0, 0x01, [1, 2, 0], 'discovery_failure_test')
+    ).rejects.toThrow('rosapi timeout');
+
+    expect(calls).toHaveLength(0);
+  });
+
+  test('performs zero Task writes when the requested Action is not registered', async () => {
+    const { manager, context, calls, slot } = loadActionSender();
+    const profile = {
+      discovered: true,
+      task: {
+        verified: true,
+        protocol: 'ros1_legacy',
+        actionCatalog: {
+          attempted: true,
+          verified: true,
+          types: [1],
+          actions: [{ name: 'Way_Point', type: 1, key: 'waypoint' }]
+        }
+      },
+      actions: { turntable: { verified: false } },
+      chassis: {}
+    };
+    context.RobotCompatibility.get = jest.fn(() => profile);
+    delete slot.taskInterface;
+
+    await expect(
+      manager.sendJogActionToSlot(0, 0x07, [3], 'unsupported_action_test')
+    ).rejects.toThrow('현재 scheduler에 등록되지 않았습니다');
+
+    expect(calls).toHaveLength(0);
+  });
+
+  test('converts EasyLoop Basic_Move meters to the detected native SPX millimeter contract', async () => {
+    const { manager, context, slot } = loadActionSender();
+    context.RobotCompatibility.get = jest.fn(() => ({
+      discovered: true,
+      task: {
+        verified: true,
+        protocol: 'ros2_spx',
+        actionCatalog: {
+          attempted: true,
+          verified: true,
+          types: [2],
+          actions: [{ name: 'BasicMovePlugin', type: 2, key: 'basic_move' }]
+        }
+      },
+      actions: { turntable: { verified: false } },
+      chassis: { driveModel: { verified: true, kind: 'dd', actionModelType: 0 } }
+    }));
+
+    const [prepared] = await manager._prepareActionsForSlot([{
+      action_type: 0x02,
+      action_args: [0, 1.25],
+      action_params: [{ param_name: 'move_vel', type: 'float', value: '0.4' }]
+    }], slot);
+
+    expect(prepared.action_args).toEqual([1250, 0.4]);
+    expect(prepared.action_params).toEqual([]);
+  });
+
+  test('blocks unsupported rotation instead of misrouting it to native SPX BasicMovePlugin', async () => {
+    const { manager, context, slot } = loadActionSender();
+    context.RobotCompatibility.get = jest.fn(() => ({
+      discovered: true,
+      task: {
+        verified: true,
+        protocol: 'ros1_spx',
+        actionCatalog: {
+          attempted: true,
+          verified: true,
+          types: [2],
+          actions: [{ name: 'BasicMovePlugin', type: 2, key: 'basic_move' }]
+        }
+      },
+      actions: { turntable: { verified: false } },
+      chassis: {}
+    }));
+
+    await expect(manager._prepareActionsForSlot([{
+      action_type: 0x02,
+      action_args: [1, 90],
+      action_params: []
+    }], slot)).rejects.toThrow('직진만 지원');
+  });
+
+  test('overlays the detected QD model_type on navigation and docking wire payloads', async () => {
+    const { manager, context, slot } = loadActionSender();
+    context.RobotCompatibility.get = jest.fn(() => ({
+      discovered: true,
+      task: {
+        verified: true,
+        protocol: 'ros1_legacy',
+        actionCatalog: {
+          attempted: true,
+          verified: true,
+          types: [1, 8, 21],
+          actions: [
+            { name: 'Way_Point', type: 1 },
+            { name: 'Docking', type: 8 },
+            { name: 'TrajectoryFollowing', type: 21 }
+          ]
+        }
+      },
+      actions: { turntable: { verified: false } },
+      chassis: {
+        driveModel: {
+          verified: true,
+          kind: 'qd',
+          actionModelType: 1,
+          parameter: '/R_002/model_type'
+        }
+      }
+    }));
+    const actions = [
+      { action_type: 0x01, action_args: [1, 2, 0], action_params: [] },
+      { action_type: 0x08, action_args: [0, 1, 1, 1], action_params: [] },
+      { action_type: 0x15, action_args: [0, 0, 1, 1, 0], action_params: [] }
+    ];
+
+    const prepared = await manager._prepareActionsForSlot(actions, slot);
+
+    prepared.forEach(action => {
+      expect(action.action_params).toContainEqual({
+        param_name: 'model_type', type: 'int', value: '1'
+      });
+    });
+  });
+
+  test('rejects malformed Quick Task docking arguments before a service call', async () => {
+    const { manager, context, calls } = loadActionSender();
+    context.RobotCompatibility.get = jest.fn(() => ({
+      discovered: true,
+      task: {
+        verified: true,
+        protocol: 'ros1_legacy',
+        actionCatalog: {
+          attempted: true,
+          verified: true,
+          types: [8],
+          actions: [{ name: 'Docking', type: 8 }]
+        }
+      },
+      actions: { turntable: { verified: false } },
+      chassis: {}
+    }));
+
+    await expect(manager.sendJogActionToSlot(
+      0, 0x08, [0, 1, 1], 'malformed_docking_test'
+    )).rejects.toThrow('인자는 4개');
+    expect(calls).toHaveLength(0);
+  });
+
+  test('blocks model-dependent Quick Task actions when drive model auto-detection fails', async () => {
+    const { manager, context, calls } = loadActionSender();
+    context.RobotCompatibility.get = jest.fn(() => ({
+      discovered: true,
+      task: {
+        verified: true,
+        protocol: 'ros1_legacy',
+        actionCatalog: {
+          attempted: true,
+          verified: true,
+          types: [1, 7, 8, 21],
+          actions: [
+            { name: 'Way_Point', type: 1 },
+            { name: 'Stand_By', type: 7 },
+            { name: 'Docking', type: 8 },
+            { name: 'TrajectoryFollowing', type: 21 }
+          ]
+        }
+      },
+      actions: { turntable: { verified: false } },
+      chassis: {
+        driveModel: {
+          attempted: true,
+          verified: false,
+          reason: 'basic_settings/model_type 미검출'
+        }
+      }
+    }));
+
+    await expect(manager.sendJogActionToSlot(
+      0, 0x08, [0, 1, 1, 1], 'unknown_model_docking_test'
+    )).rejects.toThrow('model_type 미검출');
+    expect(calls).toHaveLength(0);
   });
 
   test('shares compatibility discovery instead of duplicating the rosapi service request', async () => {
     const { manager, context, calls, slot } = loadActionSender();
     delete slot.taskInterface;
-    slot.compatibilityPromise = Promise.resolve();
     context.RobotCompatibility = {
       get: jest.fn(() => ({
         discovered: true,
-        services: ['/R_002/TARU/goal'],
-        task: { variant: 'sp_task', goalName: '/R_002/TARU/goal' }
-      }))
+        task: {
+          verified: true,
+          protocol: 'ros1_legacy',
+          variant: 'sp_task',
+          goalName: '/R_002/TARU/goal',
+          goalType: 'sp_task/TaskGoal',
+          adapters: {
+            ros1_legacy: {
+              verified: true,
+              protocol: 'ros1_legacy',
+              variant: 'sp_task',
+              goalName: '/R_002/TARU/goal',
+              goalType: 'sp_task/TaskGoal'
+            }
+          }
+        }
+      })),
+      discover: jest.fn(async () => context.RobotCompatibility.get())
     };
+    slot.compatibilityPromise = Promise.resolve(context.RobotCompatibility.get());
 
     const taskInterface = await manager._resolveTaskInterface(slot);
 
@@ -432,13 +685,6 @@ describe('fleet saved task sending', () => {
 
   test('forces a fresh service check when the operator changes the interface mode', async () => {
     const { manager, context, slot, availableServices } = loadActionSender();
-    context.RobotCompatibility = {
-      get: jest.fn(() => ({
-        discovered: true,
-        services: ['/R_002/TARU/goal'],
-        task: { variant: 'sp_task', goalName: '/R_002/TARU/goal' }
-      }))
-    };
     manager._taskInterfaceModes = { R_002: 'spx' };
     delete slot.taskInterface;
 
@@ -446,6 +692,7 @@ describe('fleet saved task sending', () => {
 
     expect(taskInterface.variant).toBe('spx');
     expect(availableServices).toEqual(['/R_002/spx/task/goal']);
+    expect(context.RobotCompatibility.discover).toHaveBeenCalledWith(slot, { force: true });
   });
 
   test('sends emergency Task cancel immediately and keeps the control enabled', async () => {

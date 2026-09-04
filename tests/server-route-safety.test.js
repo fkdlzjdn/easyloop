@@ -156,6 +156,7 @@ describe('server route safety without hardware access', () => {
   });
 
   test('runs SSH exec/sequence and SFTP read paths through a mocked connection', async () => {
+    const sftpEnd = jest.fn();
     const connection = {
       exec: jest.fn((command, callback) => {
         const stream = new EventEmitter();
@@ -169,6 +170,7 @@ describe('server route safety without hardware access', () => {
         });
       }),
       sftp: jest.fn(callback => callback(null, {
+        end: sftpEnd,
         readdir: (remotePath, done) => done(null, [{
           filename: 'task.yaml',
           attrs: {
@@ -229,6 +231,7 @@ describe('server route safety without hardware access', () => {
       filename: 'task.yaml',
       content: Buffer.from('task-content').toString('base64')
     });
+    expect(sftpEnd).toHaveBeenCalledTimes(2);
     expect(disconnectResponse.body.success).toBe(true);
     expect(connection.end).toHaveBeenCalledTimes(1);
     expect(sshConnections.has('mock-session')).toBe(false);
@@ -243,8 +246,9 @@ describe('server route safety without hardware access', () => {
       originalname: 'task.yaml'
     };
     const fastPut = jest.fn((source, destination, callback) => callback(null));
+    const sftpEnd = jest.fn();
     sshConnections.set('upload-session', {
-      conn: { sftp: callback => callback(null, { fastPut }) }
+      conn: { sftp: callback => callback(null, { fastPut, end: sftpEnd }) }
     });
 
     const response = await requestJson(port, 'POST', '/api/sftp/upload', {
@@ -258,14 +262,17 @@ describe('server route safety without hardware access', () => {
       '/home/syscon/ROS_DB/sp_task/rviz/task.yaml',
       expect.any(Function)
     );
+    expect(sftpEnd).toHaveBeenCalledTimes(1);
     expect(fs.existsSync(localPath)).toBe(false);
   });
 
   test('rejects oversized SFTP downloads before creating a read stream', async () => {
     const createReadStream = jest.fn();
+    const sftpEnd = jest.fn();
     sshConnections.set('large-file-session', {
       conn: {
         sftp: callback => callback(null, {
+          end: sftpEnd,
           stat: (remotePath, done) => done(null, { size: 101 * 1024 * 1024 }),
           createReadStream
         })
@@ -280,6 +287,56 @@ describe('server route safety without hardware access', () => {
     expect(response.body.success).toBe(false);
     expect(response.body.message).toContain('File too large');
     expect(createReadStream).not.toHaveBeenCalled();
+    expect(sftpEnd).toHaveBeenCalledTimes(1);
+  });
+
+  test('closes an SFTP channel after a list error', async () => {
+    const sftpEnd = jest.fn();
+    sshConnections.set('list-error-session', {
+      conn: {
+        sftp: callback => callback(null, {
+          end: sftpEnd,
+          readdir: (remotePath, done) => done(new Error(`blocked: ${remotePath}`))
+        })
+      }
+    });
+
+    const response = await requestJson(port, 'POST', '/api/sftp/list', {
+      sessionId: 'list-error-session',
+      remotePath: '/home/syscon/ROS_DB/map'
+    });
+
+    expect(response.body).toEqual({
+      success: false,
+      message: 'blocked: /home/syscon/ROS_DB/map'
+    });
+    expect(sftpEnd).toHaveBeenCalledTimes(1);
+  });
+
+  test('removes an upload temporary file when opening the SFTP channel fails', async () => {
+    uploadTempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'easyloop-sftp-test-'));
+    const localPath = path.join(uploadTempDir, 'upload.tmp');
+    fs.writeFileSync(localPath, 'map-content');
+    uploadFixture = {
+      path: localPath,
+      originalname: 'map.pgm'
+    };
+    sshConnections.set('channel-error-session', {
+      conn: {
+        sftp: callback => callback(new Error('Channel open failure: open failed'))
+      }
+    });
+
+    const response = await requestJson(port, 'POST', '/api/sftp/upload', {
+      sessionId: 'channel-error-session',
+      remotePath: '/home/syscon/ROS_DB/map'
+    });
+
+    expect(response.body).toEqual({
+      success: false,
+      message: 'Channel open failure: open failed'
+    });
+    expect(fs.existsSync(localPath)).toBe(false);
   });
 
   test.each([

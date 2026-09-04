@@ -6,6 +6,9 @@ const JogControl = {
   _currentAz: 0,
   _publishing: false,
   _cmdVelTopic: null,
+  _jogWorker: null,
+  _jogWorkerReady: false,
+  _jogWorkerConfigKey: '',
   _activeKeys: new Set(),
   _manualLiftState: null,
   _manualLiftHeldKey: null,
@@ -26,15 +29,18 @@ const JogControl = {
   QUICK_TASK_COUNT: 5,
   _quickTaskConfigs: [],
   CHASSIS_STORAGE_KEY: 'jogChassisModelByRobot',
+  PROJECT_STORAGE_KEY: 'jogProjectByRobot',
   DEFAULT_CHASSIS_MODEL: 'default_lift_dd',
   _chassisSelections: {},
+  _projectSelections: {},
   // 새 차상은 이 목록에 모델, 주행 타입, 제어 프로필/명령만 하드코딩해서 추가한다.
   CHASSIS_MODELS: [
     {
       id: 'default_lift_dd',
-      label: '선택 안 함 (기본)',
+      label: '자동 감지 (권장)',
       driveType: 'dd',
-      controlProfile: 'lift',
+      controlProfile: 'automatic',
+      capability: 'drive',
       commands: {}
     },
     {
@@ -42,6 +48,8 @@ const JogControl = {
       label: 'stl_ulsan · Lift / Turntable',
       driveType: 'dd',
       controlProfile: 'lift_service',
+      capability: 'turntable',
+      project: 'stl_ulsan',
       commands: {}
     },
     {
@@ -49,6 +57,7 @@ const JogControl = {
       label: 'sr3_ls_1st',
       driveType: 'dd',
       controlProfile: 'sr3_ls_1st_conveyor',
+      capability: 'conveyor',
       commands: {
         frontDoorOpen: { label: '전방 도어 OPEN', description: '전방 도어를 엽니다.', cmdType: 144, count: 1 },
         frontDoorClose: { label: '전방 도어 CLOSE', description: '전방 도어를 닫습니다.', cmdType: 145, count: 1 },
@@ -60,10 +69,17 @@ const JogControl = {
       }
     }
   ],
-  PUB_RATE: 100,
+  PUB_RATE: 50,
+  WORKER_LEASE_MS: 350,
+  WORKER_RECONNECT_MS: 750,
   MANUAL_LIFT_PUB_RATE: 75,
-  SAFETY_STALE_MS: 1200,
+  SAFETY_STALE_MS: 2500,
   TELEMETRY_STALE_MS: 2500,
+  TELEMETRY_THROTTLE_MS: 100,
+  VELOCITY_THROTTLE_MS: 50,
+  VELOCITY_SOURCE_PREFERENCE_MS: 100,
+  SAFETY_REQUIRED_KEYS: new Set(['manual', 'idle', 'sto', 'brake']),
+  SAFETY_OPTIONAL_KEYS: new Set(['emo', 'lidar']),
   FEEDBACK_STATUS_LABELS: {
     0: 'READY',
     1: 'RUNNING',
@@ -134,16 +150,70 @@ const JogControl = {
     }
   },
 
+  _loadProjectSelections() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(this.PROJECT_STORAGE_KEY));
+      this._projectSelections = saved && typeof saved === 'object' ? saved : {};
+    } catch (error) {
+      this._projectSelections = {};
+    }
+  },
+
+  _saveProjectSelections() {
+    try {
+      localStorage.setItem(this.PROJECT_STORAGE_KEY, JSON.stringify(this._projectSelections));
+    } catch (error) {
+      console.warn('Jog 프로젝트 선택 저장 실패:', error.message);
+    }
+  },
+
+  _compatibilityProfile() {
+    const slot = App.robotSlots?.[App.activeSlotIndex];
+    return typeof RobotCompatibility !== 'undefined'
+      ? RobotCompatibility.get(slot)
+      : slot?.compatibilityProfile;
+  },
+
+  _modelAvailability(model, slot = App.robotSlots?.[App.activeSlotIndex]) {
+    const profile = this._compatibilityProfile();
+    const virtual = typeof TestMode !== 'undefined' && TestMode.enabled && slot?.virtualTestRobot;
+    if (model.id === this.DEFAULT_CHASSIS_MODEL) {
+      if (virtual) return { available: true, reason: 'Test Mode' };
+      if (!profile?.discovered) return { available: false, reason: profile?.reason || 'ROS graph 확인 중' };
+      if (!profile?.chassis?.drive?.verified) {
+        return { available: false, reason: profile?.chassis?.drive?.reason || 'cmd_vel type 미검증' };
+      }
+      return { available: true, reason: `${profile.chassis.drive.topicType} 검증됨` };
+    }
+    if (model.capability === 'turntable') {
+      if (virtual && this._isStlUlsanSlot(slot)) return { available: true, reason: 'Test Mode STL' };
+      if (!this._isStlUlsanSlot(slot)) return { available: false, reason: 'ROBOT_MODEL 불일치' };
+      const capability = profile?.actions?.turntable;
+      return capability?.verified
+        ? { available: true, reason: `${capability.serviceType} 검증됨` }
+        : { available: false, reason: capability?.reason || 'Turntable endpoint/type 미검증' };
+    }
+    if (model.capability === 'conveyor') {
+      if (virtual) return { available: true, reason: 'Test Mode' };
+      const capability = profile?.chassis?.conveyor;
+      return capability?.verified
+        ? { available: true, reason: `${capability.serviceType} 검증됨` }
+        : { available: false, reason: capability?.reason || 'Conv/cmd endpoint/type 미검증' };
+    }
+    return { available: false, reason: '지원 capability 없음' };
+  },
+
   _getSelectedChassisModel() {
     const savedId = this._chassisSelections[this._activeChassisKey()];
     const slot = App.robotSlots?.[App.activeSlotIndex];
     const isStlUlsan = this._isStlUlsanSlot(slot);
-    const autoId = isStlUlsan
-      ? 'stl_ulsan'
-      : this.DEFAULT_CHASSIS_MODEL;
-    const selectedId = isStlUlsan
-      ? autoId
-      : (savedId === 'stl_ulsan' ? this.DEFAULT_CHASSIS_MODEL : (savedId || autoId));
+    const autoId = isStlUlsan && this._modelAvailability(
+      this.CHASSIS_MODELS.find(model => model.id === 'stl_ulsan'), slot
+    ).available ? 'stl_ulsan' : this.DEFAULT_CHASSIS_MODEL;
+    const savedModel = this.CHASSIS_MODELS.find(model => model.id === savedId);
+    const selectedId = savedModel && this._modelAvailability(savedModel, slot).available
+      ? savedId
+      : autoId;
     return this.CHASSIS_MODELS.find(model => model.id === selectedId)
       || this.CHASSIS_MODELS.find(model => model.id === this.DEFAULT_CHASSIS_MODEL)
       || this.CHASSIS_MODELS[0];
@@ -153,6 +223,7 @@ const JogControl = {
     const container = document.getElementById('jog-chassis-options');
     if (!container) return;
     this._loadChassisSelections();
+    this._loadProjectSelections();
     container.innerHTML = '';
     this.CHASSIS_MODELS.forEach(model => {
       const button = document.createElement('button');
@@ -164,16 +235,61 @@ const JogControl = {
       button.addEventListener('click', () => this._setChassisModel(model.id));
       container.appendChild(button);
     });
+    this._setupProjectSelector();
     this._syncChassisModelUi(false);
     document.addEventListener('amr:active-robot-changed', () => this._syncChassisModelUi());
     document.addEventListener('amr:robot-model-changed', () => this._syncChassisModelUi(false));
   },
 
+  _setupProjectSelector() {
+    const select = document.getElementById('jog-project-select');
+    if (!select || typeof RobotCompatibility === 'undefined') return;
+    select.innerHTML = '<option value="">프로젝트 자동/미지정</option>';
+    RobotCompatibility.PROJECT_GENERATIONS.forEach(generation => {
+      const group = document.createElement('optgroup');
+      group.label = generation.label;
+      generation.projects.forEach(project => {
+        const option = document.createElement('option');
+        option.value = project;
+        option.textContent = project;
+        group.appendChild(option);
+      });
+      select.appendChild(group);
+    });
+    const slot = App.robotSlots?.[App.activeSlotIndex];
+    select.value = this._projectSelections[this._activeChassisKey()] || slot?.projectHint || '';
+    if (select.dataset.bound === 'true') return;
+    select.dataset.bound = 'true';
+    select.addEventListener('change', () => this._setProjectHint(select.value));
+  },
+
+  _setProjectHint(project) {
+    const slot = App.robotSlots?.[App.activeSlotIndex];
+    if (!slot) return;
+    const normalized = String(project || '').trim();
+    slot.projectHint = normalized || null;
+    this._projectSelections[this._activeChassisKey()] = normalized;
+    this._saveProjectSelections();
+    if (typeof TestMode !== 'undefined' && TestMode.enabled && slot.virtualTestRobot) {
+      if (normalized === 'stl_ulsan') slot.robotModel = 'stl1000w';
+      else if (slot.robotModel === 'stl1000w') slot.robotModel = 'Test AMR';
+    }
+    const generation = typeof RobotCompatibility !== 'undefined'
+      ? RobotCompatibility.projectGeneration(normalized)
+      : null;
+    this._syncChassisModelUi(false);
+    App.toast?.(
+      generation ? `${generation.label} · ${normalized}` : '프로젝트 자동 감지를 사용합니다.',
+      'info'
+    );
+  },
+
   _setChassisModel(modelId) {
     const model = this.CHASSIS_MODELS.find(entry => entry.id === modelId);
     if (!model) return;
-    if (model.id === 'stl_ulsan' && !this._isStlUlsanSlot()) {
-      App.toast('ROBOT_MODEL이 stl1000w 또는 stl1500w인 로봇에서만 선택할 수 있습니다.', 'error');
+    const availability = this._modelAvailability(model);
+    if (!availability.available) {
+      App.toast(`${model.label} 선택 차단 · ${availability.reason}`, 'error');
       return;
     }
     this._chassisSelections[this._activeChassisKey()] = model.id;
@@ -188,8 +304,13 @@ const JogControl = {
     const model = this._getSelectedChassisModel();
     document.querySelectorAll('.jog-chassis-option').forEach(button => {
       const selected = button.dataset.modelId === model.id;
+      const option = this.CHASSIS_MODELS.find(entry => entry.id === button.dataset.modelId);
+      const availability = this._modelAvailability(option);
       button.classList.toggle('active', selected);
       button.setAttribute('aria-checked', String(selected));
+      button.disabled = !availability.available;
+      button.title = availability.reason;
+      button.classList.toggle('unavailable', !availability.available);
     });
 
     const current = document.getElementById('jog-chassis-current');
@@ -199,18 +320,84 @@ const JogControl = {
     const stlUlsanControl = document.getElementById('jog-stl-ulsan-control');
     const modelIoControl = document.getElementById('jog-model-io-control');
     const isSr3Conveyor = model.controlProfile === 'sr3_ls_1st_conveyor';
-    const isStlUlsan = this._isStlUlsanSlot();
+    const isStlUlsan = model.id === 'stl_ulsan';
     if (isSr3Conveyor) this._stopManualLift();
-    if (liftControl) liftControl.hidden = isSr3Conveyor;
-    if (stlUlsanControl) stlUlsanControl.hidden = !isStlUlsan;
-    if (modelIoControl) modelIoControl.hidden = !isSr3Conveyor;
-    document.querySelectorAll('.jog-chassis-option').forEach(button => {
-      if (button.dataset.modelId === 'stl_ulsan') button.hidden = !isStlUlsan;
-    });
+    if (liftControl) liftControl.hidden = false;
+    if (stlUlsanControl) stlUlsanControl.hidden = false;
+    if (modelIoControl) modelIoControl.hidden = false;
+    this._refreshCompatibilitySummary(model, { isStlUlsan, isSr3Conveyor });
     this._applyDriveType(model.driveType, stop);
     this._updateQuickTaskTarget();
     this._refreshChassisCommandHelp();
-    this._setChassisCommandStatus('', '명령 대기');
+  },
+
+  _refreshCompatibilitySummary(model, state = {}) {
+    const slot = App.robotSlots?.[App.activeSlotIndex];
+    const profile = this._compatibilityProfile();
+    const summary = document.getElementById('jog-compatibility-summary');
+    const lineage = document.getElementById('jog-generation-status');
+    const projectSelect = document.getElementById('jog-project-select');
+    if (projectSelect) projectSelect.value = slot?.projectHint || this._projectSelections[this._activeChassisKey()] || '';
+    if (lineage) {
+      const generation = typeof RobotCompatibility !== 'undefined'
+        ? RobotCompatibility.projectGeneration(slot?.projectHint || profile?.project)
+        : null;
+      lineage.textContent = generation?.label || '계보 미지정 · runtime graph 우선';
+    }
+    if (summary) {
+      const verified = profile?.discovered && profile?.controlReady;
+      summary.className = `jog-compatibility-summary ${verified ? 'ready' : 'blocked'}`;
+      summary.textContent = verified
+        ? `${profile.id} · Task ${profile.task?.protocol || '-'} · Mode ${profile.mapping?.protocol || '-'} · ${model.label}`
+        : `명령 차단 · ${profile?.reason || 'ROS graph 확인 중'}`;
+    }
+    const liftAvailable = Boolean(profile?.lift?.verified) && !state.isSr3Conveyor;
+    document.querySelectorAll('#jog-panel .jog-manual-lift button').forEach(button => {
+      button.disabled = !liftAvailable;
+      button.title = liftAvailable ? profile.lift.serviceType || profile.lift.topicType : profile?.lift?.reason || 'Lift 미지원';
+    });
+    if (!liftAvailable) {
+      this._setManualLiftStatus('error', profile?.lift?.reason || 'Lift endpoint/type 미검증');
+    }
+    const turntableAvailable = state.isStlUlsan && Boolean(profile?.actions?.turntable?.verified);
+    document.querySelectorAll('#jog-stl-ulsan-control button, #jog-stl-ulsan-control input').forEach(control => {
+      control.disabled = !turntableAvailable;
+    });
+    if (!turntableAvailable) {
+      this._setStlTurntableStatus('error', profile?.actions?.turntable?.reason || 'Turntable endpoint/type 미검증');
+    }
+    const conveyorAvailable = state.isSr3Conveyor && Boolean(profile?.chassis?.conveyor?.verified);
+    document.querySelectorAll('#jog-model-io-control button').forEach(button => {
+      button.disabled = !conveyorAvailable;
+    });
+    if (!conveyorAvailable) {
+      this._setChassisCommandStatus('error', profile?.chassis?.conveyor?.reason || 'Conv/cmd endpoint/type 미검증');
+    } else {
+      this._setChassisCommandStatus('', '검증 완료 · 명령 대기');
+    }
+    const virtual = typeof TestMode !== 'undefined' && TestMode.enabled && slot?.virtualTestRobot;
+    const chargeAvailable = virtual || Boolean(profile?.chassis?.charge?.verified);
+    ['jog-charge-on', 'jog-charge-off'].forEach(id => {
+      const button = document.getElementById(id);
+      if (button) {
+        button.disabled = !chargeAvailable;
+        button.title = chargeAvailable
+          ? profile?.chassis?.charge?.serviceType || 'Test Mode'
+          : profile?.chassis?.charge?.reason || 'Charge service/type 미검증';
+      }
+    });
+    const resetCapabilities = {
+      'jog-motor-reset': 'motorReset',
+      'jog-lift-motor-reset': 'liftMotorReset'
+    };
+    Object.entries(resetCapabilities).forEach(([id, key]) => {
+      const button = document.getElementById(id);
+      const capability = profile?.chassis?.[key];
+      if (button) {
+        button.disabled = !virtual && !capability?.verified;
+        button.title = capability?.verified ? capability.serviceType : capability?.reason || 'Reset service/type 미검증';
+      }
+    });
   },
 
   // --- Panel open/close/drag ---
@@ -239,6 +426,7 @@ const JogControl = {
       this._updateQuickTaskTarget();
       this._syncChassisModelUi(false);
       this._startTelemetry();
+      this._ensureJogWorker();
     };
 
     // Toggle handler
@@ -290,6 +478,7 @@ const JogControl = {
     if (toggleBtnMap) toggleBtnMap.classList.remove('active');
     this._stopJogControls();
     this._stopTelemetry();
+    this._shutdownJogWorker();
   },
 
   _isPanelOpen() {
@@ -310,12 +499,18 @@ const JogControl = {
       return false;
     }
     const key = this._normalizeKeyboardKey(event.key);
-    return [
+    const commonKeys = [
       'ArrowUp', 'w', 'ArrowDown', 'x',
       'ArrowLeft', 'a', 'ArrowRight', 'd',
-      'q', 'e', 's', ' ', 'z', 'c', 'o', 'f',
-      'r', 'v', 't'
-    ].includes(key);
+      's', ' ', 'o', 'f'
+    ];
+    const profile = this._compatibilityProfile();
+    const driveType = this._getSelectedChassisModel().driveType;
+    if (driveType === 'qd') commonKeys.push('q', 'e');
+    if (profile?.lift?.verified) commonKeys.push('z', 'c');
+    if (this._getSelectedChassisModel().id === 'stl_ulsan'
+        && profile?.actions?.turntable?.verified) commonKeys.push('r', 'v', 't');
+    return commonKeys.includes(key);
   },
 
   _getLinearSpeed() {
@@ -328,9 +523,96 @@ const JogControl = {
 
   _getTopicName() {
     const slotIndex = App.activeSlotIndex;
+    const slot = App.robotSlots?.[slotIndex];
     const rid = RosManager.getRobotId(slotIndex);
-    const topicSuffix = document.getElementById('jog-topic').value || '/cmd_vel';
-    return rid ? `/${rid}${topicSuffix}` : topicSuffix;
+    const profileTopic = this._compatibilityProfile()?.chassis?.drive?.topic;
+    if (profileTopic) return profileTopic;
+    if (typeof TestMode !== 'undefined' && TestMode.enabled && slot?.virtualTestRobot) {
+      return rid ? `/${rid}/cmd_vel` : '/cmd_vel';
+    }
+    return null;
+  },
+
+  _jogWorkerConfig() {
+    const slotIndex = App.activeSlotIndex;
+    const slot = App.robotSlots?.[slotIndex];
+    const topic = this._getTopicName();
+    const messageType = this._compatibilityProfile()?.chassis?.drive?.topicType
+      || (slot?.virtualTestRobot ? 'geometry_msgs/Twist' : null);
+    if (!slot?.connected || !slot.ip || !topic || !messageType
+        || typeof location === 'undefined') return null;
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const target = encodeURIComponent(`${slot.ip}:${slot.wsPort || 9090}`);
+    return {
+      url: `${protocol}//${location.host}/ws-proxy?target=${target}`,
+      topic,
+      messageType
+    };
+  },
+
+  _ensureJogWorker() {
+    if (typeof Worker === 'undefined') return false;
+    const config = this._jogWorkerConfig();
+    if (!config) return false;
+    const key = [config.url, config.topic, config.messageType].join('|');
+    if (this._jogWorker && this._jogWorkerConfigKey === key) return true;
+    this._shutdownJogWorker();
+    try {
+      const worker = new Worker('/js/jog-publisher-worker.js');
+      this._jogWorker = worker;
+      this._jogWorkerConfigKey = key;
+      this._jogWorkerReady = false;
+      worker.onmessage = event => {
+        if (this._jogWorker !== worker || event.data?.type !== 'status') return;
+        const state = event.data.state;
+        this._jogWorkerReady = state === 'ready' || state === 'lease-expired';
+        const status = document.getElementById('jog-pub-status');
+        if (status) {
+          status.title = state === 'ready'
+            ? 'Jog 전용 Worker/WebSocket 연결됨'
+            : `Jog Worker: ${state}${event.data.detail ? ` · ${event.data.detail}` : ''}`;
+        }
+        this._updateDisplay();
+        if (state === 'lease-expired' && this._publishing) {
+          this._stopVel();
+          App.toast?.('Jog heartbeat 지연으로 안전 정지했습니다. 다시 입력하세요.', 'warning');
+          return;
+        }
+        if (state === 'ready' && this._publishing) this._publishOnce();
+      };
+      worker.onerror = () => {
+        if (this._jogWorker === worker) this._jogWorkerReady = false;
+      };
+      worker.postMessage({
+        type: 'configure',
+        ...config,
+        intervalMs: this.PUB_RATE,
+        leaseMs: this.WORKER_LEASE_MS,
+        reconnectMs: this.WORKER_RECONNECT_MS
+      });
+      return true;
+    } catch (error) {
+      this._jogWorker = null;
+      this._jogWorkerConfigKey = '';
+      this._jogWorkerReady = false;
+      console.warn('[Jog] 전용 Worker 시작 실패, 기본 ROS 연결 사용:', error.message || error);
+      return false;
+    }
+  },
+
+  _shutdownJogWorker() {
+    const worker = this._jogWorker;
+    this._jogWorker = null;
+    this._jogWorkerReady = false;
+    this._jogWorkerConfigKey = '';
+    if (!worker) return;
+    try {
+      worker.postMessage({ type: 'stop' });
+      worker.postMessage({ type: 'shutdown' });
+    } catch (error) { /* worker already stopped */ }
+    setTimeout(() => {
+      try { worker.terminate(); } catch (error) { /* worker already stopped */ }
+    }, 100);
   },
 
   _emptySafetyState() {
@@ -364,13 +646,15 @@ const JogControl = {
     this._refreshTelemetryUi();
     if (!slot?.connected || !ros || !rid) return;
 
-    const subscribe = (suffix, messageType, callback) => {
+    const subscribe = (endpoint, callback, options = {}) => {
+      if (!endpoint?.name || !endpoint?.type) return;
       try {
         const topic = new ROSLIB.Topic({
           ros,
-          name: `/${rid}${suffix}`,
-          messageType,
-          throttle_rate: 100
+          name: endpoint.name,
+          messageType: endpoint.type,
+          throttle_rate: options.throttleRate ?? this.TELEMETRY_THROTTLE_MS,
+          queue_length: 1
         });
         topic.subscribe(message => {
           if (this._telemetrySlotIndex !== slotIndex || App.activeSlotIndex !== slotIndex) return;
@@ -378,16 +662,18 @@ const JogControl = {
         });
         this._telemetrySubscriptions.push(topic);
       } catch (error) {
-        console.warn(`[Jog] ${rid}${suffix} 구독 실패:`, error.message || error);
+        console.warn(`[Jog] ${endpoint.name} 구독 실패:`, error.message || error);
       }
     };
+    const profile = this._compatibilityProfile();
+    const monitoring = profile?.monitoring?.topics || {};
 
-    subscribe('/io/select', 'std_msgs/Bool', msg => this._recordSafety('manual', !msg.data));
-    subscribe('/robot_state', 'syscon_msgs/RobotState', msg => {
+    subscribe(monitoring.manualSelect, msg => this._recordSafety('manual', !msg.data));
+    subscribe(monitoring.robotState, msg => {
       const state = Number(msg.workstate ?? msg.data);
       this._recordSafety('idle', Number.isFinite(state) && state === 0);
     });
-    subscribe('/emergency_sensor', 'std_msgs/Int32MultiArray', msg => {
+    subscribe(monitoring.emergency, msg => {
       const data = Array.isArray(msg.data) ? msg.data : [];
       this._recordSafety('emo', data.length > 0 ? Number(data[0]) === 0 : null);
       this._lidarSafetyInputs.emergency = {
@@ -396,8 +682,8 @@ const JogControl = {
       };
       this._mergeLidarSafety();
     });
-    subscribe('/sto_stop', 'std_msgs/Bool', msg => this._recordSafety('sto', !msg.data));
-    subscribe('/io/lidar_field', 'std_msgs/UInt8', msg => {
+    subscribe(monitoring.sto, msg => this._recordSafety('sto', !msg.data));
+    subscribe(monitoring.lidarField, msg => {
       this._lidarSafetyInputs.field = {
         // HMI contract: field value 1 means a Lidar stop condition.
         value: Number(msg.data) !== 1,
@@ -405,20 +691,27 @@ const JogControl = {
       };
       this._mergeLidarSafety();
     });
-    subscribe('/io/break_released', 'std_msgs/Bool', msg => this._recordSafety('brake', Boolean(msg.data)));
-    subscribe('/motor_status', 'syscon_msgs/MotorState', msg => {
+    subscribe(monitoring.brakeReleased, msg => this._recordSafety('brake', Boolean(msg.data)));
+    subscribe(monitoring.motorStatus, msg => {
       const twist = msg.feed_vel;
       if (twist) this._recordActualVelocity('motor', twist);
-    });
-    subscribe('/odom', 'nav_msgs/Odometry', msg => {
+    }, { throttleRate: this.VELOCITY_THROTTLE_MS });
+    subscribe(monitoring.odom, msg => {
       const twist = msg.twist?.twist;
       if (twist) this._recordActualVelocity('odom', twist);
-    });
-    subscribe('/Lift/feedback', 'syscon_msgs/LiftFeedback', msg => {
+    }, { throttleRate: this.VELOCITY_THROTTLE_MS });
+    subscribe(profile?.lift?.feedbackTopic && profile?.lift?.feedbackType ? {
+      name: profile.lift.feedbackTopic,
+      type: profile.lift.feedbackType
+    } : null, msg => {
       this._liftFeedback = { ...msg, at: Date.now() };
       this._renderLiftFeedback();
     });
-    subscribe('/Turntable/feedback', 'syscon_msgs/LiftFeedback', msg => {
+    const turntable = profile?.actions?.turntable;
+    subscribe(turntable?.feedbackTopic && turntable?.feedbackType ? {
+      name: turntable.feedbackTopic,
+      type: turntable.feedbackType
+    } : null, msg => {
       this._turntableFeedback = { ...msg, at: Date.now() };
       this._renderTurntableFeedback();
     });
@@ -479,11 +772,19 @@ const JogControl = {
 
   _safetyEvaluation() {
     const slot = App.robotSlots?.[App.activeSlotIndex];
-    if (!this._isStlUlsanSlot(slot)) {
-      return { safe: true, strict: false, reasons: [] };
-    }
     if (typeof TestMode !== 'undefined' && TestMode.enabled && slot?.virtualTestRobot) {
       return { safe: true, strict: true, reasons: [], virtual: true };
+    }
+    const profile = this._compatibilityProfile();
+    if (!profile?.discovered) {
+      return {
+        safe: false,
+        strict: true,
+        reasons: [profile?.reason || 'ROS graph 검증 전']
+      };
+    }
+    if (!this._isStlUlsanSlot(slot)) {
+      return { safe: true, strict: false, reasons: [] };
     }
     const labels = {
       manual: 'MANUAL 모드 미확인',
@@ -498,14 +799,35 @@ const JogControl = {
     if (!slot?.connected || !slot?.ros) reasons.push('활성 로봇 미연결');
     Object.entries(labels).forEach(([key, label]) => {
       const state = this._safetyState?.[key];
-      if (!state || state.value !== true || now - state.at > this.SAFETY_STALE_MS) {
+      const required = this.SAFETY_REQUIRED_KEYS.has(key);
+      if (required && (!state || state.value !== true || now - state.at > this.SAFETY_STALE_MS)) {
+        reasons.push(label);
+      } else if (!required && state?.value === false) {
+        // Event-driven/optional safety topics may not publish a periodic CLEAR.
+        // An explicit unsafe value still blocks immediately and remains latched.
         reasons.push(label);
       }
     });
     return { safe: reasons.length === 0, strict: true, reasons };
   },
 
-  _requireSafety(actionLabel = 'Jog 명령') {
+  _requireSafety(actionLabel = 'Jog 명령', capabilityName = null) {
+    const slot = App.robotSlots?.[App.activeSlotIndex];
+    const virtual = typeof TestMode !== 'undefined' && TestMode.enabled && slot?.virtualTestRobot;
+    if (!virtual && capabilityName && typeof RobotCompatibility !== 'undefined') {
+      const profile = RobotCompatibility.get(slot);
+      try {
+        const capability = RobotCompatibility.requireCapability(profile, capabilityName, actionLabel);
+        if (capabilityName === 'chassis' && !capability.drive?.verified) {
+          throw new Error(`${actionLabel} 차단: ${capability.drive?.reason || 'cmd_vel 미검증'}`);
+        }
+      } catch (error) {
+        this._stopVel();
+        this._setSafetyDetail(error.message);
+        App.toast?.(error.message, 'error');
+        return false;
+      }
+    }
     const evaluation = this._safetyEvaluation();
     if (evaluation.safe) return true;
     const reason = evaluation.reasons.join(', ');
@@ -571,28 +893,43 @@ const JogControl = {
       const el = document.getElementById(`jog-safety-${key}`);
       if (!el) return;
       const item = this._safetyState?.[key];
-      const fresh = item && item.value !== null && now - item.at <= this.SAFETY_STALE_MS;
+      const required = this.SAFETY_REQUIRED_KEYS.has(key);
+      const known = item && item.value !== null;
+      const fresh = known && (!required || now - item.at <= this.SAFETY_STALE_MS);
       el.className = `jog-safety-chip ${fresh ? (item.value ? 'safe' : 'blocked') : 'unknown'}`;
-      el.textContent = fresh ? labels[item.value ? 0 : 1] : `${key.toUpperCase()} --`;
+      el.textContent = fresh
+        ? labels[item.value ? 0 : 1]
+        : required ? `${key.toUpperCase()} --` : `${key.toUpperCase()} N/A`;
     });
     if (evaluation.strict) {
       this._setSafetyDetail(evaluation.safe
-        ? '모든 안전 상태가 최신·정상입니다.'
+        ? '필수 안전 상태가 최신·정상이며, 선택 신호의 활성 정지 조건이 없습니다.'
         : evaluation.reasons.join(' · '));
     } else {
       this._setSafetyDetail('stl_ulsan 이외 모델은 안전 상태를 표시하지만 strict gate를 적용하지 않습니다.');
     }
 
     const disabled = evaluation.strict && !evaluation.safe;
-    [
-      'jog-fwd', 'jog-bwd', 'jog-left', 'jog-right', 'jog-rot-left', 'jog-rot-right',
-      'jog-lift-up', 'jog-lift-down', 'jog-turntable-go',
-      'jog-turntable-sync-on'
-    ].forEach(id => {
+    const profile = this._compatibilityProfile();
+    const virtual = evaluation.virtual === true;
+    const driveDisabled = disabled || (!virtual && !profile?.chassis?.drive?.verified);
+    const liftDisabled = disabled || (!virtual && !profile?.lift?.verified);
+    const turntableDisabled = disabled || (!virtual && !profile?.actions?.turntable?.verified);
+    ['jog-fwd', 'jog-bwd', 'jog-left', 'jog-right', 'jog-rot-left', 'jog-rot-right'].forEach(id => {
       const button = document.getElementById(id);
-      if (button) button.disabled = disabled;
+      if (button) button.disabled = driveDisabled;
     });
-    document.querySelectorAll('[data-turntable-target]').forEach(button => { button.disabled = disabled; });
+    ['jog-lift-up', 'jog-lift-down'].forEach(id => {
+      const button = document.getElementById(id);
+      if (button) button.disabled = liftDisabled;
+    });
+    ['jog-turntable-go', 'jog-turntable-sync-on'].forEach(id => {
+      const button = document.getElementById(id);
+      if (button) button.disabled = turntableDisabled;
+    });
+    document.querySelectorAll('[data-turntable-target]').forEach(button => {
+      button.disabled = turntableDisabled;
+    });
   },
 
   _renderVelocityComparison() {
@@ -606,11 +943,16 @@ const JogControl = {
     const now = Date.now();
     const motor = this._actualVelocity?.motor;
     const odom = this._actualVelocity?.odom;
-    const selected = motor && now - motor.at <= this.TELEMETRY_STALE_MS
+    const motorFresh = motor && now - motor.at <= this.TELEMETRY_STALE_MS;
+    const odomFresh = odom && now - odom.at <= this.TELEMETRY_STALE_MS;
+    // Prefer motor feedback only while it is effectively as current as odom.
+    // A slow but continuously publishing motor_status must not hold the UI on
+    // an old value while fresh odometry is available.
+    const useMotor = motorFresh && (!odomFresh
+      || motor.at >= odom.at - this.VELOCITY_SOURCE_PREFERENCE_MS);
+    const selected = useMotor
       ? { ...motor, source: 'motor_status.feed_vel' }
-      : (odom && now - odom.at <= this.TELEMETRY_STALE_MS
-        ? { ...odom, source: 'odom.twist' }
-        : null);
+      : (odomFresh ? { ...odom, source: 'odom.twist' } : null);
     actual.textContent = selected
       ? `Lx ${selected.lx.toFixed(2)} · Ly ${selected.ly.toFixed(2)} · Az ${selected.az.toFixed(2)}`
       : '수신 대기 / stale';
@@ -700,20 +1042,36 @@ const JogControl = {
         return;
       }
 
-      // Hold to move, release to stop
-      btn.addEventListener('mousedown', (e) => { e.preventDefault(); action(); });
-      btn.addEventListener('mouseup', () => this._stopVel());
-      btn.addEventListener('mouseleave', () => this._stopVel());
-      btn.addEventListener('touchstart', (e) => { e.preventDefault(); action(); }, { passive: false });
-      btn.addEventListener('touchend', () => this._stopVel());
-      btn.addEventListener('touchcancel', () => this._stopVel());
+      // Pointer capture keeps a held Jog command stable even if the cursor or
+      // finger drifts outside the button. Release/cancel still sends STOP.
+      let activePointerId = null;
+      btn.addEventListener('pointerdown', event => {
+        if (activePointerId !== null) return;
+        event.preventDefault();
+        activePointerId = event.pointerId;
+        try { btn.setPointerCapture?.(event.pointerId); } catch (error) { /* unsupported pointer capture */ }
+        action();
+      });
+      const finish = event => {
+        if (activePointerId === null) return;
+        if (event?.pointerId !== undefined && event.pointerId !== activePointerId) return;
+        const pointerId = activePointerId;
+        activePointerId = null;
+        try {
+          if (btn.hasPointerCapture?.(pointerId)) btn.releasePointerCapture(pointerId);
+        } catch (error) { /* pointer was already released */ }
+        this._stopVel();
+      };
+      btn.addEventListener('pointerup', finish);
+      btn.addEventListener('pointercancel', finish);
+      btn.addEventListener('lostpointercapture', finish);
     });
 
     // Motor reset service buttons
     const motorResetBtn = document.getElementById('jog-motor-reset');
     const liftMotorResetBtn = document.getElementById('jog-lift-motor-reset');
-    if (motorResetBtn) motorResetBtn.addEventListener('click', () => this._callMotorReset('/motor_reset'));
-    if (liftMotorResetBtn) liftMotorResetBtn.addEventListener('click', () => this._callMotorReset('/Lift/motor_reset'));
+    if (motorResetBtn) motorResetBtn.addEventListener('click', () => this._callMotorReset('motorReset'));
+    if (liftMotorResetBtn) liftMotorResetBtn.addEventListener('click', () => this._callMotorReset('liftMotorReset'));
 
     const chargeOnBtn = document.getElementById('jog-charge-on');
     const chargeOffBtn = document.getElementById('jog-charge-off');
@@ -740,7 +1098,8 @@ const JogControl = {
 
   _chassisCommandServiceName() {
     const rid = RosManager.getRobotId(App.activeSlotIndex);
-    return `/${rid || '{RID}'}/Conv/cmd`;
+    return this._compatibilityProfile()?.chassis?.conveyor?.service
+      || `/${rid || '{RID}'}/Conv/cmd`;
   },
 
   _formatChassisCommandHelp(command) {
@@ -751,7 +1110,7 @@ const JogControl = {
     return [
       command.description || command.label,
       `Service: ${this._chassisCommandServiceName()}`,
-      'Type: syscon_msgs/conv_cmd',
+      `Type: ${this._compatibilityProfile()?.chassis?.conveyor?.serviceType || '미검증'}`,
       `Request: ${request}`
     ].join('\n');
   },
@@ -801,7 +1160,19 @@ const JogControl = {
       return;
     }
 
-    const serviceName = `/${rid}/Conv/cmd`;
+    const virtual = typeof TestMode !== 'undefined' && TestMode.enabled && slot.virtualTestRobot;
+    const profile = this._compatibilityProfile();
+    const conveyor = profile?.chassis?.conveyor;
+    if (!virtual && (!profile?.discovered || !conveyor?.verified)) {
+      this._setChassisCommandStatus(
+        'error',
+        `컨베이어 명령 차단 · ${conveyor?.reason || profile?.reason || 'ROS graph 미검증'}`
+      );
+      return;
+    }
+
+    const serviceName = virtual ? `/${rid}/Conv/cmd` : conveyor.service;
+    const serviceType = virtual ? 'syscon_msgs/conv_cmd' : conveyor.serviceType;
     const buttons = Array.from(document.querySelectorAll('[data-chassis-command]'));
     this._stopVel();
     buttons.forEach(button => { button.disabled = true; });
@@ -811,7 +1182,7 @@ const JogControl = {
       `${rid} · ${command.label} (${command.cmdType},${command.count}) 명령 중...`
     );
 
-    if (typeof TestMode !== 'undefined' && TestMode.enabled && slot.virtualTestRobot) {
+    if (virtual) {
       this._setChassisCommandStatus(
         'success',
         `${rid} · ${command.label} (${command.cmdType},${command.count}) Test Mode 실행 완료`
@@ -832,7 +1203,7 @@ const JogControl = {
       const service = new ROSLIB.Service({
         ros,
         name: serviceName,
-        serviceType: 'syscon_msgs/conv_cmd'
+        serviceType
       });
       const request = new ROSLIB.ServiceRequest({
         cmds: [{ cmd_type: command.cmdType, count: command.count }]
@@ -868,7 +1239,7 @@ const JogControl = {
     status.textContent = message;
   },
 
-  _callMotorReset(serviceSuffix) {
+  _callMotorReset(capabilityKey) {
     const slotIndex = App.activeSlotIndex;
     const slot = App.robotSlots?.[slotIndex];
     const ros = typeof RosManager.getRos === 'function'
@@ -879,9 +1250,17 @@ const JogControl = {
       return;
     }
     const rid = RosManager.getRobotId(slotIndex);
-    const serviceName = rid ? `/${rid}${serviceSuffix}` : serviceSuffix;
+    const virtual = typeof TestMode !== 'undefined' && TestMode.enabled && slot?.virtualTestRobot;
+    const reset = this._compatibilityProfile()?.chassis?.[capabilityKey];
+    if (!virtual && (!reset?.verified || !reset.service || !reset.serviceType)) {
+      App.toast(`Motor Reset 차단 · ${reset?.reason || 'service/type 미검증'}`, 'error');
+      return;
+    }
+    const serviceName = virtual
+      ? `/${rid}${capabilityKey === 'liftMotorReset' ? '/Lift/motor_reset' : '/motor_reset'}`
+      : reset.service;
 
-    if (!this._requireSafety('Motor Reset')) return;
+    if (!this._requireSafety('Motor Reset', 'chassis')) return;
     if (!this._confirmRiskyCommand('Motor Reset을 실행합니다.', {
       rid,
       endpoint: serviceName,
@@ -889,7 +1268,7 @@ const JogControl = {
       warning: '모터 드라이버가 재초기화되며 예상치 못한 상태 변화가 발생할 수 있습니다.'
     })) return;
 
-    if (typeof TestMode !== 'undefined' && TestMode.enabled) {
+    if (virtual) {
       App.toast(`[TestMode] ${serviceName}: OK`, 'success');
       App.addEvent?.('action', '[TestMode] Motor reset', serviceName, 'success');
       return;
@@ -898,7 +1277,7 @@ const JogControl = {
     const service = new ROSLIB.Service({
       ros: ros,
       name: serviceName,
-      serviceType: 'std_srvs/Trigger'
+      serviceType: reset.serviceType
     });
     const request = new ROSLIB.ServiceRequest({});
 
@@ -920,9 +1299,15 @@ const JogControl = {
       return;
     }
     if (this._chargeCommandPending) return;
+    const virtual = typeof TestMode !== 'undefined' && TestMode.enabled && slot.virtualTestRobot;
+    const charge = this._compatibilityProfile()?.chassis?.charge;
+    if (!virtual && (!charge?.verified || !charge.service || !charge.serviceType)) {
+      App.toast(`충전 명령 차단 · ${charge?.reason || 'service/type 미검증'}`, 'error');
+      return;
+    }
     if (enabled && !this._confirmRiskyCommand('충전을 ON으로 전환합니다.', {
       rid,
-      endpoint: `/${rid}/io/charge_relay (runtime discovery)`,
+      endpoint: virtual ? '[TestMode] virtual charge relay' : charge.service,
       payload: '{ data: true }',
       warning: '실제 충전 릴레이가 동작할 수 있습니다. 정말 충전을 시작하시겠습니까?'
     })) return;
@@ -939,7 +1324,7 @@ const JogControl = {
     this.updateChargeStatus(slot);
 
     try {
-      if (typeof TestMode !== 'undefined' && TestMode.enabled && slot.virtualTestRobot) {
+      if (virtual) {
         TestMode.setActiveCharging(enabled);
         slot.chargeRelayOn = enabled;
         slot.chargeRelayAssumed = true;
@@ -949,14 +1334,14 @@ const JogControl = {
         return;
       }
 
-      const serviceName = await this._resolveChargeService(ros, rid, slot);
-      const result = await this._callSetBool(ros, serviceName, enabled);
+      const charge = await this._resolveChargeService(ros, rid, slot);
+      const result = await this._callSetBool(ros, charge.service, charge.serviceType, enabled);
       if (result && result.success === false) {
         throw new Error(result.message || '로봇이 명령을 거부했습니다');
       }
       slot.chargeRelayOn = enabled;
       slot.chargeRelayAssumed = true;
-      slot.chargeServiceName = serviceName;
+      slot.chargeServiceName = charge.service;
       App.toast(`${rid} 충전 ${enabled ? 'ON' : 'OFF'} 명령 완료`, 'success');
       this.updateChargeStatus(slot);
       if (this._chargeStatusTimer) clearTimeout(this._chargeStatusTimer);
@@ -976,69 +1361,22 @@ const JogControl = {
     }
   },
 
-  _chargeServiceCandidates(rid) {
-    return [
-      // New SPX software: use the same safety-aware relay service as the
-      // docking/docking-out actions. The direct output remains a fallback.
-      `/${rid}/io/set/auto_charge_relay`,
-      `/${rid}/io/set/auto_charge`,
-      `/${rid}/SUBCON_/charge_relay_cmd`,
-      `/${rid}/device_manager/charge_relay_cmd`,
-      `/${rid}/io/set/charge_relay`,
-      `/${rid}/io/charge_relay`,
-      `/${rid}/set_charging_switch`
-    ];
+  _resolveChargeService(_ros, rid, _slot) {
+    const charge = this._compatibilityProfile()?.chassis?.charge;
+    if (!charge?.verified || !charge.service || !charge.serviceType) {
+      return Promise.reject(new Error(
+        `충전 명령 차단 · ${charge?.reason || `${rid} charge service/type 미검증`}`
+      ));
+    }
+    return Promise.resolve(charge);
   },
 
-  _resolveChargeService(ros, rid, slot) {
-    const candidates = this._chargeServiceCandidates(rid);
-    return new Promise(resolve => {
-      let settled = false;
-      const done = services => {
-        if (settled) return;
-        settled = true;
-        const list = Array.isArray(services) ? services : [];
-        const exact = candidates.find(name => list.includes(name));
-        const discovered = list.find(name =>
-          name.startsWith(`/${rid}/`) && (
-            name.endsWith('/io/set/auto_charge_relay')
-            || name.endsWith('/io/set/auto_charge')
-            || name.endsWith('/io/set/charge_relay')
-            || name.endsWith('/charge_relay_cmd')
-            || name.endsWith('/set_charging_switch')
-          )
-        );
-        const cached = list.includes(slot.chargeServiceName) ? slot.chargeServiceName : null;
-        const offlineFallback = list.length === 0 ? slot.chargeServiceName : null;
-        resolve(exact || discovered || cached || offlineFallback || candidates[0]);
-      };
-      const timer = setTimeout(() => done([]), 1500);
-      try {
-        const service = new ROSLIB.Service({
-          ros,
-          name: '/rosapi/services',
-          serviceType: 'rosapi/Services'
-        });
-        service.callService(new ROSLIB.ServiceRequest({}), result => {
-          clearTimeout(timer);
-          done(result?.services || []);
-        }, () => {
-          clearTimeout(timer);
-          done([]);
-        });
-      } catch (error) {
-        clearTimeout(timer);
-        done([]);
-      }
-    });
-  },
-
-  _callSetBool(ros, serviceName, enabled) {
+  _callSetBool(ros, serviceName, serviceType, enabled) {
     return new Promise((resolve, reject) => {
       const service = new ROSLIB.Service({
         ros,
         name: serviceName,
-        serviceType: 'std_srvs/SetBool'
+        serviceType
       });
       service.callService(
         new ROSLIB.ServiceRequest({ data: enabled }),
@@ -1137,21 +1475,9 @@ const JogControl = {
       : slot?.robotId;
     const isUp = direction === 'up';
     const label = isUp ? '리프트 UP' : '리프트 DOWN';
-    if (!this._requireSafety(label)) return false;
-    const model = this._getSelectedChassisModel();
-    if (!['lift', 'lift_service'].includes(model.controlProfile)) {
-      this._setManualLiftStatus('error', '현재 차상 모델은 수동 리프트를 지원하지 않습니다.');
-      return false;
-    }
+    if (!this._requireSafety(label, 'lift')) return false;
     if (!slot?.connected || !ros || !rid) {
       this._setManualLiftStatus('error', '활성 로봇이 연결되어 있지 않습니다.');
-      return false;
-    }
-    if (typeof RobotCompatibility !== 'undefined'
-        && !slot.compatibilityProfile?.discovered
-        && !this._isStlUlsanSlot(slot)) {
-      this._setManualLiftStatus('running', `${rid} · 리프트 인터페이스 확인 중 · 확인 후 다시 누르세요.`);
-      RobotCompatibility.discover(slot).then(() => this._syncChassisModelUi(false));
       return false;
     }
     if (this._manualLiftState?.direction === direction
@@ -1167,40 +1493,36 @@ const JogControl = {
     const slotProfile = typeof RobotCompatibility !== 'undefined'
       ? RobotCompatibility.get(slot)
       : null;
-    const useService = model.controlProfile === 'lift_service'
-      || slotProfile?.lift?.interface === 'service';
-    const liftConfig = useService
-      ? (slotProfile?.lift || {
-        interface: 'service',
-        service: `/${rid}/Lift/cmd`,
-        serviceType: 'syscon_msgs/lift_cmd',
-        cancelService: `/${rid}/Lift/cancel`,
-        cancelType: 'syscon_msgs/string_srv',
-        cancelArgs: { data: '' },
-        commands: { stop: 0, up: 1, down: 2 }
-      })
-      : (slotProfile?.lift || {
+    const virtual = typeof TestMode !== 'undefined' && TestMode.enabled && slot.virtualTestRobot;
+    const liftConfig = virtual && !slotProfile?.lift?.verified
+      ? {
         interface: 'topic',
         topic: `/${rid}/Lift/manual_cmd`,
         topicType: 'std_msgs/Int8',
         commands: { stop: 0, up: 1, down: -1 }
-      });
+      }
+      : slotProfile?.lift;
+    if (!liftConfig?.commands || (!liftConfig.service && !liftConfig.topic)) {
+      this._setManualLiftStatus('error', '검증된 Lift endpoint/type이 없습니다.');
+      return false;
+    }
+    const useService = liftConfig.interface === 'service';
     const transport = useService
       ? new ROSLIB.Service({
         ros,
-        name: liftConfig.service || `/${rid}/Lift/cmd`,
-        serviceType: liftConfig.serviceType || 'syscon_msgs/lift_cmd'
+        name: liftConfig.service,
+        serviceType: liftConfig.serviceType
       })
       : new ROSLIB.Topic({
         ros,
-        name: liftConfig.topic || `/${rid}/Lift/manual_cmd`,
-        messageType: liftConfig.topicType || 'std_msgs/Int8'
+        name: liftConfig.topic,
+        messageType: liftConfig.topicType
       });
     const cancelTransport = useService && liftConfig.cancelService
       ? new ROSLIB.Service({
         ros,
         name: liftConfig.cancelService,
-        serviceType: liftConfig.cancelType || 'syscon_msgs/string_srv'
+        serviceType: liftConfig.cancelType
       })
       : null;
     this._manualLiftState = {
@@ -1354,12 +1676,13 @@ const JogControl = {
       this._setStlTurntableStatus('error', 'Task 입력 기능을 사용할 수 없습니다.');
       return false;
     }
-    if (!this._requireSafety('Turntable 이동')) return false;
+    if (!this._requireSafety('Turntable 이동', 'turntable')) return false;
+    if (!this._requireSafety('Turntable Task 입력', 'task')) return false;
     const rid = RosManager.getRobotId(slotIndex) || slot.robotId;
     const profile = typeof RobotCompatibility !== 'undefined' ? RobotCompatibility.get(slot) : null;
     if (!this._confirmRiskyCommand('Turntable을 이동합니다.', {
       rid,
-      endpoint: profile?.task?.goalName || `/${rid}/TARU/goal`,
+      endpoint: profile?.task?.goalName || 'Task endpoint 미검증',
       payload: `action_type=0x22, action_args=[3, ${target}, 0]`,
       warning: '턴테이블 회전 반경에 사람과 적재물이 없는지 확인하세요.'
     })) return false;
@@ -1404,7 +1727,7 @@ const JogControl = {
     this._stopVel();
     this._stopManualLift();
     if (button) button.disabled = true;
-    this._setStlTurntableStatus('running', `${slot.robotId} · TARU Task 취소 요청 중...`);
+    this._setStlTurntableStatus('running', `${slot.robotId} · Task 취소 요청 중...`);
     try {
       await ActionSender.cancelTaskOnSlot(slotIndex);
       this._setStlTurntableStatus('success', `${slot.robotId} · Turntable Task 취소 요청 완료`);
@@ -1429,10 +1752,18 @@ const JogControl = {
       return false;
     }
     // Sync OFF is a risk-reducing command and must remain available during a safety stop.
-    if (enabled && !this._requireSafety('Turntable Sync ON')) return false;
+    if (enabled && !this._requireSafety('Turntable Sync ON', 'turntable')) return false;
     const profile = typeof RobotCompatibility !== 'undefined' ? RobotCompatibility.get(slot) : null;
-    const serviceName = profile?.actions?.turntable?.syncService || `/${rid}/Turntable/sync_mode`;
-    const serviceType = profile?.actions?.turntable?.syncType || 'std_srvs/SetBool';
+    const turntable = profile?.actions?.turntable;
+    if (!turntable?.verified || !turntable.syncService || !turntable.syncType) {
+      this._setStlTurntableStatus(
+        'error',
+        `Sync 변경 차단 · ${turntable?.reason || 'sync service/type 미검증'}`
+      );
+      return false;
+    }
+    const serviceName = turntable.syncService;
+    const serviceType = turntable.syncType;
     if (!this._confirmRiskyCommand(`Turntable Sync를 ${enabled ? 'ON' : 'OFF'}으로 전환합니다.`, {
       rid,
       endpoint: serviceName,
@@ -1609,12 +1940,12 @@ const JogControl = {
       this._setQuickTaskStatus('error', '활성 로봇이 연결되어 있지 않습니다.');
       return;
     }
-    if (!this._requireSafety(`Quick Task ${index + 1}`)) return;
+    if (!this._requireSafety(`Quick Task ${index + 1}`, 'task')) return;
     const rid = RosManager.getRobotId(slotIndex) || slot.robotId;
     const profile = typeof RobotCompatibility !== 'undefined' ? RobotCompatibility.get(slot) : null;
     if (!this._confirmRiskyCommand('Quick Task를 실행합니다.', {
       rid,
-      endpoint: profile?.task?.goalName || `/${rid}/TARU/goal`,
+      endpoint: profile?.task?.goalName || 'Task endpoint 미검증',
       payload: `saved task: ${taskName}`,
       warning: '저장된 Task가 로봇과 차상을 실제로 동작시킬 수 있습니다.'
     })) return;
@@ -1720,8 +2051,11 @@ const JogControl = {
     });
     document.addEventListener('amr:active-robot-changed', () => {
       this._stopJogControls();
-      if (this._isPanelOpen()) this._startTelemetry();
-      else this._stopTelemetry();
+      this._shutdownJogWorker();
+      if (this._isPanelOpen()) {
+        this._startTelemetry();
+        this._ensureJogWorker();
+      } else this._stopTelemetry();
     });
     if (typeof window !== 'undefined') {
       window.addEventListener('blur', () => this._stopJogControls());
@@ -1758,12 +2092,13 @@ const JogControl = {
   },
 
   _setVel(lx, ly, az) {
-    if (!this._requireSafety('주행 Jog')) return false;
+    if (!this._requireSafety('주행 Jog', 'chassis')) return false;
     this._stopManualLift();
     this._currentLx = lx;
     this._currentLy = ly || 0;
     this._currentAz = az;
     this._updateDisplay();
+    if (this._publishing) this._publishOnce();
     this._startPublishing();
     return true;
   },
@@ -1788,7 +2123,12 @@ const JogControl = {
     const lyEl = document.getElementById('jog-cur-ly');
     if (lyEl) lyEl.textContent = this._currentLy.toFixed(2);
     document.getElementById('jog-cur-az').textContent = this._currentAz.toFixed(2);
-    document.getElementById('jog-pub-status').textContent = this._publishing ? 'On' : 'Off';
+    const publishStatus = document.getElementById('jog-pub-status');
+    if (publishStatus) {
+      publishStatus.textContent = this._publishing
+        ? (this._jogWorkerReady ? 'Worker 20Hz' : 'Fallback 20Hz')
+        : 'Off';
+    }
     this._renderVelocityComparison();
 
     ['jog-fwd', 'jog-bwd', 'jog-left', 'jog-right', 'jog-rot-left', 'jog-rot-right'].forEach(id => {
@@ -1816,32 +2156,54 @@ const JogControl = {
     if (!ros) return null;
 
     const topicName = this._getTopicName();
+    const slot = App.robotSlots?.[slotIndex];
+    const profileType = this._compatibilityProfile()?.chassis?.drive?.topicType;
+    const virtual = typeof TestMode !== 'undefined' && TestMode.enabled && slot?.virtualTestRobot;
+    const messageType = profileType || (virtual ? 'geometry_msgs/Twist' : null);
+    if (!topicName || !messageType) return null;
     // Reuse or create topic
-    if (!this._cmdVelTopic || this._cmdVelTopic.name !== topicName || this._cmdVelTopic.ros !== ros) {
+    if (!this._cmdVelTopic || this._cmdVelTopic.name !== topicName
+        || this._cmdVelTopic.ros !== ros || this._cmdVelTopic.messageType !== messageType) {
       this._cmdVelTopic = new ROSLIB.Topic({
         ros: ros,
         name: topicName,
-        messageType: 'geometry_msgs/Twist'
+        messageType
       });
     }
     return this._cmdVelTopic;
   },
 
   _publishOnce() {
+    if (this._jogWorkerReady && this._jogWorker) {
+      this._jogWorker.postMessage({
+        type: 'command',
+        active: this._publishing,
+        velocity: {
+          lx: this._currentLx,
+          ly: this._currentLy,
+          az: this._currentAz
+        }
+      });
+      return true;
+    }
     const topic = this._getTopic();
-    if (!topic) return;
+    if (!topic) return false;
 
     const twist = new ROSLIB.Message({
       linear: { x: this._currentLx, y: this._currentLy, z: 0 },
       angular: { x: 0, y: 0, z: this._currentAz }
     });
     topic.publish(twist);
+    return true;
   },
 
   _startPublishing() {
     if (this._publishing) return;
     this._publishing = true;
+    this._ensureJogWorker();
+    RosManager.setJogActive?.(true);
     this._updateDisplay();
+    this._publishOnce();
 
     this._pubInterval = setInterval(() => {
       this._publishOnce();
@@ -1851,6 +2213,10 @@ const JogControl = {
   _stopPublishing() {
     if (!this._publishing) return;
     this._publishing = false;
+    if (this._jogWorker) {
+      try { this._jogWorker.postMessage({ type: 'stop' }); } catch (error) { /* worker stopped */ }
+    }
+    RosManager.setJogActive?.(false);
     this._updateDisplay();
 
     if (this._pubInterval) {

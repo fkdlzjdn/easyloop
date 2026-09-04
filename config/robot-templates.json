@@ -1,4 +1,6 @@
 {
+  "schemaVersion": 2,
+  "runtimePolicy": "endpointHints are display/configuration hints only; live rosapi endpoint and type discovery is authoritative for control",
   "templates": [
     {
       "id": "scorpion_v1",
@@ -20,7 +22,7 @@
         "cam1Color": "/{robotId}/cam_1/color/image_raw/compressed",
         "cam2Color": "/{robotId}/cam_2/color/image_raw/compressed"
       },
-      "services": {
+      "endpointHints": {
         "goal": "/{robotId}/TARU/goal",
         "cancel": "/{robotId}/TARU/cancel"
       }
@@ -47,7 +49,7 @@
         "cam2Color": "/{robotId}/cam_2/color/image_raw/compressed",
         "liftStatus": "/{robotId}/lift_status"
       },
-      "services": {
+      "endpointHints": {
         "goal": "/{robotId}/TARU/goal",
         "cancel": "/{robotId}/TARU/cancel",
         "lift": "/{robotId}/TARU/lift"
@@ -74,7 +76,7 @@
         "cam1Color": "/{robotId}/cam_1/color/image_raw/compressed",
         "conveyorStatus": "/{robotId}/conveyor_status"
       },
-      "services": {
+      "endpointHints": {
         "goal": "/{robotId}/TARU/goal",
         "cancel": "/{robotId}/TARU/cancel",
         "conveyor": "/{robotId}/TARU/conveyor"
@@ -101,7 +103,7 @@
         "mappingMode": "/{robotId}/spcore/MODE",
         "liftFeedback": "/{robotId}/Lift/feedback"
       },
-      "services": {
+      "endpointHints": {
         "goal": "/{robotId}/TARU/goal",
         "cancel": "/{robotId}/TARU/cancel",
         "lift": "/{robotId}/Lift/cmd",
@@ -131,7 +133,7 @@
         "map": "/{robotId}/map",
         "scan": "/{robotId}/scan"
       },
-      "services": {
+      "endpointHints": {
         "goal": "/{robotId}/TARU/goal",
         "cancel": "/{robotId}/TARU/cancel"
       }

@@ -34,4 +34,22 @@ describe('available server port', () => {
       await closeServer(blocker);
     }
   });
+
+  test('can keep a fixed sharing port instead of silently changing it', async () => {
+    const blocker = http.createServer();
+    await new Promise(resolve => blocker.listen(0, '127.0.0.1', resolve));
+    const occupiedPort = blocker.address().port;
+    const candidate = http.createServer();
+
+    try {
+      await expect(listenOnAvailablePort(candidate, {
+        startPort: occupiedPort,
+        host: '127.0.0.1',
+        allowPortFallback: false
+      })).rejects.toMatchObject({ code: 'EADDRINUSE' });
+      expect(candidate.listening).toBe(false);
+    } finally {
+      await closeServer(blocker);
+    }
+  });
 });

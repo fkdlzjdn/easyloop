@@ -7,6 +7,28 @@ const {
   validateStringField
 } = require('../validation');
 
+function createSftpCloser(sftp) {
+  let closed = false;
+
+  return () => {
+    if (closed) return;
+    closed = true;
+
+    if (typeof sftp?.end !== 'function') return;
+
+    try {
+      sftp.end();
+    } catch (err) {
+      console.warn('[SFTP] Failed to close channel:', err.message);
+    }
+  };
+}
+
+function removeUploadTempFile(file) {
+  if (!file?.path) return;
+  try { fs.unlinkSync(file.path); } catch (err) { /* ignore */ }
+}
+
 function createSftpRouter({ sshConnections, upload }) {
   const router = express.Router();
 
@@ -33,20 +55,27 @@ function createSftpRouter({ sshConnections, upload }) {
 
     session.conn.sftp((err, sftp) => {
       if (err) return res.json({ success: false, message: err.message });
+      const closeSftp = createSftpCloser(sftp);
 
-      sftp.readdir(remotePath, (err2, list) => {
-        if (err2) return res.json({ success: false, message: err2.message });
+      try {
+        sftp.readdir(remotePath, (err2, list) => {
+          closeSftp();
+          if (err2) return res.json({ success: false, message: err2.message });
 
-        const files = list.map(item => ({
-          name: item.filename,
-          size: item.attrs.size,
-          isDirectory: item.attrs.isDirectory(),
-          modifyTime: item.attrs.mtime * 1000,
-          permissions: item.attrs.mode
-        }));
+          const files = list.map(item => ({
+            name: item.filename,
+            size: item.attrs.size,
+            isDirectory: item.attrs.isDirectory(),
+            modifyTime: item.attrs.mtime * 1000,
+            permissions: item.attrs.mode
+          }));
 
-        res.json({ success: true, files });
-      });
+          res.json({ success: true, files });
+        });
+      } catch (err2) {
+        closeSftp();
+        res.json({ success: false, message: err2.message });
+      }
     });
   });
 
@@ -76,43 +105,72 @@ function createSftpRouter({ sshConnections, upload }) {
 
     session.conn.sftp((err, sftp) => {
       if (err) return res.json({ success: false, message: err.message });
+      const closeSftp = createSftpCloser(sftp);
+      let completed = false;
+
+      const finish = (payload) => {
+        if (completed) return;
+        completed = true;
+        closeSftp();
+        res.json(payload);
+      };
 
       // 먼저 파일 크기 확인
-      sftp.stat(remotePath, (statErr, stats) => {
-        if (statErr) return res.json({ success: false, message: statErr.message });
+      try {
+        sftp.stat(remotePath, (statErr, stats) => {
+          if (statErr) return finish({ success: false, message: statErr.message });
 
-        if (stats.size > MAX_DOWNLOAD_SIZE) {
-          return res.json({
-            success: false,
-            message: `File too large (${(stats.size / 1024 / 1024).toFixed(1)}MB). Max ${MAX_DOWNLOAD_SIZE / 1024 / 1024}MB.`
-          });
-        }
-
-        const chunks = [];
-        let totalSize = 0;
-        const readStream = sftp.createReadStream(remotePath);
-
-        readStream.on('data', (chunk) => {
-          totalSize += chunk.length;
-          if (totalSize > MAX_DOWNLOAD_SIZE) {
-            readStream.destroy();
-            return res.json({ success: false, message: 'Download aborted: file size exceeds limit during transfer' });
+          if (stats.size > MAX_DOWNLOAD_SIZE) {
+            return finish({
+              success: false,
+              message: `File too large (${(stats.size / 1024 / 1024).toFixed(1)}MB). Max ${MAX_DOWNLOAD_SIZE / 1024 / 1024}MB.`
+            });
           }
-          chunks.push(chunk);
-        });
-        readStream.on('end', () => {
-          const buffer = Buffer.concat(chunks);
-          res.json({
-            success: true,
-            filename: path.basename(remotePath),
-            content: buffer.toString('base64'),
-            size: buffer.length
+
+          const chunks = [];
+          let totalSize = 0;
+          let readStream;
+
+          try {
+            readStream = sftp.createReadStream(remotePath);
+          } catch (streamErr) {
+            return finish({ success: false, message: streamErr.message });
+          }
+
+          readStream.on('data', (chunk) => {
+            if (completed) return;
+            totalSize += chunk.length;
+            if (totalSize > MAX_DOWNLOAD_SIZE) {
+              readStream.destroy();
+              return finish({
+                success: false,
+                message: 'Download aborted: file size exceeds limit during transfer'
+              });
+            }
+            chunks.push(chunk);
+          });
+          readStream.on('end', () => {
+            if (completed) return;
+            const buffer = Buffer.concat(chunks);
+            finish({
+              success: true,
+              filename: path.basename(remotePath),
+              content: buffer.toString('base64'),
+              size: buffer.length
+            });
+          });
+          readStream.on('error', (err2) => {
+            finish({ success: false, message: err2.message });
+          });
+          readStream.on('close', () => {
+            if (!completed) {
+              finish({ success: false, message: 'Download stream closed unexpectedly' });
+            }
           });
         });
-        readStream.on('error', (err2) => {
-          res.json({ success: false, message: err2.message });
-        });
-      });
+      } catch (statErr) {
+        finish({ success: false, message: statErr.message });
+      }
     });
   });
 
@@ -142,18 +200,32 @@ function createSftpRouter({ sshConnections, upload }) {
     }
 
     session.conn.sftp((err, sftp) => {
-      if (err) return res.json({ success: false, message: err.message });
+      if (err) {
+        removeUploadTempFile(req.file);
+        return res.json({ success: false, message: err.message });
+      }
 
+      const closeSftp = createSftpCloser(sftp);
       const localPath = req.file.path;
       const fullRemotePath = path.posix.join(remotePath, req.file.originalname);
+      let completed = false;
 
-      sftp.fastPut(localPath, fullRemotePath, (err2) => {
-        // B1 fix: 임시파일은 성공/실패 관계없이 항상 정리
-        try { fs.unlinkSync(localPath); } catch (unlinkErr) { /* ignore */ }
+      const finish = (payload) => {
+        if (completed) return;
+        completed = true;
+        closeSftp();
+        removeUploadTempFile(req.file);
+        res.json(payload);
+      };
 
-        if (err2) return res.json({ success: false, message: err2.message });
-        res.json({ success: true, message: 'File uploaded successfully' });
-      });
+      try {
+        sftp.fastPut(localPath, fullRemotePath, (err2) => {
+          if (err2) return finish({ success: false, message: err2.message });
+          finish({ success: true, message: 'File uploaded successfully' });
+        });
+      } catch (err2) {
+        finish({ success: false, message: err2.message });
+      }
     });
   });
 

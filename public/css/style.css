@@ -11376,6 +11376,22 @@ body.light-mode .mapping-status {
   border-color: #00aadd;
 }
 
+.scan-fill-mode-select {
+  max-width: 122px;
+  padding: 3px 5px;
+  font-size: 11px;
+  background: var(--bg-inset);
+  color: var(--text-primary);
+  border: 1px solid rgba(0, 170, 221, 0.65);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.scan-fill-mode-select:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .btn-move-tool {
   font-size: 14px;
   min-width: 28px;
@@ -12741,6 +12757,78 @@ body.light-mode .cmd-result-pre {
   font-size: 11px;
 }
 
+.jog-project-field {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.jog-project-field select {
+  min-width: 0;
+  min-height: 32px;
+  padding: 5px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: 11px;
+}
+
+.jog-generation-status {
+  margin-bottom: 6px;
+  color: #94a3b8;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.jog-compatibility-summary {
+  margin-bottom: 7px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.jog-compatibility-summary.ready {
+  border-color: rgba(34, 197, 94, 0.48);
+  background: rgba(22, 101, 52, 0.18);
+  color: #86efac;
+}
+
+.jog-compatibility-summary.blocked {
+  border-color: rgba(239, 68, 68, 0.48);
+  background: rgba(127, 29, 29, 0.18);
+  color: #fca5a5;
+}
+
+.action-compatibility-status {
+  margin: 8px 0 14px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-color, #3a3a3c);
+  border-radius: 8px;
+  background: rgba(142, 142, 147, 0.08);
+  color: var(--text-secondary, #a1a1a6);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.action-compatibility-status.ready {
+  border-color: rgba(48, 209, 88, 0.45);
+  background: rgba(48, 209, 88, 0.09);
+  color: #8ce99a;
+}
+
+.action-compatibility-status.blocked {
+  border-color: rgba(255, 69, 58, 0.5);
+  background: rgba(255, 69, 58, 0.1);
+  color: #ff9f9a;
+}
+
 .jog-chassis-options {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -12796,6 +12884,12 @@ body.light-mode .cmd-result-pre {
   border-color: #3b82f6;
   background: rgba(37, 99, 235, 0.22);
   color: #dbeafe;
+}
+
+.jog-chassis-option.unavailable,
+.jog-chassis-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
 }
 
 .jog-chassis-selector > small {

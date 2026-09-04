@@ -1982,9 +1982,11 @@ const App = {
       const xEl = document.getElementById('robot-pos-x');
       const yEl = document.getElementById('robot-pos-y');
       const yawEl = document.getElementById('robot-pos-yaw');
+      const sourceEl = document.getElementById('robot-pose-source');
       if (xEl) xEl.textContent = '-';
       if (yEl) yEl.textContent = '-';
       if (yawEl) yawEl.textContent = '-';
+      if (sourceEl) sourceEl.textContent = '--';
     }
   },
 

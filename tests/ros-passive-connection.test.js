@@ -133,6 +133,305 @@ describe('ROS passive fleet connections', () => {
     expect(slot.robotModel).toBeUndefined();
   });
 
+  test('live TF keeps updating after a robot_state pose was received', () => {
+    const { manager, slot } = loadRosManager(0);
+    manager.displayPose = jest.fn();
+    manager.requestRender = jest.fn();
+    slot.robotStatePoseReceived = true;
+    slot.pose = { x: 1, y: 2, yaw: 0 };
+
+    manager._updateSlotPoseFromTf(0, {
+      translation: { x: 1.2, y: 2.1 },
+      rotation: { x: 0, y: 0, z: 0, w: 1 }
+    });
+
+    expect(slot.pose).toMatchObject({ x: 1.2, y: 2.1, yaw: 0 });
+    expect(slot.lastTfTime).toBeGreaterThan(0);
+    expect(manager.displayPose).toHaveBeenCalledWith(slot.pose);
+    expect(manager.requestRender).toHaveBeenCalledTimes(1);
+  });
+
+  test('robot_state does not overwrite a fresh TF pose', () => {
+    const { manager, slot } = loadRosManager(0);
+    manager.displayPose = jest.fn();
+    manager.displayWorkState = jest.fn();
+    manager.requestRender = jest.fn();
+    slot.pose = { x: 3, y: 4, yaw: 0.5 };
+    slot.lastTfTime = Date.now();
+
+    manager._handleSlotWorkState(0, {
+      workstate: 1,
+      pose: { x: 1, y: 2, theta: 0 }
+    });
+
+    expect(slot.pose).toEqual({ x: 3, y: 4, yaw: 0.5 });
+    expect(manager.requestRender).not.toHaveBeenCalled();
+    expect(manager.displayWorkState).toHaveBeenCalledWith(1);
+  });
+
+  test('live TF remains primary over robot_state for responsive NAV rendering', () => {
+    const { manager, slot } = loadRosManager(0);
+    manager.displayPose = jest.fn();
+    manager.displayWorkState = jest.fn();
+    manager.requestRender = jest.fn();
+    const now = Date.now();
+    slot.lastTfTime = now;
+    slot.lastRobotStatePoseTime = now - 100;
+
+    manager._handleSlotWorkState(0, {
+      workstate: 0,
+      pose: { x: 1, y: 2, theta: 0.25 }
+    });
+    manager._updateSlotPoseFromTf(0, {
+      translation: { x: 1.03, y: 1.97 },
+      rotation: { x: 0, y: 0, z: 0, w: 1 }
+    });
+
+    expect(slot.pose).toEqual({ x: 1.03, y: 1.97, yaw: 0 });
+    expect(manager.robotPose).toEqual({ x: 1.03, y: 1.97, yaw: 0 });
+    expect(manager.displayPose).toHaveBeenCalledTimes(1);
+  });
+
+  test('stale source flags no longer block odom movement fallback', () => {
+    const { manager, slot } = loadRosManager(0);
+    manager.displayPose = jest.fn();
+    manager.requestRender = jest.fn();
+    const staleAt = Date.now() - manager.AMCL_SOURCE_FRESH_MS - 1;
+    slot.robotStatePoseReceived = true;
+    slot.tfReceived = true;
+    slot.lastRobotStatePoseTime = staleAt;
+    slot.lastTfTime = staleAt;
+    slot.lastAmclTime = staleAt;
+
+    manager._handleSlotOdomPose(0, {
+      pose: {
+        pose: {
+          position: { x: 0.25, y: -0.5 },
+          orientation: { x: 0, y: 0, z: 0, w: 1 }
+        }
+      }
+    });
+
+    expect(slot.pose).toMatchObject({ x: 0.25, y: -0.5, yaw: 0 });
+    expect(slot.lastOdomTime).toBeGreaterThan(staleAt);
+    expect(manager.displayPose).toHaveBeenCalledWith(slot.pose);
+    expect(manager.requestRender).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not mix controller odom with a cached map-to-odom TF', () => {
+    const { manager, slot, elements } = loadRosManager(0);
+    manager.displayPose = jest.fn();
+    manager.requestRender = jest.fn();
+    elements['robot-pose-source'] = makeElement();
+    slot.pose = { x: 10.8, y: 21.7, yaw: 0.1 };
+    slot.poseSource = 'tf';
+    slot.tfMapToOdom = {
+      translation: { x: 10, y: 20, z: 0 },
+      rotation: { x: 0, y: 0, z: 0, w: 1 }
+    };
+    slot.lastTfTime = Date.now() - manager.POSE_SOURCE_FRESH_MS - 1;
+
+    manager._handleSlotOdomPose(0, {
+      header: { stamp: { secs: Math.floor(Date.now() / 1000), nsecs: 0 } },
+      pose: {
+        pose: {
+          position: { x: 1, y: 2, z: 0 },
+          orientation: { x: 0, y: 0, z: 0, w: 1 }
+        }
+      }
+    });
+
+    expect(slot.pose).toEqual({ x: 10.8, y: 21.7, yaw: 0.1 });
+    expect(slot.poseSource).toBe('tf');
+    expect(slot.lastOdomTime).toBeGreaterThan(0);
+    expect(manager.displayPose).not.toHaveBeenCalled();
+    expect(manager.requestRender).not.toHaveBeenCalled();
+  });
+
+  test('keeps direct TF as the single primary live pose source', () => {
+    const { manager, slot } = loadRosManager(0);
+    manager.displayPose = jest.fn();
+    manager.requestRender = jest.fn();
+    slot.pose = { x: 1, y: 2, yaw: 0 };
+    slot.poseSource = 'tf';
+
+    expect(manager._updateSlotPoseFromTf(0, {
+      translation: { x: 1.02, y: 1.98, z: 0 },
+      rotation: { x: 0, y: 0, z: 0, w: 1 }
+    }, 'tf')).toBe(true);
+
+    expect(slot.pose).toEqual({ x: 1.02, y: 1.98, yaw: 0 });
+    expect(slot.poseSource).toBe('tf');
+    expect(manager.requestRender).toHaveBeenCalledTimes(1);
+  });
+
+  test('preserves TF freshness when only the subscription is refreshed', () => {
+    const { manager, slot, context } = loadRosManager(0);
+    const unsubscribe = jest.fn();
+    const ros = {};
+    context.ROSLIB.Topic = class FakeTopic {
+      subscribe() {}
+    };
+    slot.ros = ros;
+    slot.tfCacheRos = ros;
+    slot.tfCacheTarget = `${slot.ip}:9090`;
+    slot.tfTopic = { unsubscribe };
+    slot.tfReceived = true;
+    slot.lastTfTime = Date.now();
+    slot.tfMapToOdom = { translation: { x: 1, y: 2 }, rotation: { w: 1 } };
+    slot.tfOdomToBase = { translation: { x: 3, y: 4 }, rotation: { w: 1 } };
+
+    manager._subscribeSlotTf(0);
+
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+    expect(slot.tfReceived).toBe(true);
+    expect(slot.lastTfTime).toBeGreaterThan(0);
+    expect(slot.tfMapToOdom).toBeDefined();
+    expect(slot.tfOdomToBase).toBeDefined();
+  });
+
+  test('moves unthrottled TF traffic to a dedicated pose WebSocket', () => {
+    const { manager, slot, context, rosInstances } = loadRosManager(0);
+    const topics = [];
+    context.ROSLIB.Topic = class FakeTopic {
+      constructor(options) {
+        this.options = options;
+        topics.push(this);
+      }
+
+      subscribe() {}
+      unsubscribe() {}
+    };
+    slot.ros = { close: jest.fn() };
+    slot.connected = true;
+    slot.rosUrl = 'ws://localhost:3000/ws-proxy?target=192.168.20.51:9090';
+
+    const poseRos = manager._ensureSlotPoseConnection(0);
+    expect(poseRos).toBe(rosInstances[0]);
+    poseRos.emit('connection');
+
+    expect(slot.poseRosConnected).toBe(true);
+    expect(topics).toHaveLength(2);
+    const tfTopic = topics.find(topic => topic.options.name === '/tf');
+    const amclTopic = topics.find(topic => topic.options.name === '/R_001/amcl_pose');
+    expect(tfTopic.options.ros).toBe(poseRos);
+    expect(tfTopic.options.throttle_rate).toBe(0);
+    expect(tfTopic.options.queue_length).toBe(1);
+    expect(amclTopic.options.ros).toBe(poseRos);
+    expect(amclTopic.options.queue_length).toBe(1);
+  });
+
+  test('shows matching AMCL confirmation and accepts the first requested TF jump', () => {
+    const { manager, slot } = loadRosManager(0);
+    manager._recordSlamDimension = jest.fn();
+    manager.displayPose = jest.fn();
+    manager.requestRender = jest.fn();
+    const now = Date.now();
+    slot.pose = { x: 0, y: 0, yaw: 0 };
+    slot.poseSource = 'tf';
+    slot.lastTfTime = now;
+    slot.pendingInitialPose = { x: 10, y: 20, yaw: 0.5, at: now };
+
+    manager._handleSlotPose(0, {
+      header: { stamp: { secs: Math.floor(now / 1000), nsecs: 0 } },
+      pose: {
+        pose: {
+          position: { x: 10, y: 20, z: 0 },
+          orientation: { x: 0, y: 0, z: Math.sin(0.25), w: Math.cos(0.25) }
+        }
+      }
+    });
+
+    expect(slot.poseSource).toBe('amcl-confirmed');
+    expect(slot.pose).toMatchObject({ x: 10, y: 20, yaw: 0.5 });
+    expect(manager.robotPose).toMatchObject({ x: 10, y: 20, yaw: 0.5 });
+    expect(slot.pendingInitialPose).toBeDefined();
+
+    expect(manager._updateSlotPoseFromTf(0, {
+      translation: { x: 0.1, y: 0.1, z: 0 },
+      rotation: { x: 0, y: 0, z: 0, w: 1 }
+    })).toBe(false);
+    expect(slot.poseSource).toBe('amcl-confirmed');
+
+    expect(manager._updateSlotPoseFromTf(0, {
+      translation: { x: 10.1, y: 20.1, z: 0 },
+      rotation: { x: 0, y: 0, z: Math.sin(0.25), w: Math.cos(0.25) }
+    })).toBe(true);
+    expect(slot.poseSource).toBe('tf');
+    expect(slot.pendingInitialPose).toBeNull();
+    expect(slot.pose).toMatchObject({ x: 10.1, y: 20.1, yaw: 0.5 });
+  });
+
+  test('tracks the requested initial pose until localization confirms it', () => {
+    const { manager, slot, context, App } = loadRosManager(0);
+    const publish = jest.fn();
+    slot.ros = {};
+    manager.getRos = jest.fn(() => slot.ros);
+    manager.getRobotId = jest.fn(() => slot.robotId);
+    App.addEvent = jest.fn();
+    context.ROSLIB.Topic = class FakeTopic {
+      publish(message) { publish(message); }
+    };
+    context.ROSLIB.Message = class FakeMessage {
+      constructor(message) { Object.assign(this, message); }
+    };
+
+    manager._publishInitialPoseValues(3.5, -1.25, 0.75);
+
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(slot.pendingInitialPose).toMatchObject({ x: 3.5, y: -1.25, yaw: 0.75 });
+    expect(slot.pendingInitialPose.at).toBeGreaterThan(0);
+  });
+
+  test('rejects a stale latched AMCL pose after reconnect', () => {
+    const { manager, slot } = loadRosManager(0);
+    manager._recordSlamDimension = jest.fn();
+    manager.displayPose = jest.fn();
+    manager.requestRender = jest.fn();
+    slot.pose = { x: 4, y: 5, yaw: 0.2 };
+    const staleSeconds = Math.floor(
+      (Date.now() - manager.POSE_MESSAGE_MAX_AGE_MS - 1000) / 1000
+    );
+
+    manager._handleSlotPose(0, {
+      header: { stamp: { secs: staleSeconds, nsecs: 0 } },
+      pose: {
+        pose: {
+          position: { x: -20, y: 30 },
+          orientation: { x: 0, y: 0, z: 0, w: 1 }
+        }
+      }
+    });
+
+    expect(slot.pose).toEqual({ x: 4, y: 5, yaw: 0.2 });
+    expect(slot.lastRejectedPoseSource).toBe('amcl');
+    expect(manager.requestRender).not.toHaveBeenCalled();
+  });
+
+  test('ignores TF frames that belong to a different RID', () => {
+    const { manager, slot } = loadRosManager(0);
+    manager._updateSlotPoseFromTf = jest.fn();
+
+    manager._handleSlotTf(0, {
+      transforms: [
+        {
+          header: { frame_id: 'map' },
+          child_frame_id: 'R_999/odom',
+          transform: { translation: {}, rotation: {} }
+        },
+        {
+          header: { frame_id: 'R_999/odom' },
+          child_frame_id: 'R_999/base_footprint',
+          transform: { translation: {}, rotation: {} }
+        }
+      ]
+    });
+
+    expect(slot.tfMapToOdom).toBeUndefined();
+    expect(slot.tfOdomToBase).toBeUndefined();
+    expect(manager._updateSlotPoseFromTf).not.toHaveBeenCalled();
+  });
+
   test('reads ROBOT_MODEL through a valid short-lived SSH session', async () => {
     const { manager, context, slot } = loadRosManager(0);
     const responses = {
@@ -228,6 +527,101 @@ describe('ROS passive fleet connections', () => {
     );
   });
 
+  test('new SLAM clears the NAV map and rejects its stale latched replay', () => {
+    const { manager, elements } = loadRosManager(0);
+    const clearRect = jest.fn();
+    elements['map-canvas'] = {
+      width: 640,
+      height: 480,
+      getContext: jest.fn(() => ({ clearRect }))
+    };
+    const map = data => ({
+      info: {
+        width: 2,
+        height: 2,
+        resolution: 0.05,
+        origin: { position: { x: 0, y: 0 } }
+      },
+      data
+    });
+    const navMap = map([0, 0, 100, -1]);
+    const mappingMap = map([-1, 0, -1, -1]);
+    manager.lastMapMsg = navMap;
+    manager._preMapModeBackup = {
+      info: navMap.info,
+      data: new Int8Array(navMap.data)
+    };
+    manager._slamRunning = true;
+    manager._subscribeFreshMappingMaps = jest.fn();
+    manager.requestRender = jest.fn();
+
+    manager._prepareFreshSlamMap();
+
+    expect(manager.lastMapMsg).toBe(null);
+    expect(clearRect).toHaveBeenCalledWith(0, 0, 640, 480);
+    expect(manager._subscribeFreshMappingMaps).toHaveBeenCalledTimes(1);
+
+    manager.renderMap(navMap);
+    expect(manager.lastMapMsg).toBe(null);
+    expect(manager.requestRender).not.toHaveBeenCalled();
+
+    manager.renderMap(mappingMap);
+    expect(manager.lastMapMsg).toBe(mappingMap);
+    expect(manager.requestRender).toHaveBeenCalledTimes(1);
+  });
+
+  test('keeps the published RID map primary and treats slam_toolbox map as fallback', () => {
+    const { manager, slot } = loadRosManager(0);
+    slot.ros = {};
+    manager._compatibilityForSlot = jest.fn(() => ({
+      map: {
+        topic: '/R_001/map',
+        mappingTopic: '/R_001/map',
+        mappingTopicCandidates: ['/R_001/map', '/R_001/slam_toolbox/map']
+      }
+    }));
+    manager._subscribeMapForSlot = jest.fn();
+    manager._subscribeSlotTopic = jest.fn();
+
+    manager._subscribeFreshMappingMaps();
+
+    expect(manager._subscribeMapForSlot).toHaveBeenCalledWith(0, '/R_001/map');
+    expect(manager._subscribeSlotTopic).toHaveBeenCalledWith(
+      0,
+      'mapping-map-0',
+      '/R_001/slam_toolbox/map',
+      'nav_msgs/OccupancyGrid',
+      expect.any(Function),
+      expect.objectContaining({ queue_length: 1 })
+    );
+  });
+
+  test('SLAM start prepares a fresh map only after the mode command succeeds', () => {
+    const { manager, slot } = loadRosManager(0);
+    const navMap = {
+      info: { width: 1, height: 1, resolution: 0.05, origin: { position: { x: 0, y: 0 } } },
+      data: [0]
+    };
+    manager.lastMapMsg = navMap;
+    manager._publishRoutineMode = jest.fn((_mode, _status, _message, callback) => callback(true));
+    manager._beginMappingSaveSession = jest.fn();
+    manager._updateSlamButtons = jest.fn();
+    manager._updateSlamDimensionStatus = jest.fn();
+    manager._syncLoopClosureLogSubscription = jest.fn();
+    manager._subscribeSlamPose = jest.fn();
+    manager._enableMappingPathLayer = jest.fn();
+    manager._prepareFreshSlamMap = jest.fn();
+    manager._startSlamTrail = jest.fn();
+
+    manager._startSlam();
+
+    expect(manager._slamRunning).toBe(true);
+    expect(slot.routineMode).toBe('SLAM');
+    expect(Array.from(manager._preMapModeBackup.data)).toEqual(navMap.data);
+    expect(manager._prepareFreshSlamMap).toHaveBeenCalledTimes(1);
+    expect(manager._startSlamTrail).toHaveBeenCalledWith(false);
+  });
+
   test('save confirmation stops only after save succeeds and No skips saving', () => {
     const { manager, elements } = loadRosManager(0);
     [
@@ -291,13 +685,15 @@ describe('ROS passive fleet connections', () => {
     expect(elements['btn-mapping-save-yes'].textContent).toBe('맵 저장');
   });
 
-  test('backs up map components and saves pose graph plus canonical map', async () => {
+  test('uses the canonical SaveMap service as one complete transaction', async () => {
     const { manager, slot, elements, context } = loadRosManager(0);
     elements['save-map-status'] = makeElement();
     slot.ros = { connected: true };
     slot.compatibilityProfile = { discovered: true };
     const profile = {
+      discovered: true,
       map: {
+        verified: true,
         baseName: 'map',
         directory: '/home/syscon/ROS_DB/map',
         poseGraphSaveService: '/R_001/slam_toolbox/serialize_map',
@@ -309,33 +705,83 @@ describe('ROS passive fleet connections', () => {
     };
     context.RobotCompatibility = {
       get: jest.fn(() => profile),
+      requireCapability: jest.fn(() => profile.map),
       mapPoseGraphSaveRequest: jest.fn(() => ({
         filename: '/home/syscon/ROS_DB/map/map'
       })),
       mapSaveRequest: jest.fn(() => ({ save_in_db: true }))
     };
-    manager._backupCanonicalMap = jest.fn().mockResolvedValue('/home/syscon/ROS_DB/map_backup');
+    manager._backupCanonicalMap = jest.fn().mockResolvedValue({
+      backupDirectory: '/home/syscon/ROS_DB/map_backup',
+      markerPath: '/tmp/easyloop_map_save.marker'
+    });
     manager._callRosServicePromise = jest.fn().mockResolvedValue({ success: true });
+    manager._waitForCanonicalMapSet = jest.fn().mockResolvedValue();
     const onSuccess = jest.fn();
 
     await manager._saveMap({ onSuccess });
 
     expect(manager._backupCanonicalMap).toHaveBeenCalledWith(profile);
-    expect(manager._callRosServicePromise).toHaveBeenNthCalledWith(
-      1,
-      slot.ros,
-      '/R_001/slam_toolbox/serialize_map',
-      'slam_toolbox_msgs/SerializePoseGraph',
-      { filename: '/home/syscon/ROS_DB/map/map' }
-    );
-    expect(manager._callRosServicePromise).toHaveBeenNthCalledWith(
-      2,
+    expect(manager._callRosServicePromise).toHaveBeenCalledTimes(1);
+    expect(manager._callRosServicePromise).toHaveBeenCalledWith(
       slot.ros,
       '/R_001/save_map',
       'syscon_msgs/SaveMap',
       { save_in_db: true }
     );
+    expect(context.RobotCompatibility.mapPoseGraphSaveRequest).not.toHaveBeenCalled();
+    expect(manager._waitForCanonicalMapSet).toHaveBeenCalledWith(
+      profile,
+      '/tmp/easyloop_map_save.marker'
+    );
     expect(manager._mappingMapCommitted).toBe(true);
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+  });
+
+  test('refreshes Mapping-time save services and continues when SSH backup is unavailable', async () => {
+    const { manager, slot, elements, context, App } = loadRosManager(0);
+    elements['save-map-status'] = makeElement();
+    slot.ros = { connected: true };
+    const cachedProfile = {
+      discovered: true,
+      map: { verified: true, saveService: null, saveType: null }
+    };
+    const refreshedProfile = {
+      discovered: true,
+      map: {
+        verified: true,
+        directory: '/home/syscon/ROS_DB/map',
+        saveService: '/R_001/save_map',
+        saveType: 'syscon_msgs/SaveMap'
+      }
+    };
+    slot.compatibilityProfile = cachedProfile;
+    context.RobotCompatibility = {
+      get: jest.fn(() => slot.compatibilityProfile),
+      discover: jest.fn().mockResolvedValue(refreshedProfile),
+      requireCapability: jest.fn(profile => profile.map),
+      mapSaveRequest: jest.fn(() => ({ save_in_db: true }))
+    };
+    manager._backupCanonicalMap = jest.fn().mockRejectedValue(new Error('SSH unavailable'));
+    manager._callRosServicePromise = jest.fn().mockResolvedValue({ success: true });
+    manager._waitForCanonicalMapSet = jest.fn();
+    manager._waitForMapSaverSettle = jest.fn().mockResolvedValue();
+    const onSuccess = jest.fn();
+
+    await manager._saveMap({ onSuccess });
+
+    expect(context.RobotCompatibility.discover).toHaveBeenCalledWith(slot, { force: true });
+    expect(manager._callRosServicePromise).toHaveBeenCalledWith(
+      slot.ros,
+      '/R_001/save_map',
+      'syscon_msgs/SaveMap',
+      { save_in_db: true }
+    );
+    expect(App.toast).toHaveBeenCalledWith(
+      expect.stringContaining('기존 맵 백업 생략'),
+      'warning'
+    );
+    expect(manager._waitForMapSaverSettle).toHaveBeenCalledTimes(1);
     expect(onSuccess).toHaveBeenCalledTimes(1);
   });
 
@@ -713,6 +1159,56 @@ describe('ROS passive fleet connections', () => {
       '화면 정리 완료 · 실행 중인 Task 표시는 유지됩니다.',
       'info'
     );
+  });
+
+  test('map edit Move/Pan disables robot follow and keeps the dragged pan offset', () => {
+    const { manager, elements, window, context } = loadRosManager(0);
+    const canvas = makeElement();
+    const canvasListeners = {};
+    canvas.addEventListener = jest.fn((event, handler) => {
+      canvasListeners[event] = handler;
+    });
+    canvas.getBoundingClientRect = jest.fn(() => ({
+      left: 10,
+      top: 20,
+      width: 600,
+      height: 400
+    }));
+    const editBtn = makeElement();
+    editBtn.addEventListener = jest.fn();
+    const followBtn = makeElement();
+    followBtn.classList.add('active');
+    elements['map-canvas'] = canvas;
+    elements['btn-map-edit-toggle'] = editBtn;
+    elements['btn-follow-robot'] = followBtn;
+    context.document.querySelectorAll.mockReturnValue([]);
+
+    manager.requestRender = jest.fn();
+    manager._mapEditMode = true;
+    manager._mapEditTool = 'move';
+    manager._followRobot = true;
+    manager.mapPanX = 4;
+    manager.mapPanY = -2;
+    manager.setupMapEditControls();
+
+    const downEvent = {
+      button: 0,
+      clientX: 100,
+      clientY: 120,
+      shiftKey: false,
+      preventDefault: jest.fn(),
+      stopPropagation: jest.fn()
+    };
+    canvasListeners.mousedown(downEvent);
+    window.listeners.mousemove[0]({ clientX: 130, clientY: 160, shiftKey: false });
+
+    expect(manager._followRobot).toBe(false);
+    expect(followBtn.classList.contains('active')).toBe(false);
+    expect(manager._mapEditPanning).toBe(true);
+    expect(manager.mapPanX).toBe(34);
+    expect(manager.mapPanY).toBe(38);
+    expect(canvas.style.cursor).toBe('grabbing');
+    expect(manager.requestRender).toHaveBeenCalled();
   });
 
   test('switching active robots removes all data subscriptions from the previous robot', () => {
