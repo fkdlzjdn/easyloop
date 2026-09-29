@@ -69,6 +69,7 @@ function spxFixture({ rid = 'R_009', rosMajor = 1, includeLegacy = false } = {})
     `${ns}/spx/task/feedback`, `${ns}/spx/task/result`, `${ns}/spx/operation_mode`,
     `${ns}/map`, `${ns}/cmd_vel`
   ];
+  if (rosMajor === 2) topics.push(`${ns}/cmd_vel_selected`, `${ns}/cmd_vel_teleop`);
   const serviceTypes = endpointMaps([
     [`${ns}/spx/task/goal`, suffix.goal],
     [`${ns}/spx/task/pause`, suffix.pause],
@@ -82,7 +83,11 @@ function spxFixture({ rid = 'R_009', rosMajor = 1, includeLegacy = false } = {})
     [`${ns}/spx/task/result`, suffix.result],
     [`${ns}/spx/operation_mode`, suffix.string],
     [`${ns}/map`, suffix.map],
-    [`${ns}/cmd_vel`, suffix.twist]
+    [`${ns}/cmd_vel`, suffix.twist],
+    ...(rosMajor === 2 ? [
+      [`${ns}/cmd_vel_selected`, suffix.twist],
+      [`${ns}/cmd_vel_teleop`, suffix.twist]
+    ] : [])
   ]);
   if (includeLegacy) {
     services.push(`${ns}/TARU/goal`, `${ns}/TARU/pause`, `${ns}/TARU/resume`, `${ns}/TARU/cancel`);

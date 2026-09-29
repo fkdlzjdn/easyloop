@@ -2162,6 +2162,7 @@ free -h"></textarea>
               <th>IP 주소</th>
               <th>로봇 ID</th>
               <th>SSH</th>
+              <th>ROS</th>
               <th>Tunnel</th>
               <th>상태</th>
               <th>작업</th>
@@ -2183,6 +2184,11 @@ free -h"></textarea>
           <input type="text" id="rm-new-ip" placeholder="IP Address (e.g. 192.168.20.51)">
           <input type="text" id="rm-new-id" placeholder="Robot # (e.g. 13)">
           <input type="number" id="rm-new-ssh-port" placeholder="SSH Port (default: 22)" min="1" max="65535" class="rm-port-input">
+          <select id="rm-new-ros-mode" title="ROS 연결 모드">
+            <option value="auto">ROS 자동 감지</option>
+            <option value="ros1">ROS1 수동</option>
+            <option value="ros2">ROS2 수동</option>
+          </select>
           <label class="rm-tunnel-label" title="Connect via SSH tunnel to 127.0.0.[#]:9090">
             <input type="checkbox" id="rm-new-tunnel-mode"> Port Forward
           </label>

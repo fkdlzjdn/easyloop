@@ -222,7 +222,9 @@ const RosManager = {
     const wsPort = slot.wsPort || 9090;
     // Use server-side WS proxy so remote users can reach the robot
     const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const url = `${wsProto}://${location.host}/ws-proxy?target=${ip}:${wsPort}`;
+    const url = slot.ros2SessionId
+      ? `${wsProto}://${location.host}/ws-ros2?session=${encodeURIComponent(slot.ros2SessionId)}`
+      : `${wsProto}://${location.host}/ws-proxy?target=${ip}:${wsPort}`;
     const rosConn = new ROSLIB.Ros({ url });
     slot.ros = rosConn;
     slot.rosUrl = url;
@@ -1223,10 +1225,11 @@ const RosManager = {
   },
 
   _subscribeLocalCostmap(index, rid) {
+    const ros2 = Boolean(App.robotSlots[index]?.ros2SessionId);
     this._subscribeSlotTopic(
       index,
       'local-costmap',
-      `/${rid}/move_base/local_costmap/costmap`,
+      ros2 ? `/${rid}/local_costmap/costmap` : `/${rid}/move_base/local_costmap/costmap`,
       'nav_msgs/OccupancyGrid',
       (msg) => {
         if (index !== App.activeSlotIndex) return;
@@ -1317,12 +1320,20 @@ const RosManager = {
     }
     const slot = App.robotSlots[index];
     if (!slot) return;
-    const data = msg.data;
+    const ros2Battery = msg && Object.prototype.hasOwnProperty.call(msg, 'percentage');
+    const percentage = Number(msg?.percentage);
+    const data = ros2Battery
+      ? [Number(msg.voltage) || 0, Number(msg.current) || 0,
+        Number.isFinite(percentage) && percentage >= 0 && percentage <= 1
+          ? percentage * 100 : 0]
+      : (Array.isArray(msg?.data) ? msg.data : []);
 
     const soc = data.length > 2 ? data[2] : 0;
     const current = data.length > 1 ? data[1] : 0;
     const voltage = data.length > 0 ? data[0] : 0;
-    const isCharging = current > this._bmsChargingCurrentThreshold;
+    const isCharging = ros2Battery
+      ? Number(msg.power_supply_status) === 1 || current > this._bmsChargingCurrentThreshold
+      : current > this._bmsChargingCurrentThreshold;
 
     slot.bms = { voltage, current, soc, charging: isCharging };
 
@@ -1339,7 +1350,7 @@ const RosManager = {
 
     // If this is the active slot, update UI
     if (index === App.activeSlotIndex) {
-      this.handleBmsData(msg);
+      this.handleBmsData(ros2Battery ? { data } : msg);
       if (typeof JogControl !== 'undefined' && JogControl.updateChargeStatus) {
         JogControl.updateChargeStatus(slot);
       }
@@ -6937,7 +6948,11 @@ const RosManager = {
       // Only reconnect if still disconnected
       const slot = App.robotSlots[index];
       if (slot && !slot.connected && !slot.ros) {
-        this.connectSlot(index, ip, robotId);
+        if (slot.ros2SessionId || slot.rosMode === 'ros2') {
+          App.connectSlot(index);
+        } else {
+          this.connectSlot(index, ip, robotId);
+        }
       }
     }, delay);
 

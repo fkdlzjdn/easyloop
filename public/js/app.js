@@ -63,6 +63,7 @@ const App = {
   activeSlotIndex: -1,
   SLOTS_STORAGE_KEY: 'amrRobotSlots',
   MANUAL_ROBOTS_STORAGE_KEY: 'easyloopManualRobots',
+  ROS_MODE_STORAGE_KEY: 'easyloopRobotRosModes',
   LAST_ACTIVE_ROBOT_KEY: 'easyloopLastActiveRobot',
   _loginAutoScanStarted: false,
   _isUnloading: false, // Flag to track page unload
@@ -1035,6 +1036,7 @@ const App = {
       const sshPortInput = document.getElementById('rm-new-ssh-port');
       const tunnelModeInput = document.getElementById('rm-new-tunnel-mode');
       const sshPasswordInput = document.getElementById('rm-new-ssh-password');
+      const rosModeInput = document.getElementById('rm-new-ros-mode');
       const ip = ipInput.value.trim();
       const rawId = idInput.value.trim();
       const robotId = this.formatRobotId(rawId);
@@ -1055,13 +1057,15 @@ const App = {
       const robotNumber = parseInt(rawId) || parseInt(robotId.replace(/\D/g, '')) || 1;
 
       this.addRobotSlot(ip, robotId, sshPort, tunnelMode, sshPassword, robotNumber, null, {
-        manualAdded: true
+        manualAdded: true,
+        rosMode: rosModeInput?.value || 'auto'
       });
       ipInput.value = '';
       idInput.value = '';
       if (sshPortInput) sshPortInput.value = '';
       if (tunnelModeInput) tunnelModeInput.checked = false;
       if (sshPasswordInput) sshPasswordInput.value = '';
+      if (rosModeInput) rosModeInput.value = 'auto';
       this.renderRobotManagerList();
       this.renderActiveRobotSelector();
       this.renderMonitoringCards();
@@ -1080,6 +1084,8 @@ const App = {
         if (!from || !to) return;
         to.sshPort = from.sshPort;
         to.tunnelMode = from.tunnelMode;
+        to.rosMode = from.rosMode || 'auto';
+        this._saveRobotRosMode(to.ip, to.robotId, to.rosMode);
         to.sshPassword = from.sshPassword;
         to.robotNumber = from.robotNumber;
         this.saveRobotSlots();
@@ -1724,11 +1730,15 @@ const App = {
 
   addRobotSlot(ip, robotId, sshPort, tunnelMode, sshPassword, robotNumber, _template = null, options = {}) {
     const manualAdded = options.manualAdded === true || options.source === 'manual';
+    const savedRosMode = this._savedRobotRosMode(ip, robotId);
     this.robotSlots.push({
       ip: ip,
       robotId: robotId,
       sshPort: sshPort || 22,
       wsPort: Number(options.wsPort) || 9090,
+      rosMode: ['auto', 'ros1', 'ros2'].includes(options.rosMode)
+        ? options.rosMode : savedRosMode,
+      ros2SessionId: null,
       tunnelMode: tunnelMode || false,
       sshPassword: sshPassword || '',
       robotNumber: robotNumber || 1,
@@ -1773,8 +1783,10 @@ const App = {
     if (this.robotSlots[index].connected) {
       RosManager.disconnectSlot(index);
     }
+    this._closeRos2Session(this.robotSlots[index]);
 
     const removed = this.robotSlots.splice(index, 1)[0];
+    this._saveRobotRosMode(removed.ip, removed.robotId, 'auto');
 
     // Adjust active index
     if (this.robotSlots.length === 0) {
@@ -1802,6 +1814,45 @@ const App = {
   async connectSlot(index) {
     if (index < 0 || index >= this.robotSlots.length) return;
     const slot = this.robotSlots[index];
+
+    if (slot.ros2SessionId) {
+      await this._closeRos2Session(slot);
+    }
+    if (slot.rosMode !== 'ros1' && !slot.virtualTestRobot) {
+      try {
+        const response = await fetchWithTimeout('/api/ros-runtime/prepare', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            host: slot.ip,
+            port: slot.sshPort || 22,
+            username: 'syscon',
+            password: slot.sshPassword || '',
+            mode: slot.rosMode === 'ros2' ? 'ros2' : 'auto'
+          })
+        }, 18000);
+        const result = await response.json();
+        if (!result.success) throw new Error(result.message || 'ROS runtime 감지 실패');
+        if (slot.rosMode === 'ros2' && result.rosMajor !== 2) {
+          await this._closeRos2Session({ ros2SessionId: result.sessionId });
+          throw new Error(`ROS2 수동 선택과 감지 결과가 다릅니다: ROS${result.rosMajor}`);
+        }
+        if (result.rosMajor === 2) {
+          slot.ros2SessionId = result.sessionId;
+          slot.rosDetected = `ROS2 ${result.distro || ''}`.trim();
+          RosManager.connectSlot(index, slot.ip, slot.robotId);
+          return;
+        }
+        await this._closeRos2Session({ ros2SessionId: result.sessionId });
+        slot.rosDetected = `ROS1 ${result.distro || ''}`.trim();
+      } catch (error) {
+        if (slot.rosMode === 'ros2') {
+          this.toast(`ROS2 연결 실패: ${error.message}`, 'error');
+          return;
+        }
+        slot.rosDetected = '자동 감지 실패 · ROS Bridge 확인';
+      }
+    }
 
     // If tunnel mode is enabled, start tunnel first
     if (slot.tunnelMode) {
@@ -1848,6 +1899,7 @@ const App = {
 
     // Disconnect ROS first
     RosManager.disconnectSlot(index);
+    await this._closeRos2Session(slot);
 
     // If tunnel mode is enabled, stop tunnel
     if (slot.tunnelMode && slot.tunnelActive) {
@@ -1865,6 +1917,49 @@ const App = {
         console.error('Failed to stop tunnel:', err);
       }
     }
+  },
+
+  async _closeRos2Session(slot) {
+    const sessionId = slot?.ros2SessionId;
+    if (!sessionId) return;
+    slot.ros2SessionId = null;
+    try {
+      await fetchWithTimeout('/api/ros-runtime/close', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId })
+      }, 5000);
+    } catch (error) { /* server TTL also closes abandoned sessions */ }
+  },
+
+  async setRobotRosMode(index, mode) {
+    if (!['auto', 'ros1', 'ros2'].includes(mode)) return;
+    const slot = this.robotSlots[index];
+    if (!slot) return;
+    if (slot.connected || slot.ros) await this.disconnectSlot(index);
+    slot.rosMode = mode;
+    slot.rosDetected = '';
+    this._saveRobotRosMode(slot.ip, slot.robotId, mode);
+    this.saveRobotSlots();
+    this.renderRobotManagerList();
+  },
+
+  _savedRobotRosMode(ip, robotId) {
+    try {
+      const modes = JSON.parse(localStorage.getItem(this.ROS_MODE_STORAGE_KEY) || '{}');
+      const mode = modes[`${robotId}@${ip}`];
+      return ['auto', 'ros1', 'ros2'].includes(mode) ? mode : 'auto';
+    } catch (error) { return 'auto'; }
+  },
+
+  _saveRobotRosMode(ip, robotId, mode) {
+    try {
+      const modes = JSON.parse(localStorage.getItem(this.ROS_MODE_STORAGE_KEY) || '{}');
+      const key = `${robotId}@${ip}`;
+      if (mode === 'auto') delete modes[key];
+      else modes[key] = mode;
+      _safeSetItem(this.ROS_MODE_STORAGE_KEY, JSON.stringify(modes));
+    } catch (error) { /* browser storage unavailable */ }
   },
 
   switchActiveRobot(index) {
@@ -2072,7 +2167,7 @@ const App = {
     tbody.innerHTML = '';
 
     if (this.robotSlots.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#666;">현재 검색된 로봇이 없습니다.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#666;">현재 검색된 로봇이 없습니다.</td></tr>';
       return;
     }
 
@@ -2106,6 +2201,11 @@ const App = {
           ? ' <span class="manual-robot-badge" title="브라우저에 저장된 수동 등록 로봇">수동 저장</span>'
           : ''}</td>
         <td>${sshPortDisplay}</td>
+        <td><select aria-label="${_escapeHtml(slot.robotId)} ROS 모드" onchange="App.setRobotRosMode(${index}, this.value)">
+          <option value="auto" ${slot.rosMode === 'auto' ? 'selected' : ''}>자동</option>
+          <option value="ros1" ${slot.rosMode === 'ros1' ? 'selected' : ''}>ROS1</option>
+          <option value="ros2" ${slot.rosMode === 'ros2' ? 'selected' : ''}>ROS2</option>
+        </select><small>${_escapeHtml(slot.rosDetected || '')}</small></td>
         <td>${tunnelDisplay}</td>
         <td><span class="rm-status-dot ${connClass}">${connDot}</span>${connText}</td>
         <td>
@@ -2226,6 +2326,7 @@ const App = {
         robotId: slot.robotId,
         sshPort: slot.sshPort || 22,
         tunnelMode: Boolean(slot.tunnelMode),
+        rosMode: slot.rosMode || 'auto',
         sshPassword: _obfuscatePassword(slot.sshPassword || ''),
         robotNumber: slot.robotNumber || this._robotNumberFromIdentity(slot)
       }));
@@ -2272,7 +2373,8 @@ const App = {
           activateFirst: false,
           deferRender: true,
           silent: true,
-          skipSave: true
+          skipSave: true,
+          rosMode: config.rosMode || 'auto'
         }
       );
       restored += 1;

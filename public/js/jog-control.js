@@ -542,9 +542,8 @@ const JogControl = {
     if (!slot?.connected || !slot.ip || !topic || !messageType
         || typeof location === 'undefined') return null;
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const target = encodeURIComponent(`${slot.ip}:${slot.wsPort || 9090}`);
     return {
-      url: `${protocol}//${location.host}/ws-proxy?target=${target}`,
+      url: slot.rosUrl || `${protocol}//${location.host}/ws-proxy?target=${encodeURIComponent(`${slot.ip}:${slot.wsPort || 9090}`)}`,
       topic,
       messageType
     };

@@ -4,6 +4,7 @@
 const RobotCompatibility = {
   DISCOVERY_TIMEOUT_MS: 2500,
   TUNNEL_DISCOVERY_TIMEOUT_MS: 6000,
+  ROS2_DISCOVERY_TIMEOUT_MS: 10000,
   PROFILE_SCHEMA_VERSION: 3,
   STL_ULSAN_MODELS: new Set(['stl1000w', 'stl1500w']),
 
@@ -60,6 +61,7 @@ const RobotCompatibility = {
   },
 
   _discoveryTimeout(slot) {
+    if (slot?.ros2SessionId) return this.ROS2_DISCOVERY_TIMEOUT_MS;
     return slot?.tunnelMode
       ? this.TUNNEL_DISCOVERY_TIMEOUT_MS
       : this.DISCOVERY_TIMEOUT_MS;
@@ -186,7 +188,7 @@ const RobotCompatibility = {
       controlReady: false,
       reason,
       transport: {
-        kind: 'rosbridge',
+        kind: slot.ros2SessionId ? 'ros2_ssh' : 'rosbridge',
         available: false,
         rosMajor: null,
         protocol: null,
@@ -281,6 +283,7 @@ const RobotCompatibility = {
       || name.startsWith(`${ns}/Turntable/`)
       || name === `${ns}/save_map`
       || name === `${ns}/change_map`
+      || name === `${ns}/map_server/load_map`
       || name === `${ns}/amcl/change_map`
       || name === `${ns}/static_map`
       || name === `${ns}/slam_toolbox/serialize_map`
@@ -309,9 +312,15 @@ const RobotCompatibility = {
       || name === `${ns}/slam_toolbox/map`
       || name === '/map'
       || name === `${ns}/cmd_vel`
+      || name === `${ns}/cmd_vel_teleop`
+      || name === `${ns}/cmd_vel_selected`
       || name === `${ns}/Conv/cmd`
       || name === `${ns}/bms`
+      || name === `${ns}/battery_state`
       || name === `${ns}/robot_state`
+      || name === `${ns}/io/state_monitor/mode`
+      || name === `${ns}/io/state_monitor/sto`
+      || name === `${ns}/io/state_monitor/brake`
       || name === `${ns}/motor_status`
       || name === `${ns}/odom`
       || name === `${ns}/io/select`
@@ -660,6 +669,15 @@ const RobotCompatibility = {
 
     const typeValues = [...Object.values(serviceTypes), ...Object.values(topicTypes)];
     const hasRos2Type = typeValues.some(type => /\/(srv|msg)\//.test(type));
+    const requestedMode = slot.rosMode || 'auto';
+    if ((requestedMode === 'ros1' && hasRos2Type)
+        || (requestedMode === 'ros2' && !hasRos2Type)) {
+      const blocked = this._defaultProfile(slot,
+        `${requestedMode.toUpperCase()} 수동 선택과 실제 ROS graph type이 일치하지 않습니다.`);
+      blocked.discovered = true;
+      blocked.evidence = { services, topics, serviceTypes, topicTypes };
+      return blocked;
+    }
     profile.transport.rosMajor = hasRos2Type ? 2 : 1;
     profile.transport.protocol = hasRos2Type ? 'ros2_spx' : 'ros1';
     profile.transport.reason = '';
@@ -754,11 +772,13 @@ const RobotCompatibility = {
       ['syscon_msgs/String_srv', 'syscon_msgs/SaveMap', 'spx_msgs/SaveMap', 'spx_mapping_msgs/srv/SaveMap'],
       `${ns}/save_map 미발견`
     );
-    const reloadName = hasService(`${ns}/change_map`) ? `${ns}/change_map` : null;
+    const reloadName = hasService(`${ns}/change_map`)
+      ? `${ns}/change_map`
+      : (hasService(`${ns}/map_server/load_map`) ? `${ns}/map_server/load_map` : null);
     const reload = this._verifiedEndpoint(
       reloadName,
       serviceTypes[reloadName],
-      ['map_server/LoadMap', 'syscon_msgs/ChangeMap', 'spx_mapping_msgs/srv/LoadMap'],
+      ['map_server/LoadMap', 'nav2_msgs/srv/LoadMap', 'syscon_msgs/ChangeMap', 'spx_mapping_msgs/srv/LoadMap'],
       `${ns}/change_map 미발견`
     );
     const amclName = hasService(`${ns}/amcl/change_map`) ? `${ns}/amcl/change_map` : null;
@@ -780,7 +800,7 @@ const RobotCompatibility = {
     profile.map = {
       ...profile.map,
       verified: mapTopic.verified || save.verified || reload.verified,
-      protocol: save.type === 'spx_mapping_msgs/srv/SaveMap'
+      protocol: hasRos2Type
         ? 'ros2_spx'
         : (save.type === 'spx_msgs/SaveMap' ? 'ros1_spx' : (mapTopic.verified ? 'ros1_legacy' : null)),
       reason: mapTopic.reason || save.reason,
@@ -887,10 +907,19 @@ const RobotCompatibility = {
       };
     }
 
-    const driveName = hasTopic(`${ns}/cmd_vel`) ? `${ns}/cmd_vel` : null;
+    // ROS2 teleoperation must enter twist_mux and cmd_safety_gate. Publishing
+    // directly to cmd_vel would bypass the gate on R_006.
+    const ros2TeleopReady = hasRos2Type
+      && hasTopic(`${ns}/cmd_vel_teleop`)
+      && hasTopic(`${ns}/cmd_vel_selected`)
+      && hasTopic(`${ns}/cmd_vel`);
+    const driveName = hasRos2Type
+      ? (ros2TeleopReady ? `${ns}/cmd_vel_teleop` : null)
+      : (hasTopic(`${ns}/cmd_vel`) ? `${ns}/cmd_vel` : null);
     const drive = this._verifiedEndpoint(
       driveName, topicTypes[driveName],
-      ['geometry_msgs/Twist', 'geometry_msgs/msg/Twist'], `${ns}/cmd_vel 미발견`
+      ['geometry_msgs/Twist', 'geometry_msgs/msg/Twist'],
+      hasRos2Type ? `${ns}/cmd_vel_teleop → cmd_vel_selected → cmd_vel 안전 경로 미검증` : `${ns}/cmd_vel 미발견`
     );
     const conveyorName = hasService(`${ns}/Conv/cmd`) ? `${ns}/Conv/cmd` : null;
     const conveyor = this._verifiedEndpoint(
@@ -939,15 +968,17 @@ const RobotCompatibility = {
     };
 
     const monitoringSpecs = {
-      bms: [`${ns}/bms`, ['std_msgs/Float32MultiArray', 'std_msgs/msg/Float32MultiArray']],
-      robotState: [`${ns}/robot_state`, ['syscon_msgs/RobotState', 'syscon_msgs/msg/RobotState']],
-      motorStatus: [`${ns}/motor_status`, ['syscon_msgs/MotorState', 'syscon_msgs/msg/MotorState']],
+      bms: hasRos2Type
+        ? [`${ns}/battery_state`, ['sensor_msgs/msg/BatteryState']]
+        : [`${ns}/bms`, ['std_msgs/Float32MultiArray', 'std_msgs/msg/Float32MultiArray']],
+      robotState: [`${ns}/robot_state`, ['syscon_msgs/RobotState', 'syscon_msgs/msg/RobotState', 'spx_robot_msgs/msg/RobotState']],
+      motorStatus: [`${ns}/motor_status`, ['syscon_msgs/MotorState', 'syscon_msgs/msg/MotorState', 'spx_drive_msgs/msg/MotorState']],
       odom: [`${ns}/odom`, ['nav_msgs/Odometry', 'nav_msgs/msg/Odometry']],
-      manualSelect: [`${ns}/io/select`, ['std_msgs/Bool', 'std_msgs/msg/Bool']],
+      manualSelect: [hasRos2Type ? `${ns}/io/state_monitor/mode` : `${ns}/io/select`, ['std_msgs/Bool', 'std_msgs/msg/Bool']],
       emergency: [`${ns}/emergency_sensor`, ['std_msgs/Int32MultiArray', 'std_msgs/msg/Int32MultiArray']],
-      sto: [`${ns}/sto_stop`, ['std_msgs/Bool', 'std_msgs/msg/Bool']],
+      sto: [hasRos2Type ? `${ns}/io/state_monitor/sto` : `${ns}/sto_stop`, ['std_msgs/Bool', 'std_msgs/msg/Bool']],
       lidarField: [`${ns}/io/lidar_field`, ['std_msgs/UInt8', 'std_msgs/msg/UInt8']],
-      brakeReleased: [`${ns}/io/break_released`, ['std_msgs/Bool', 'std_msgs/msg/Bool']]
+      brakeReleased: [hasRos2Type ? `${ns}/io/state_monitor/brake` : `${ns}/io/break_released`, ['std_msgs/Bool', 'std_msgs/msg/Bool']]
     };
     const monitoringTopics = {};
     Object.entries(monitoringSpecs).forEach(([key, [name, allowed]]) => {
@@ -1050,7 +1081,9 @@ const RobotCompatibility = {
     if (!map.reloadService || !map.reloadType) {
       throw new Error('Map 불러오기 endpoint/type이 검증되지 않았습니다.');
     }
-    if (map.reloadType === 'map_server/LoadMap') return { map_url: yamlPath };
+    if (map.reloadType === 'map_server/LoadMap' || map.reloadType === 'nav2_msgs/srv/LoadMap') {
+      return { map_url: yamlPath };
+    }
     if (map.reloadType === 'spx_mapping_msgs/srv/LoadMap') return { map_name: yamlPath };
     return { path: yamlPath };
   },

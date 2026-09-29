@@ -1,6 +1,6 @@
 # EasyLoop
 
-AMR 현장 엔지니어가 SLAM 주행 궤적과 루프 클로저를 확인하며 완성도 높은 맵을 만들 수 있도록 돕는 웹 도구입니다. ROS1/ROS2 rosbridge(websocket)를 통해 로봇 제어, 모니터링, 셋업, 진단 및 기능 검토 업무도 지원합니다.
+AMR 현장 엔지니어가 SLAM 주행 궤적과 루프 클로저를 확인하며 완성도 높은 맵을 만들 수 있도록 돕는 웹 도구입니다. ROS1은 rosbridge, ROS2는 SSH 경유 임시 브리지로 로봇 제어, 모니터링, 셋업, 진단 및 기능 검토 업무를 지원합니다.
 
 ## AMR runtime 호환 범위
 
@@ -17,7 +17,13 @@ Task, mode, map, lift, turntable, monitoring은 subsystem별로 독립 판정합
 
 Task/Quick Task는 연결된 scheduler의 `get_actions_info` 또는 `spx/task/actions/info`를 읽어 실제 등록된 `action_type`만 입력·실행할 수 있습니다. `basic_settings/model_type` 등 차상 파라미터를 감지해 WayPoint/Docking/Trajectory payload의 `model_type`에 반영하며, 감지 실패 시 이 세 모델 의존 Action은 실행하지 않습니다. Action 인자 개수·숫자 여부·필수 파라미터도 전송 직전에 다시 검사합니다. Legacy `Basic_Move [이동종류, 거리/각도]`와 native SPX `BasicMove [거리(mm), 속도]`의 계약 차이는 선형 이동만 명시적으로 변환하고, 호환되지 않는 회전은 전송하지 않습니다.
 
-ROS2 `SR-AMR-Base2`는 로봇 측 ROS2 `rosbridge_server`와 `/rosapi/*`가 실제로 실행 중이어야 합니다. 없으면 EasyLoop 연결·제어가 차단되며 SSH 명령으로 우회하지 않습니다.
+ROS2 그래프의 실제 endpoint/type을 확인한 기능만 활성화합니다. 로봇에 `rosbridge_server`가 없는 경우 ROS2 모드는 기존 SSH 접속을 통해 임시 브리지로 그래프를 전달합니다.
+
+### ROS1/ROS2 연결 모드
+
+로봇 관리의 수동 추가 또는 등록 로봇 목록에서 **자동 / ROS1 / ROS2**를 선택합니다. 자동은 SSH로 로봇의 ROS runtime을 조회합니다. ROS1은 기존 rosbridge 연결을 사용합니다. ROS2는 ROS2 Jazzy 환경에서 SSH 세션에 일시적인 `rclpy` 브리지를 실행해 ROS 그래프를 EasyLoop에 전달합니다. 로봇에 패키지를 설치하거나 파일을 배포하지 않습니다. 수동 선택이 실제 그래프 타입과 다르면 제어 기능은 비활성화됩니다.
+
+`192.168.20.56` R_006은 ROS2 Jazzy이고 로봇에 `rosbridge_server`가 없어 ROS2 모드를 사용합니다. 충전 명령·Task 유입 상태·ROS2 구성 및 현장 확인 범위는 [R_006 ROS2 구조](docs/ros2-r006.md)에 기록했습니다. `bringup`이 실행 중이어야 ROS 그래프와 서비스가 나타납니다.
 
 ## 주요 기능
 - ROS 노드/토픽/서비스/파라미터 조회

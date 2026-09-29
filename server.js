@@ -34,6 +34,7 @@ const { stopLocalRosMaster } = require('./server/ros-master-cleanup');
 const { validateRosProxyTarget } = require('./server/ws-proxy-target');
 const { waitForRosService } = require('./server/ros-service-wait');
 const { createWebSocketForwarder } = require('./server/ws-backpressure');
+const { createRos2Runtime } = require('./server/ros2-runtime');
 
 // npm start/start.sh/package 실행 모두 동일하게 로컬 인증 설정을 사용한다.
 // 셸에서 명시한 환경 변수는 .env보다 우선하며 비밀번호 값은 로그에 남기지 않는다.
@@ -88,6 +89,7 @@ function getSharedPassword() {
 }
 
 const authMiddleware = createAuthMiddleware(authSessions);
+const ros2Runtime = createRos2Runtime({ createSSHConnection, WebSocket, getAuthToken });
 let testModeProcess = null;
 let rosapiProcess = null;
 let roscoreProcess = null;
@@ -357,6 +359,7 @@ app.use('/api/robots', createRobotsRouter({
 }));
 app.use('/api/tunnel', createTunnelRouter());
 app.use('/api/can', commandRateLimiter, createCanRouter());
+app.use('/api/ros-runtime', commandRateLimiter, ros2Runtime.router);
 
 // ==================== ROS WebSocket Proxy ====================
 // Proxies browser ↔ rosbridge so remote users don't need direct robot access
@@ -364,7 +367,14 @@ const rosProxyWss = new WebSocket.Server({ noServer: true });
 
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
-  if (url.pathname === '/ws-proxy') {
+  if (url.pathname === '/ws-ros2') {
+    if (!isAuthTokenValid(authSessions, getAuthToken(req))) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    ros2Runtime.handleUpgrade(req, socket, head);
+  } else if (url.pathname === '/ws-proxy') {
     // Auth check: validate cookie-based auth token
     const token = getAuthToken(req);
     if (!isAuthTokenValid(authSessions, token)) {
