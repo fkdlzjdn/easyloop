@@ -576,6 +576,10 @@ const App = {
     // Cleanup tunnels on page unload
     window.addEventListener('beforeunload', () => {
       navigator.sendBeacon('/api/tunnel/stop-all', '{}');
+      for (const slot of this.robotSlots) {
+        if (slot.ros2SessionId) navigator.sendBeacon('/api/ros-runtime/close',
+          new Blob([JSON.stringify({ sessionId: slot.ros2SessionId })], { type: 'application/json' }));
+      }
     });
 
     checkStatus();
@@ -1525,6 +1529,7 @@ const App = {
       });
       this.robotSlots.forEach((slot, index) => {
         if (slot.ros || slot.connected) RosManager.disconnectSlot(index);
+        this._closeRos2Session(slot);
       });
       RosManager.ros = null;
     }
@@ -1816,38 +1821,60 @@ const App = {
   async connectSlot(index) {
     if (index < 0 || index >= this.robotSlots.length) return;
     const slot = this.robotSlots[index];
+    const connectionGeneration = slot.connectionGeneration = (slot.connectionGeneration || 0) + 1;
 
     if (slot.ros2SessionId) {
       await this._closeRos2Session(slot);
     }
-    if (slot.rosMode !== 'ros1' && !slot.virtualTestRobot) {
+    if (['auto', 'ros2'].includes(slot.rosMode) && !slot.virtualTestRobot) {
       try {
-        const response = await fetchWithTimeout('/api/ros-runtime/prepare', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            host: slot.ip,
-            port: slot.sshPort || 22,
-            username: 'syscon',
-            password: slot.sshPassword || '',
-            mode: slot.rosMode === 'ros2' ? 'ros2' : 'auto'
-          })
-        }, 18000);
-        const result = await response.json();
+        const prepareRuntime = async (password = '') => {
+          const response = await fetchWithTimeout('/api/ros-runtime/prepare', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              host: slot.ip, port: slot.sshPort || 22,
+              username: slot.sshUser || 'syscon', password,
+              mode: slot.rosMode === 'ros2' ? 'ros2' : 'auto', robotId: slot.robotId,
+              ...(Number.isInteger(slot.rosDomainId) ? { domainId: slot.rosDomainId } : {})
+            })
+          }, 35000);
+          return response.json();
+        };
+        let result = await prepareRuntime();
+        if (!result.success && result.needPassword) {
+          if (slot.sshPassword) result = await prepareRuntime(slot.sshPassword);
+          else result = await new Promise(resolve => this.showPasswordModal(result.message, async password => {
+            slot.sshPassword = password;
+            resolve(await prepareRuntime(password));
+          }, () => resolve({ success: false, message: '연결을 취소했습니다.' })));
+        }
+        if (slot.connectionGeneration !== connectionGeneration || this.robotSlots[index] !== slot) {
+          if (result.sessionId) await this._closeRos2Session({ ros2SessionId: result.sessionId });
+          return;
+        }
         if (!result.success) throw new Error(result.message || 'ROS runtime 감지 실패');
         if (slot.rosMode === 'ros2' && result.rosMajor !== 2) {
           await this._closeRos2Session({ ros2SessionId: result.sessionId });
           throw new Error(`ROS2 수동 선택과 감지 결과가 다릅니다: ROS${result.rosMajor}`);
         }
         if (result.rosMajor === 2) {
+          slot.sshUser ||= 'syscon';
           slot.ros2SessionId = result.sessionId;
+          slot.rosEnvironment = result.environment || {};
+          slot.rosEnvironmentSource = result.environmentSource || 'shell';
+          slot.rosControlEnabled = result.controlEnabled;
           slot.rosDetected = `ROS2 ${result.distro || ''}`.trim();
+          if (slot.rosEnvironment.ROS_DOMAIN_ID !== undefined) {
+            slot.rosDetected += ` · Domain ${slot.rosEnvironment.ROS_DOMAIN_ID}`;
+          }
+          if (slot.rosControlEnabled === false) slot.rosDetected += ' · 조회 전용';
           RosManager.connectSlot(index, slot.ip, slot.robotId);
           return;
         }
         await this._closeRos2Session({ ros2SessionId: result.sessionId });
         slot.rosDetected = `ROS1 ${result.distro || ''}`.trim();
       } catch (error) {
+        if (slot.connectionGeneration !== connectionGeneration || this.robotSlots[index] !== slot) return;
         if (slot.rosMode === 'ros2') {
           this.toast(`ROS2 연결 실패: ${error.message}`, 'error');
           return;
@@ -1923,6 +1950,7 @@ const App = {
   async disconnectSlot(index) {
     if (index < 0 || index >= this.robotSlots.length) return;
     const slot = this.robotSlots[index];
+    slot.connectionGeneration = (slot.connectionGeneration || 0) + 1;
 
     // Disconnect ROS first
     RosManager.disconnectSlot(index);
@@ -1950,6 +1978,7 @@ const App = {
     const sessionId = slot?.ros2SessionId;
     if (!sessionId) return;
     slot.ros2SessionId = null;
+    slot.rosEnvironment = null;
     try {
       await fetchWithTimeout('/api/ros-runtime/close', {
         method: 'POST',
@@ -1963,6 +1992,7 @@ const App = {
     if (!['auto', 'ros1', 'ros2'].includes(mode)) return;
     const slot = this.robotSlots[index];
     if (!slot) return;
+    slot.connectionGeneration = (slot.connectionGeneration || 0) + 1;
     if (slot.connected || slot.ros) await this.disconnectSlot(index);
     slot.rosMode = mode;
     slot.rosDetected = '';
@@ -2463,8 +2493,8 @@ const App = {
       ip: slot ? slot.ip : '',
       robotId: slot ? slot.robotId : '',
       sshPort: slot ? (slot.sshPort || 22) : 22,
-      sshUser: document.getElementById('ssh-user').value.trim() || 'root',
-      sshPassword: document.getElementById('ssh-password').value
+      sshUser: slot?.ros2SessionId ? slot.sshUser || 'syscon' : document.getElementById('ssh-user').value.trim() || 'root',
+      sshPassword: slot?.ros2SessionId ? slot.sshPassword || document.getElementById('ssh-password').value : document.getElementById('ssh-password').value
     };
   },
 

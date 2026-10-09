@@ -160,6 +160,11 @@ const HealthCheck = {
   },
 
   async execSSH(robot, cmd) {
+    if (RosManager.isRos2()) {
+      const result = await RosManager.execRuntimeCommand(RosManager.translateRos2Query(cmd));
+      if (!result.success) throw new Error(result.message || 'ROS2 조회 실패');
+      return result.stdout || '';
+    }
     // B12 fix: fetch 타임아웃 적용
     const res = await fetchWithTimeout('/api/ssh/exec', {
       method: 'POST',

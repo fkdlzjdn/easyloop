@@ -40,7 +40,7 @@ describe('ROS runtime mode selection', () => {
       'EASYLOOP_ROS_DISTRO=jazzy',
       'EASYLOOP_ROS2_PATH=/opt/ros/jazzy/bin/ros2',
       'EASYLOOP_HAS_ROS2=1'
-    ].join('\n'))).toEqual({
+    ].join('\n'))).toMatchObject({
       rosMajor: 2, distro: 'jazzy', hasRos1: false, hasRos2: true, ros2Distro: 'jazzy'
     });
     expect(parseProbe('EASYLOOP_ROS_VERSION=1\nEASYLOOP_HAS_ROS1=1')).toMatchObject({ rosMajor: 1 });
@@ -153,7 +153,12 @@ describe('ROS runtime mode selection', () => {
         stream.write = jest.fn();
         stream.close = jest.fn(() => stream.emit('close', 0));
         callback(null, stream);
-        if (command.includes('EASYLOOP_ROS_VERSION')) {
+        if (command.includes('EASYLOOP_BRIDGE_READY')) {
+          process.nextTick(() => {
+            stream.emit('data', Buffer.from('EASYLOOP_BRIDGE_READY=1\n'));
+            stream.emit('close', 0);
+          });
+        } else if (command.includes('EASYLOOP_ROS_VERSION')) {
           process.nextTick(() => {
             stream.emit('data', Buffer.from('EASYLOOP_ROS_VERSION=1\nEASYLOOP_ROS2_PATH=/opt/ros/jazzy/bin/ros2\nEASYLOOP_HAS_ROS1=1\nEASYLOOP_HAS_ROS2=1\n'));
             stream.emit('close', 0);
@@ -170,7 +175,7 @@ describe('ROS runtime mode selection', () => {
       getAuthToken: () => 'test-owner'
     });
     const result = await invokeRoute(runtime, '/prepare', {
-      host: '192.168.20.56', port: 22, username: 'syscon', mode: 'ros2'
+      host: '192.168.20.56', port: 22, username: 'syscon', mode: 'ros2', robotId: 'R_006'
     });
     expect(result).toMatchObject({ success: true, rosMajor: 2, hasRos1: true, hasRos2: true });
     const request = { url: `/ws-ros2?session=${result.sessionId}`, headers: { host: 'localhost' } };

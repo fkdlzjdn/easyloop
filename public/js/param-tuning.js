@@ -65,141 +65,73 @@ const ParamTuning = {
     }
 
     modal.classList.add('active');
+    const ros2 = RosManager.isRos2();
+    const names = ros2 ? ['controller_server', 'amcl', 'global_costmap', 'planner_server']
+      : ['move_base', 'amcl', 'global_costmap', 'pure_controller'];
+    modal.querySelectorAll('.param-quick-btn').forEach((button, index) => {
+      button.dataset.ns = ros2 ? `/${RosManager.getRobotId(App.activeSlotIndex)}/${names[index]}` : `/${names[index]}`;
+      button.textContent = names[index];
+    });
+    document.getElementById('param-search-input').placeholder = ros2 ? '/R_006/amcl::max_particles 또는 노드 이름' : 'Search parameter name...';
   },
 
   async searchParams(prefix = null) {
-    const searchInput = document.getElementById('param-search-input');
-    const searchTerm = prefix || searchInput.value.trim();
+    const searchTerm = prefix || document.getElementById('param-search-input').value.trim();
     const list = document.getElementById('param-tuning-list');
-
     if (!searchTerm) {
-      list.innerHTML = '<div class="param-empty">Enter a parameter name or namespace to search</div>';
+      list.textContent = '파라미터 이름 또는 노드를 입력하세요.';
       return;
     }
-
-    list.innerHTML = '<div class="param-loading">Searching...</div>';
-
+    list.textContent = '조회 중...';
     try {
-      // Get list of matching parameters
-      const ros = typeof RosManager !== 'undefined' ? RosManager.getRos(App.activeSlotIndex) : null;
-
-      if (!ros) {
-        list.innerHTML = '<div class="param-error">ROS not connected</div>';
-        return;
-      }
-
-
-      // Use rosparam list via SSH
-      const result = await SSHTerminal.execCommand(`rosparam list 2>/dev/null | grep -i "${searchTerm}" | head -30`);
-
-      if (result.success && result.stdout && result.stdout.trim()) {
-        const params = result.stdout.trim().split('\n').filter(p => p);
-
-        if (params.length === 0) {
-          list.innerHTML = '<div class="param-empty">No matching parameters found</div>';
-          return;
-        }
-
-        // Get values for each parameter
-        const paramValues = await Promise.all(params.map(async (param) => {
-          const valResult = await SSHTerminal.execCommand(`rosparam get ${param} 2>/dev/null`);
-          return {
-            name: param,
-            value: valResult.success ? valResult.stdout.trim() : 'N/A'
-          };
-        }));
-
-        list.innerHTML = paramValues.map(p => {
-          const valueType = this._guessType(p.value);
-          return `
-            <div class="param-item">
-              <div class="param-name" title="${p.name}">${p.name}</div>
-              <div class="param-value-row">
-                ${valueType === 'bool' ? `
-                  <select class="param-value-input" data-param="${p.name}" data-type="bool">
-                    <option value="true" ${p.value === 'true' ? 'selected' : ''}>true</option>
-                    <option value="false" ${p.value === 'false' ? 'selected' : ''}>false</option>
-                  </select>
-                ` : `
-                  <input type="${valueType === 'number' ? 'number' : 'text'}"
-                         class="param-value-input"
-                         data-param="${p.name}"
-                         data-type="${valueType}"
-                         value="${this._escapeHtml(p.value)}"
-                         step="any">
-                `}
-                <button class="btn btn-mini btn-primary" onclick="ParamTuning.setParam('${p.name}')">Set</button>
-              </div>
-            </div>
-          `;
-        }).join('');
-
+      const ros = RosManager.getRos(App.activeSlotIndex);
+      if (!ros) throw new Error('ROS 연결이 필요합니다.');
+      let values;
+      if (RosManager.isRos2()) {
+        const response = await RosManager.searchRos2Params(searchTerm);
+        values = response.values;
+        if (response.partial) App.toast('일부 노드의 파라미터 응답이 없습니다. 다시 조회할 수 있습니다.', 'warning');
       } else {
-        list.innerHTML = '<div class="param-empty">No matching parameters found</div>';
+        const names = await new Promise(resolve => ros.getParams(resolve));
+        values = await Promise.all(names.filter(name => name.toLowerCase().includes(searchTerm.toLowerCase())).slice(0, 30)
+          .map(name => new Promise(resolve => new ROSLIB.Param({ ros, name }).get(value => resolve({ name, value })))));
       }
-    } catch (e) {
-      list.innerHTML = `<div class="param-error">Error: ${e.message}</div>`;
-    }
+      list.innerHTML = values.map(p => {
+        const value = typeof p.value === 'string' ? p.value : JSON.stringify(p.value);
+        const type = typeof p.value === 'boolean' ? 'bool' : typeof p.value === 'number' ? 'number'
+          : Array.isArray(p.value) ? 'array' : 'string';
+        return `<div class="param-item">
+          <div class="param-name">${this._escapeHtml(p.name)}</div>
+          <div class="param-value-row">
+            <input class="param-value-input" type="text" data-param="${this._escapeHtml(p.name)}"
+              data-type="${type}" value="${this._escapeHtml(value ?? '')}">
+            <button class="btn btn-mini btn-primary param-set-btn" type="button">Set</button>
+          </div></div>`;
+      }).join('') || '<div class="param-empty">일치하는 파라미터가 없습니다.</div>';
+      list.querySelectorAll('.param-set-btn').forEach(button => {
+        button.disabled = App.robotSlots[App.activeSlotIndex]?.rosControlEnabled === false;
+        button.addEventListener('click', () => this.setParam(button.previousElementSibling.dataset.param));
+      });
+    } catch (error) { list.textContent = `조회 실패: ${error.message || error}`; }
   },
 
   async setParam(paramName) {
-    const input = document.querySelector(`[data-param="${paramName}"]`);
+    const input = Array.from(document.querySelectorAll('.param-value-input')).find(item => item.dataset.param === paramName);
     if (!input) return;
-
-    const value = input.value;
-    const type = input.dataset.type;
-
-    App.toast(`Setting ${paramName}...`, 'info');
-
     try {
-      let cmd;
-      if (type === 'bool' || value === 'true' || value === 'false') {
-        cmd = `rosparam set ${paramName} ${value}`;
-      } else if (type === 'number' || !isNaN(parseFloat(value))) {
-        cmd = `rosparam set ${paramName} ${value}`;
-      } else {
-        // String - need quotes
-        cmd = `rosparam set ${paramName} "${value.replace(/"/g, '\\"')}"`;
-      }
-
-      const result = await SSHTerminal.execCommand(cmd);
-
-      if (result.success) {
-        App.toast(`Parameter set: ${paramName} = ${value}`, 'success');
-
-        // Audit log
-        if (typeof App !== 'undefined' && App.logAudit) {
-          App.logAudit('param_set', { param: paramName, value: value });
-        }
-      } else {
-        App.toast(`Failed: ${result.stderr || result.message}`, 'error');
-      }
-    } catch (e) {
-      App.toast(`Error: ${e.message}`, 'error');
-    }
+      const value = input.dataset.type === 'string' ? input.value : JSON.parse(input.value);
+      const result = await new Promise(resolve => RosManager.setParam(paramName, value, resolve));
+      if (!result.success) throw new Error(result.error || result.message || '파라미터 변경이 거부되었습니다.');
+      App.toast(`Parameter set: ${paramName}`, 'success');
+      App.logAudit?.('param_set', { param: paramName, value });
+    } catch (error) { App.toast(`변경 실패: ${error.message || error}`, 'error'); }
   },
 
   async refreshValues() {
-    const inputs = document.querySelectorAll('.param-value-input[data-param]');
-    if (inputs.length === 0) {
-      App.toast('No parameters to refresh', 'info');
-      return;
+    for (const input of document.querySelectorAll('.param-value-input[data-param]')) {
+      const result = await new Promise(resolve => RosManager.getParam(input.dataset.param, resolve));
+      if (result.success) input.value = typeof result.value === 'string' ? result.value : JSON.stringify(result.value);
     }
-
-    App.toast('Refreshing values...', 'info');
-
-    for (const input of inputs) {
-      const param = input.dataset.param;
-      try {
-        const result = await SSHTerminal.execCommand(`rosparam get ${param} 2>/dev/null`);
-        if (result.success && result.stdout) {
-          input.value = result.stdout.trim();
-        }
-      } catch (e) {
-        // Ignore individual errors
-      }
-    }
-
     App.toast('Values refreshed', 'success');
   },
 

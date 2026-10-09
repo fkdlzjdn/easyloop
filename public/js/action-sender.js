@@ -5838,6 +5838,10 @@ const ActionSender = {
   },
 
   async _findRosParametersGroupPath() {
+    if (typeof RosManager !== 'undefined' && RosManager.isRos2?.()) {
+      const result = await RosManager.execRuntimeCommand('ros2 pkg prefix --share ros_parameters_group');
+      return result.success ? String(result.stdout || '').trim() : '';
+    }
     const command = "bash -lc '. /opt/ros/noetic/setup.bash 2>/dev/null || . /opt/ros/melodic/setup.bash 2>/dev/null; . ~/catkin_ws/devel/setup.bash 2>/dev/null; rospack find ros_parameters_group 2>/dev/null'";
     try {
       const response = await fetchWithTimeout('/api/ssh/exec', {

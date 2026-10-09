@@ -8,9 +8,10 @@ Express.js 백엔드 + Vanilla JS 프론트엔드, SSH/ROS Bridge 기반.
 - **백엔드**: Node.js 18+, Express 4.18, WebSocket (ws), ssh2, multer
 - **프론트엔드**: Vanilla HTML/CSS/JS (36개 모듈)
 - **패키징**: pkg (standalone 바이너리), Docker
-- **버전**: v1.3.0
+- **버전**: v1.4.0
 
 ## 주요 기능 (50+)
+- **ROS 버전**: ROS1 rosbridge 유지, ROS2 Jazzy SSH/rclpy 브리지 선택(자동/수동), 노드별 파라미터·액션·QoS 지원
 - **ROS 연동**: 노드/토픽/서비스/파라미터 브라우저, 액션 전송, rosbag 제어
 - **SSH/SFTP**: 다중 터미널, 파일 업/다운로드 (100MB), SSH 터널링
 - **모니터링**: CPU/메모리/디스크, 네트워크 대역폭, 실시간 그래프

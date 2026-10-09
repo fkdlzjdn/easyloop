@@ -321,6 +321,8 @@ const RobotCompatibility = {
       || name === `${ns}/io/state_monitor/mode`
       || name === `${ns}/io/state_monitor/sto`
       || name === `${ns}/io/state_monitor/brake`
+      || name === `${ns}/io/state_monitor/charging`
+      || name === `${ns}/io/do/charge_relay`
       || name === `${ns}/motor_status`
       || name === `${ns}/odom`
       || name === `${ns}/io/select`
@@ -378,7 +380,8 @@ const RobotCompatibility = {
     }
     await Promise.all([
       this._discoverActionCatalog(slot, profile, timeout),
-      this._discoverDriveModel(slot, profile)
+      this._discoverDriveModel(slot, profile),
+      this._verifyRos2Drive(slot, profile, timeout)
     ]);
     console.log(`[Compatibility] ${slot.robotId}: ${profile.id}`, {
       transport: profile.transport.protocol,
@@ -397,6 +400,24 @@ const RobotCompatibility = {
     document.dispatchEvent(new CustomEvent('amr:compatibility-updated', {
       detail: { robotId: slot?.robotId || '', profile }
     }));
+  },
+
+  async _verifyRos2Drive(slot, profile, timeout) {
+    if (!slot.ros2SessionId || !profile.chassis.drive.verified) return;
+    const ns = `/${slot.robotId}`;
+    try {
+      const [teleop, selected, output] = await Promise.all(['cmd_vel_teleop', 'cmd_vel_selected', 'cmd_vel'].map(topic =>
+        this._rosapi(slot.ros, '/rosapi/topic_info', 'rosapi/TopicInfo', { topic: `${ns}/${topic}` }, timeout)));
+      const has = (info, direction, name) => (info?.[direction] || []).some(endpoint => endpoint.node === `${ns}/${name}`);
+      const linked = has(teleop, 'subscribers', 'cmd_vel_mux')
+        && has(selected, 'publishers', 'cmd_vel_mux') && has(selected, 'subscribers', 'cmd_safety_gate')
+        && has(output, 'publishers', 'cmd_safety_gate') && has(output, 'subscribers', 'wheel_driver_node_exe');
+      if (!linked) throw new Error('teleop → mux → safety gate → wheel driver 연결 미검증');
+      profile.chassis.drive.evidence = { teleop, selected, output };
+    } catch (error) {
+      profile.chassis.drive.verified = false;
+      profile.chassis.drive.reason = String(error.message || error);
+    }
   },
 
   _actionCatalogCandidates(slot, profile) {
@@ -520,7 +541,23 @@ const RobotCompatibility = {
       reason: 'ROS parameter에서 차상 model_type을 확인하지 못했습니다.'
     };
     profile.chassis.driveModel = result;
+    if (slot.ros2SessionId) {
+      try {
+        const metadata = await this._rosapi(slot.ros, '/rosapi/drive_model', 'rosapi/DriveModel', {}, 3500);
+        const aliases = { differential_drive: 'dd', qd_rdd: 'qd' };
+        const model = this._normalizeDriveModel(aliases[metadata.controller_type] || metadata.controller_type);
+        if (model) {
+          Object.assign(result, { verified: true, ...model, parameter: metadata.parameter,
+            configFile: metadata.config_file, reason: '' });
+          return result;
+        }
+      } catch (error) { /* try explicitly declared node parameters below */ }
+    }
     const candidates = [
+      ...(profile?.transport?.rosMajor === 2 ? [
+        `${ns}/wheel_driver_node_exe::drive_type`, `${ns}/wheel_driver_node_exe::model_type`,
+        `${ns}/operation_manager::robot_model`, `${ns}/robotstate_pub::robot_model`
+      ] : []),
       `${ns}/basic_settings/model_type`, `${ns}/SUBCON_/model_type`, `${ns}/model_type`,
       `${ns}/drive_type`, '/SUBCON_/model_type', '/model_type', '/drive_type'
     ];
@@ -773,9 +810,10 @@ const RobotCompatibility = {
       ['syscon_msgs/String_srv', 'syscon_msgs/SaveMap', 'spx_msgs/SaveMap', 'spx_mapping_msgs/srv/SaveMap'],
       `${ns}/save_map 미발견`
     );
-    const reloadName = hasService(`${ns}/change_map`)
-      ? `${ns}/change_map`
-      : (hasService(`${ns}/map_server/load_map`) ? `${ns}/map_server/load_map` : null);
+    const reloadAllowed = ['map_server/LoadMap', 'nav2_msgs/srv/LoadMap', 'syscon_msgs/ChangeMap', 'spx_mapping_msgs/srv/LoadMap'];
+    const reloadCandidates = hasRos2Type ? [`${ns}/map_server/load_map`, `${ns}/change_map`]
+      : [`${ns}/change_map`, `${ns}/map_server/load_map`];
+    const reloadName = reloadCandidates.find(name => hasService(name) && reloadAllowed.includes(serviceTypes[name])) || null;
     const reload = this._verifiedEndpoint(
       reloadName,
       serviceTypes[reloadName],
@@ -795,7 +833,7 @@ const RobotCompatibility = {
     const poseGraph = this._verifiedEndpoint(
       poseGraphName,
       serviceTypes[poseGraphName],
-      ['slam_toolbox_msgs/SerializePoseGraph', 'slam_toolbox_msgs/srv/SerializePoseGraph'],
+      ['slam_toolbox_msgs/SerializePoseGraph', 'slam_toolbox_msgs/srv/SerializePoseGraph', 'slam_toolbox/srv/SerializePoseGraph'],
       'pose graph save service 미발견'
     );
     profile.map = {
@@ -979,7 +1017,8 @@ const RobotCompatibility = {
       emergency: [`${ns}/emergency_sensor`, ['std_msgs/Int32MultiArray', 'std_msgs/msg/Int32MultiArray']],
       sto: [hasRos2Type ? `${ns}/io/state_monitor/sto` : `${ns}/sto_stop`, ['std_msgs/Bool', 'std_msgs/msg/Bool']],
       lidarField: [`${ns}/io/lidar_field`, ['std_msgs/UInt8', 'std_msgs/msg/UInt8']],
-      brakeReleased: [hasRos2Type ? `${ns}/io/state_monitor/brake` : `${ns}/io/break_released`, ['std_msgs/Bool', 'std_msgs/msg/Bool']]
+      brakeReleased: [hasRos2Type ? `${ns}/io/state_monitor/brake` : `${ns}/io/break_released`, ['std_msgs/Bool', 'std_msgs/msg/Bool']],
+      chargeRelay: [`${ns}/io/do/charge_relay`, ['std_msgs/msg/Bool']]
     };
     const monitoringTopics = {};
     Object.entries(monitoringSpecs).forEach(([key, [name, allowed]]) => {
@@ -1012,6 +1051,19 @@ const RobotCompatibility = {
     profile.controlReady = [profile.task, profile.mapping, profile.map, profile.lift,
       profile.actions.turntable, profile.chassis].some(capability => capability?.verified);
     profile.reason = profile.controlReady ? '' : '지원 계약과 type이 일치하는 제어 기능이 없습니다.';
+    if (hasRos2Type && slot.rosControlEnabled === false) {
+      const reason = '이 IPC의 로컬 bringup이 확인되지 않았습니다. bringup 실행 후 다시 연결하세요.';
+      for (const capability of [profile.task, profile.mapping, profile.lift, profile.actions.turntable,
+        profile.chassis, profile.chassis.drive, profile.chassis.charge, profile.chassis.conveyor]) {
+        capability.verified = false;
+        capability.reason = reason;
+      }
+      profile.map.saveService = null;
+      profile.map.reloadService = null;
+      profile.map.reason = reason;
+      profile.controlReady = false;
+      profile.reason = reason;
+    }
     profile.project = slot.projectHint || (this.isStlUlsanModel(slot.robotModel) ? 'stl_ulsan' : null);
     const lineage = this.projectGeneration(profile.project);
     profile.lineage = lineage ? { id: lineage.id, label: lineage.label } : null;
@@ -1107,7 +1159,7 @@ const RobotCompatibility = {
         service.callService(
           new ROSLIB.ServiceRequest(args || {}),
           result => finish(resolve, result || {}),
-          error => finish(reject, new Error(String(error || `${name} failed`)))
+          error => finish(reject, new Error(String(error?.message || error || `${name} failed`)))
         );
       } catch (error) {
         finish(reject, error);

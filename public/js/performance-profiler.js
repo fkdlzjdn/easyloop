@@ -79,7 +79,8 @@ const PerformanceProfiler = {
 
     try {
       // Get ROS node list
-      const nodesResult = await SSHTerminal.execCommand('rosnode list 2>/dev/null | head -30');
+      const nodesResult = await RosManager.execRuntimeCommand(RosManager.isRos2()
+        ? 'ros2 node list --no-daemon | head -30' : 'rosnode list 2>/dev/null | head -30');
 
       if (!nodesResult.success || !nodesResult.stdout) {
         list.innerHTML = '<div class="perf-error">Failed to get node list</div>';

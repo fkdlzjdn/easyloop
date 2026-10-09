@@ -118,6 +118,11 @@ const Diagnostics = {
   },
 
   async _sshExec(cmd) {
+    if (RosManager.isRos2()) {
+      const result = await RosManager.execRuntimeCommand(RosManager.translateRos2Query(cmd));
+      if (!result.success) throw new Error(result.message || 'ROS2 조회 실패');
+      return result.stdout || '';
+    }
     const robot = this._getRobot();
     if (!robot || !robot.ip) throw new Error('No robot connected');
     const res = await fetchWithTimeout('/api/ssh/exec', {

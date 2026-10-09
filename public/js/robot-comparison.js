@@ -91,27 +91,25 @@ const RobotComparison = {
     }
   },
 
-  async fetchRobotConfig(_slotIdx) {
-    const config = { rosParams: {}, systemInfo: {} };
-
-    const paramsResult = await SSHTerminal.execCommand(`
-      rosparam get /move_base/max_vel_x 2>/dev/null || echo "N/A";
-      rosparam get /move_base/max_vel_theta 2>/dev/null || echo "N/A";
-      rosparam get /amcl/max_particles 2>/dev/null || echo "N/A";
-    `);
-
-    if (paramsResult.success && paramsResult.stdout) {
-      const lines = paramsResult.stdout.trim().split('\n');
-      config.rosParams = {
-        'max_vel_x': lines[0] || 'N/A',
-        'max_vel_theta': lines[1] || 'N/A',
-        'amcl_max_particles': lines[2] || 'N/A'
-      };
+  async fetchRobotConfig(slotIdx) {
+    const slot = App.robotSlots[slotIdx];
+    if (!slot?.ros) throw new Error('비교할 로봇을 연결하세요.');
+    const config = { rosParams: {}, systemInfo: { ros: RosManager.isRos2(slotIdx) ? 'ROS2' : 'ROS1' } };
+    if (RosManager.isRos2(slotIdx)) {
+      const response = await RosManager.searchRos2Params('max_', slotIdx);
+      response.values.forEach(parameter => {
+        config.rosParams[parameter.name.replace(`/${slot.robotId}/`, '')] = JSON.stringify(parameter.value);
+      });
+      const kernel = await RosManager.execRuntimeCommand('uname -r', slotIdx);
+      config.systemInfo.kernel = kernel.success ? kernel.stdout.trim() : 'N/A';
+    } else {
+      const names = await new Promise(resolve => slot.ros.getParams(resolve));
+      const parameters = names.filter(name => /max_vel_x|max_vel_theta|max_particles/.test(name)).slice(0, 30);
+      await Promise.all(parameters.map(name => new Promise(resolve => new ROSLIB.Param({ ros: slot.ros, name }).get(value => {
+        config.rosParams[name.replace(`/${slot.robotId}/`, '')] = JSON.stringify(value);
+        resolve();
+      }))));
     }
-
-    const sysResult = await SSHTerminal.execCommand('uname -r');
-    config.systemInfo.kernel = sysResult.success ? sysResult.stdout.trim() : 'N/A';
-
     return config;
   },
 
@@ -226,6 +224,10 @@ const RobotComparison = {
     const statusEl = document.getElementById('propagate-status');
 
     const targetIdxs = Array.from(targetChecks).map(c => parseInt(c.value)).filter(i => i !== sourceIdx);
+    if ([sourceIdx, ...targetIdxs].some(index => RosManager.isRos2(index))) {
+      App.toast('ROS2 파라미터는 노드별 Params 편집을 사용하세요. ROS1 설정 일괄 복사는 지원하지 않습니다.', 'warning');
+      return;
+    }
 
     if (targetIdxs.length === 0) {
       App.toast('Select target robots', 'warning');

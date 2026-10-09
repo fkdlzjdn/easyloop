@@ -50,6 +50,17 @@ const Commands = {
   },
 
   async execute(cmdKey, sourceButton = null) {
+    if (typeof RosManager !== 'undefined' && RosManager.isRos2?.()) {
+      if (cmdKey === 'scorpion-restart') {
+        App.toast('ROS2 bringup은 operation manager/lifecycle로 관리합니다. scorpion 재시작은 지원하지 않습니다.', 'warning');
+        return;
+      }
+      if (cmdKey === 'check-ros') {
+        const result = await RosManager.execRuntimeCommand('ros2 node list --no-daemon');
+        this.showResult(result.stdout || result.message || '', !result.success);
+        return;
+      }
+    }
     const preset = this.presets[cmdKey];
     if (!preset) {
       this.showResult(`Unknown command: ${cmdKey}`, true);
@@ -120,6 +131,10 @@ const CameraSerial = {
   hasMismatch: false,
 
   async checkSerials(sourceButton = null) {
+    if (typeof RosManager !== 'undefined' && RosManager.isRos2?.()) {
+      App.toast('ROS2 카메라 설정은 모델별 ros_parameters_group과 노드 파라미터에서 확인하세요.', 'info');
+      return;
+    }
     const statusEl = document.getElementById('serial-status');
     const comparisonEl = document.getElementById('serial-comparison');
     const fixBtn = document.getElementById('btn-fix-serials');
@@ -266,6 +281,10 @@ const CameraSerial = {
   },
 
   async fixSerials(sourceButton = null) {
+    if (typeof RosManager !== 'undefined' && RosManager.isRos2?.()) {
+      App.toast('ROS2에서는 scorpion.sh 카메라 설정 수정을 사용할 수 없습니다.', 'warning');
+      return;
+    }
     if (!confirm('Update ~/scorpion.sh with actual camera serials. Continue?')) {
       return;
     }
@@ -338,6 +357,10 @@ const CameraSerial = {
   },
 
   async restartScorpion() {
+    if (typeof RosManager !== 'undefined' && RosManager.isRos2?.()) {
+      App.toast('ROS2에서는 scorpion.service 재시작을 사용할 수 없습니다.', 'warning');
+      return;
+    }
     const statusEl = document.getElementById('serial-status');
     statusEl.textContent = 'Restarting Scorpion...';
     statusEl.style.color = '#888';

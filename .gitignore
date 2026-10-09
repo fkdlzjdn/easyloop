@@ -3,7 +3,7 @@
 config/robots.json
 
 # Dependencies and generated output
-node_modules/
+node_modules
 dist/
 __pycache__/
 *.py[cod]

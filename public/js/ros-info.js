@@ -151,6 +151,17 @@ const RosInfo = {
 
     App.setButtonLoading(button, true);
 
+    if (RosManager.isRos2()) {
+      RosManager.ros2Api('get_param_names').then(result => {
+        this._data.params = (result.names || []).sort();
+        this.filterList('ros-params');
+        if (result.partial) App.toast('일부 ROS2 파라미터 조회가 완료되지 않았습니다.', 'warning');
+      }).catch(error => App.toast(String(error.message || error), 'error')).finally(() => {
+        App.setButtonLoading(button, false);
+        if (onDone) onDone();
+      });
+      return;
+    }
     RosManager.ros.getParams((params) => {
       this._data.params = params.sort();
       const searchEl = document.getElementById('ros-params-search');
@@ -248,6 +259,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Load favorites
   RosInfo.loadFavorites();
+  document.getElementById('btn-ros2-actions')?.addEventListener('click', () => RosInfo.inspectRos2Actions());
 
   const favoritesClearBtn = document.getElementById('btn-ros-fav-clear');
   if (favoritesClearBtn) {
@@ -341,6 +353,11 @@ RosInfo.showMessageDefinition = async function(msgType) {
   }
 
   try {
+    if (RosManager.isRos2()) {
+      const result = await RosManager.execRuntimeCommand(`ros2 interface show ${RosManager._shellQuote(msgType)}`);
+      defEl.textContent = result.success ? result.stdout || '(empty)' : result.message || '조회 실패';
+      return;
+    }
     const res = await fetchWithTimeout('/api/ssh/exec', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -364,6 +381,10 @@ RosInfo.showMessageDefinition = async function(msgType) {
 };
 
 RosInfo.restartSelectedNode = async function() {
+  if (RosManager.isRos2()) {
+    App.toast('ROS2 노드는 operation manager와 lifecycle에서 관리합니다. ROS1 node kill은 사용할 수 없습니다.', 'warning');
+    return;
+  }
   const nodeSelect = document.getElementById('ros-nodes');
   if (!nodeSelect || !nodeSelect.value) {
     App.toast('Please select a node first', 'warning');
@@ -406,4 +427,26 @@ RosInfo.restartSelectedNode = async function() {
   } catch (e) {
     App.toast(`Error: ${e.message}`, 'error');
   }
+};
+
+RosInfo.inspectRos2Actions = async function() {
+  if (!RosManager.isRos2()) {
+    App.toast('ROS2 로봇에 연결한 뒤 사용할 수 있습니다.', 'info');
+    return;
+  }
+  const panel = document.getElementById('ros-introspect-result');
+  const title = document.getElementById('ros-introspect-result-title');
+  const content = document.getElementById('ros-introspect-result-content');
+  panel.style.display = 'block';
+  title.textContent = 'ROS2 Actions';
+  content.textContent = '조회 중...';
+  try {
+    const result = await RosManager.ros2Api('actions');
+    const slot = App.robotSlots[App.activeSlotIndex];
+    const actions = (result.actions || []).map((name, i) => ({ name, type: result.types?.[i] || '' }))
+      .filter(action => action.name.startsWith(`/${slot.robotId}/`));
+    const task = RobotCompatibility.get(slot).task;
+    content.textContent = actions.map(action => `${action.name} [${action.type}]`).join('\n')
+      + `\n\nTask 입력: ${task.verified ? '지원됨' : task.reason || '작업 입력 서비스 없음'}`;
+  } catch (error) { content.textContent = String(error.message || error); }
 };

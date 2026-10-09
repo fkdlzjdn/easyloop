@@ -22,6 +22,140 @@ const RosManager = {
   HEAVY_OVERLAY_THROTTLE_MS: 500,
   LOCAL_COSTMAP_THROTTLE_MS: 1000,
   MAP_SAVE_SETTLE_MS: 2000,
+  isRos2(index = App.activeSlotIndex) {
+    const slot = App.robotSlots?.[index];
+    return Boolean(slot?.ros2SessionId || slot?.compatibilityProfile?.transport?.rosMajor === 2);
+  },
+
+  _shellQuote(value) {
+    return `'${String(value).replace(/'/g, "'\\''")}'`;
+  },
+
+  async execRuntimeCommand(command, index = App.activeSlotIndex) {
+    const slot = App.robotSlots?.[index];
+    if (!this.isRos2(index)) return SSHTerminal.execCommand(command);
+    if (!slot?.ros2SessionId) throw new Error('ROS2 runtime 연결이 필요합니다.');
+    const response = await fetchWithTimeout('/api/ros-runtime/exec', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: slot.ros2SessionId, command })
+    }, 35000);
+    return response.json();
+  },
+
+  translateRos2Query(command) {
+    const value = String(command);
+    if (value.includes('rosnode kill') || /rosparam\s+(set|delete)/.test(value)) {
+      throw new Error('ROS2는 노드별 파라미터와 lifecycle 인터페이스를 사용하세요.');
+    }
+    return value.replace(/rosnode list/g, 'ros2 node list --no-daemon')
+      .replace(/rosnode info\s+(\S+)/g, 'ros2 node info $1 --no-daemon')
+      .replace(/rostopic list/g, 'ros2 topic list --no-daemon')
+      .replace(/rostopic info\s+(\S+)/g, 'ros2 topic info $1 -v --no-daemon')
+      .replace(/rostopic type\s+(\S+)/g, 'ros2 topic type $1 --no-daemon')
+      .replace(/rostopic (hz|bw)\s+(\S+)/g, 'ros2 topic $1 $2')
+      .replace(/rostopic show\s+(\S+)/g, 'ros2 interface show "$(ros2 topic type $1 --no-daemon)"')
+      .replace(/rostopic echo\s+(\S+)\s+-n\s*1/g, 'ros2 topic echo $1 --once --timeout 3 --no-daemon')
+      .replace(/rosservice type\s+(\S+)/g, 'ros2 service type $1');
+  },
+
+  ros2Api(operation, args = {}, index = App.activeSlotIndex) {
+    const ros = this.getRos(index);
+    if (!ros || !this.isRos2(index)) return Promise.reject(new Error('ROS2 연결이 필요합니다.'));
+    return this._callRosServicePromise(ros, `/rosapi/${operation}`, `rosapi/${operation}`, args);
+  },
+
+  async searchRos2Params(prefix = '', index = App.activeSlotIndex) {
+    const ros = this.getRos(index);
+    const response = await this.ros2Api('get_param_names', { prefix }, index);
+    const values = await Promise.all((response.names || []).slice(0, 30).map(async name => {
+      const value = await this._callRosServicePromise(ros, '/rosapi/get_param', 'rosapi/GetParam', { name });
+      return { name, value: JSON.parse(value.value), type: value.type };
+    }));
+    return { values, partial: response.partial };
+  },
+
+  createRos2Action(action, type, goal, index = App.activeSlotIndex, onFeedback = null) {
+    const slot = App.robotSlots?.[index];
+    if (!slot?.ros || !this.isRos2(index)) throw new Error('ROS2 연결이 필요합니다.');
+    if (slot.rosControlEnabled === false) throw new Error('로컬 bringup을 실행한 뒤 다시 연결하세요.');
+    const ros = slot.ros;
+    const id = `easyloop_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const call = (operation, args) => this._callRosServicePromise(ros,
+      `/easyloop/action/${operation}`, `easyloop/${operation}`, args);
+    let resolveResult;
+    let rejectResult;
+    let finished = false;
+    let timer;
+    const result = new Promise((resolve, reject) => { resolveResult = resolve; rejectResult = reject; });
+    const feedback = new ROSLIB.Topic({ ros, name: `/easyloop/action/${id}/feedback`, messageType: 'easyloop/Feedback' });
+    const response = new ROSLIB.Topic({ ros, name: `/easyloop/action/${id}/result`, messageType: 'easyloop/Result' });
+    const disconnected = () => finish(new Error('ROS2 연결 종료로 액션 결과를 확인할 수 없습니다.'));
+    const finish = (error, value) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      feedback.unsubscribe();
+      response.unsubscribe();
+      ros.off?.('close', disconnected);
+      slot.ros2Actions?.delete(handle);
+      if (error) rejectResult(error);
+      else resolveResult(value);
+    };
+    const handle = { id, action, result, cancel: () => call('cancel_goal', { id }) };
+    slot.ros2Actions ||= new Set();
+    slot.ros2Actions.add(handle);
+    feedback.subscribe(message => onFeedback?.(message));
+    response.subscribe(message => {
+      if (message.status === 4) finish(null, message.result);
+      else finish(new Error(message.message || `ROS2 action status=${message.status}`));
+    });
+    ros.on?.('close', disconnected);
+    timer = setTimeout(() => {
+      handle.cancel().catch(() => {});
+      finish(new Error('ROS2 action timed out'));
+    }, 30 * 60 * 1000);
+    call('send_goal', { id, action, type, goal }).then(value => {
+      if (!value.accepted) finish(new Error(value.message || 'ROS2 액션 요청이 거부되었습니다.'));
+    }).catch(error => finish(error instanceof Error ? error : new Error(String(error))));
+    return handle;
+  },
+
+  async _sendRos2Navigation(x, y, yaw, index = App.activeSlotIndex) {
+    const slot = App.robotSlots?.[index];
+    if (!slot) throw new Error('로봇이 선택되지 않았습니다.');
+    const actions = await this.ros2Api('actions', {}, index);
+    const action = `/${slot.robotId}/navigate_to_pose`;
+    const actionIndex = (actions.actions || []).indexOf(action);
+    if (actions.types?.[actionIndex] !== 'nav2_msgs/action/NavigateToPose') {
+      throw new Error('이 로봇은 NavigateToPose를 제공하지 않습니다. 지원되는 Task/RouteNavigation 경로를 사용하세요.');
+    }
+    if (slot.ros2Navigation) throw new Error('진행 중인 주행을 취소한 뒤 새 목표를 보내세요.');
+    const handle = this.createRos2Action(action, 'nav2_msgs/action/NavigateToPose', {
+      pose: { header: { frame_id: 'map', stamp: { sec: 0, nanosec: 0 } },
+        pose: { position: { x, y, z: 0 }, orientation: { x: 0, y: 0, z: Math.sin(yaw / 2), w: Math.cos(yaw / 2) } } }
+    }, index);
+    slot.ros2Navigation = handle;
+    const cancel = document.getElementById('btn-ros2-nav-cancel');
+    if (cancel) cancel.hidden = false;
+    App.toast('ROS2 주행 요청을 전송했습니다.', 'info');
+    try {
+      await handle.result;
+      App.toast(`${slot.robotId}: ROS2 주행 완료`, 'success');
+    } finally {
+      slot.ros2Navigation = null;
+      if (cancel && index === App.activeSlotIndex) cancel.hidden = true;
+    }
+  },
+
+  async cancelRos2Navigation() {
+    const slot = App.robotSlots?.[App.activeSlotIndex];
+    if (!slot?.ros2Navigation) return;
+    try {
+      const response = await slot.ros2Navigation.cancel();
+      App.toast(response.cancelled ? '주행 취소를 요청했습니다.' : '주행 취소가 거부되었습니다.', response.cancelled ? 'info' : 'error');
+    } catch (error) { App.toast(String(error.message || error), 'error'); }
+  },
+
   ros: null,
   mapRotation: 0,
   lastMapMsg: null,
@@ -344,6 +478,7 @@ const RosManager = {
   disconnectSlot(index) {
     if (index < 0 || index >= App.robotSlots.length) return;
     const slot = App.robotSlots[index];
+    for (const action of slot.ros2Actions || []) action.cancel().catch(() => {});
     if (index === App.activeSlotIndex && typeof JogControl !== 'undefined') {
       JogControl._stopJogControls?.();
       JogControl._shutdownJogWorker?.();
@@ -527,15 +662,22 @@ const RosManager = {
 
     // Charge relay feedback. BMS current is evaluated separately so a relay ON
     // command is not mistaken for actual charging.
-    this._subscribeSlotTopic(index, 'charge-relay-state', `/${rid}/charge_relay_state`, 'std_msgs/Bool', (msg) => {
-      this._handleChargeRelayState(index, msg);
-    });
-    this._subscribeSlotTopic(index, 'io-charge-relay-state', `/${rid}/io/charge_relay`, 'std_msgs/Bool', (msg) => {
-      this._handleChargeRelayState(index, msg);
-    });
-    this._subscribeSlotTopic(index, 'spx-io-charge-relay-state', `/${rid}/io/do/charge_relay`, 'std_msgs/Bool', (msg) => {
-      this._handleChargeRelayState(index, msg);
-    });
+    if (!this.isRos2(index)) {
+      this._subscribeSlotTopic(index, 'charge-relay-state', `/${rid}/charge_relay_state`, 'std_msgs/Bool', (msg) => {
+        this._handleChargeRelayState(index, msg);
+      });
+      this._subscribeSlotTopic(index, 'io-charge-relay-state', `/${rid}/io/charge_relay`, 'std_msgs/Bool', (msg) => {
+        this._handleChargeRelayState(index, msg);
+      });
+      this._subscribeSlotTopic(index, 'spx-io-charge-relay-state', `/${rid}/io/do/charge_relay`, 'std_msgs/Bool', (msg) => {
+        this._handleChargeRelayState(index, msg);
+      });
+    }
+    const ros2Relay = this._compatibilityForSlot(index)?.monitoring?.topics?.chargeRelay;
+    if (ros2Relay?.name && ros2Relay?.type) {
+      this._subscribeSlotTopic(index, 'ros2-charge-relay-state', ros2Relay.name, ros2Relay.type,
+        msg => this._handleChargeRelayState(index, msg));
+    }
 
     // Also read footprint from ROS parameter as fallback
     this._fetchFootprintParam(index, rid);
@@ -995,7 +1137,7 @@ const RosManager = {
       this._subscribeSlotTopic(
         index,
         'footprint',
-        `/${rid}/move_base/local_costmap/footprint`,
+        this.isRos2(index) ? `/${rid}/local_costmap/published_footprint` : `/${rid}/move_base/local_costmap/footprint`,
         'geometry_msgs/PolygonStamped',
         (msg) => this._handleFootprintMessage(index, msg, 'move-base')
       );
@@ -1011,7 +1153,7 @@ const RosManager = {
       this._subscribeLocalCostmap(index, rid);
     }
     if (document.getElementById('chk-nav-path')?.checked) {
-      this._subscribePathLayer(index, 'navigation-path', `/${rid}/best_local_trajectories_nav`, '_navigationPath');
+      this._subscribePathLayer(index, 'navigation-path', this.isRos2(index) ? `/${rid}/local_plan` : `/${rid}/best_local_trajectories_nav`, '_navigationPath');
     }
     if (document.getElementById('chk-nav-goal')?.checked) {
       this._subscribeNavigationGoal(index, rid);
@@ -1295,7 +1437,7 @@ const RosManager = {
     this._subscribeSlotTopic(
       index,
       'navigation-goal',
-      `/${rid}/move_base/WaypointsGlobalPlanner/current_goal`,
+      this.isRos2(index) ? `/${rid}/goal_update` : `/${rid}/move_base/WaypointsGlobalPlanner/current_goal`,
       'geometry_msgs/PoseStamped',
       (msg) => {
         if (index !== App.activeSlotIndex) return;
@@ -1854,8 +1996,8 @@ const RosManager = {
     const stamp = msg?.header?.stamp || {};
     const key = [
       slot.robotId,
-      Number(stamp.secs) || 0,
-      Number(stamp.nsecs) || 0,
+      Number(stamp.secs ?? stamp.sec) || 0,
+      Number(stamp.nsecs ?? stamp.nanosec) || 0,
       match[1],
       match[2],
       match[3]
@@ -1891,7 +2033,7 @@ const RosManager = {
       index,
       'loop-closure-log',
       '/rosout',
-      'rosgraph_msgs/Log',
+      this.isRos2(index) ? 'rcl_interfaces/msg/Log' : 'rosgraph_msgs/Log',
       msg => this._handleLoopClosureLog(index, msg)
     );
   },
@@ -2553,10 +2695,17 @@ const RosManager = {
         if (!cfg.displayOnly && checkbox.checked && currentSlot && currentSlot.ros) {
           // Build topic name dynamically with current robot ID
           const currentRid = currentSlot.robotId;
-          const topic = cfg.topicTemplate.replace('{rid}', currentRid);
+          const ros2Templates = {
+            bms: '/{rid}/battery_state', footprint: '/{rid}/local_costmap/published_footprint',
+            'local-costmap': '/{rid}/local_costmap/costmap', 'navigation-path': '/{rid}/local_plan',
+            'navigation-goal': '/{rid}/goal_update'
+          };
+          const template = this.isRos2(currentIndex) ? ros2Templates[cfg.key] || cfg.topicTemplate : cfg.topicTemplate;
+          const topic = template.replace('{rid}', currentRid);
+          const type = this.isRos2(currentIndex) && cfg.key === 'bms' ? 'sensor_msgs/msg/BatteryState' : cfg.type;
           // Create handler that passes current index
           const handler = (msg) => cfg.handlerFn(msg, currentIndex);
-          this._subscribeSlotTopic(currentIndex, cfg.key, topic, cfg.type, handler);
+          this._subscribeSlotTopic(currentIndex, cfg.key, topic, type, handler);
           if (cfg.key === 'footprint') {
             this._subscribeSlotTopic(
               currentIndex,
@@ -5346,6 +5495,10 @@ const RosManager = {
 
   // Publish navigation goal to /move_base_simple/goal
   _publishNavGoal(x, y, yawRad, params) {
+    if (this.isRos2()) {
+      this._sendRos2Navigation(x, y, yawRad).catch(error => App.toast(`주행 차단: ${error.message || error}`, 'error'));
+      return;
+    }
     const p = params || { maxVel: 0.8, passing: false, noAvoid: false };
     const ros = this.ros;
     const paramInfo = `vel=${p.maxVel}, passing=${p.passing}, noAvoid=${p.noAvoid}`;
@@ -5459,7 +5612,7 @@ const RosManager = {
     const msg = new ROSLIB.Message({
       header: {
         frame_id: 'map',
-        stamp: { secs: 0, nsecs: 0 }
+        stamp: this.isRos2(slotIndex) ? { sec: 0, nanosec: 0 } : { secs: 0, nsecs: 0 }
       },
       pose: {
         pose: {
@@ -6923,6 +7076,11 @@ const RosManager = {
       return;
     }
 
+    if (this.isRos2()) {
+      this.ros2Api('get_param', { name }).then(value => callback({ success: true, value: JSON.parse(value.value) }))
+        .catch(error => callback({ error: String(error.message || error) }));
+      return;
+    }
     const param = new ROSLIB.Param({
       ros: ros,
       name: name
@@ -6940,6 +7098,11 @@ const RosManager = {
       return;
     }
 
+    if (this.isRos2()) {
+      this.ros2Api('set_param', { name, value: JSON.stringify(value) }).then(result => callback(result))
+        .catch(error => callback({ error: String(error.message || error) }));
+      return;
+    }
     const param = new ROSLIB.Param({
       ros: ros,
       name: name
@@ -8154,14 +8317,16 @@ free_thresh: 0.196
 
   _callRosServicePromise(ros, name, serviceType, args = {}) {
     return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`${name} timeout`)), 15000);
       try {
         const service = new ROSLIB.Service({ ros, name, serviceType });
         service.callService(
           new ROSLIB.ServiceRequest(args),
-          resolve,
-          error => reject(new Error(String(error || `${name} call failed`)))
+          result => { clearTimeout(timer); resolve(result); },
+          error => { clearTimeout(timer); reject(new Error(String(error?.message || error || `${name} call failed`))); }
         );
       } catch (error) {
+        clearTimeout(timer);
         reject(error);
       }
     });
@@ -8171,6 +8336,7 @@ free_thresh: 0.196
   _mapExecSessionId: null,
 
   async _mapExec(command) {
+    if (this.isRos2()) return this.execRuntimeCommand(command);
     // Create or reuse a dedicated exec-only SSH session
     if (!this._mapExecSessionId) {
       const info = App.getConnectionInfo();
@@ -9683,7 +9849,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     try {
-      const result = await SSHTerminal.execCommand(command);
+      const result = await RosManager.execRuntimeCommand(RosManager.isRos2() ? RosManager.translateRos2Query(command) : command);
       if (result.success) {
         showIntrospectResult(title, result.stdout || result.stderr || '(No output)');
       } else {
@@ -9729,7 +9895,8 @@ document.addEventListener('DOMContentLoaded', () => {
       document.getElementById('service-name').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
       try {
-        const typeResult = await SSHTerminal.execCommand(`rosservice type ${svc}`);
+        const typeResult = await RosManager.execRuntimeCommand(RosManager.isRos2()
+          ? `ros2 service type ${RosManager._shellQuote(svc)}` : `rosservice type ${svc}`);
         if (typeResult.success && typeResult.stdout) {
           const svcType = typeResult.stdout.trim();
           document.getElementById('service-result').textContent = `Service type: ${svcType}\nReady to call. Enter request parameters and click "Call".`;
