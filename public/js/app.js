@@ -983,17 +983,13 @@ const App = {
     });
   },
 
-  // Format robot ID: "1" -> "R_001", "44" -> "R_044", "R_005" stays
+  // ROS names are case-sensitive. Accept common operator spellings, but keep a
+  // single canonical RID so `r_105` can never create `/r_105/*` subscriptions.
   formatRobotId(value) {
-    if (!value) return '';
-    // Already formatted
-    if (/^R_\d{3}$/.test(value)) return value;
-    // Pure number
-    const num = parseInt(value, 10);
-    if (!isNaN(num) && num >= 0 && num <= 999) {
-      return 'R_' + String(num).padStart(3, '0');
-    }
-    return value;
+    const text = String(value || '').trim();
+    if (!text) return '';
+    const match = text.match(/^R[_-]?(\d{1,3})$/i) || text.match(/^(\d{1,3})$/);
+    return match ? `R_${match[1].padStart(3, '0')}` : '';
   },
 
   // Robot Manager Modal setup
@@ -1729,11 +1725,16 @@ const App = {
   },
 
   addRobotSlot(ip, robotId, sshPort, tunnelMode, sshPassword, robotNumber, _template = null, options = {}) {
+    const canonicalRobotId = this.formatRobotId(robotId);
+    if (!canonicalRobotId) {
+      if (!options.silent) this.toast(`잘못된 로봇 ID: ${robotId || '(없음)'}`, 'error');
+      return false;
+    }
     const manualAdded = options.manualAdded === true || options.source === 'manual';
     const savedRosMode = this._savedRobotRosMode(ip, robotId);
     this.robotSlots.push({
       ip: ip,
-      robotId: robotId,
+      robotId: canonicalRobotId,
       sshPort: sshPort || 22,
       wsPort: Number(options.wsPort) || 9090,
       rosMode: ['auto', 'ros1', 'ros2'].includes(options.rosMode)
@@ -1772,8 +1773,9 @@ const App = {
       this.updateMultiRobotButtons();
     }
     if (!options.silent) {
-      this.toast(`로봇 추가됨: ${robotId} (${ip}:${sshPort || 22})`, 'success');
+      this.toast(`로봇 추가됨: ${canonicalRobotId} (${ip}:${sshPort || 22})`, 'success');
     }
+    return true;
   },
 
   removeRobotSlot(index) {
@@ -1859,20 +1861,45 @@ const App = {
       try {
         this.toast(`Tunnel connecting: ${slot.ip}...`, 'info');
         const tunnelId = `tunnel-${index}-${slot.robotId}`;
-        // B12 fix: 터널은 20초 타임아웃
-        const res = await fetchWithTimeout('/api/tunnel/start', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            tunnelId,
-            robotIp: slot.ip,
-            robotNumber: slot.robotNumber,
-            sshPort: slot.sshPort,
-            sshUser: 'syscon',
-            sshPassword: slot.sshPassword
-          })
-        }, 20000);
-        const result = await res.json();
+        const startTunnel = async (sshPassword = null) => {
+          // B12 fix: 터널은 20초 타임아웃
+          const res = await fetchWithTimeout('/api/tunnel/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              tunnelId,
+              robotIp: slot.ip,
+              robotNumber: slot.robotNumber,
+              sshPort: slot.sshPort,
+              sshUser: 'syscon',
+              sshPassword
+            })
+          }, 20000);
+          return res.json();
+        };
+
+        // Always try the Windows user's id_rsa/SSH agent first. A password is
+        // requested only when the server confirms that authentication failed.
+        let result = await startTunnel();
+        if (!result.success && result.needPassword) {
+          result = await new Promise((resolve) => {
+            this.showPasswordModal(
+              result.message,
+              async (password) => {
+                if (!password) {
+                  resolve({ success: false, message: 'Password cancelled' });
+                  return;
+                }
+                try {
+                  resolve(await startTunnel(password));
+                } catch (error) {
+                  resolve({ success: false, message: error.message });
+                }
+              },
+              () => resolve({ success: false, message: 'Password cancelled' })
+            );
+          });
+        }
         if (!result.success) {
           this.toast(`Tunnel connection failed: ${result.message}`, 'error');
           return;
@@ -2306,7 +2333,14 @@ const App = {
   _readManualRobotConfigs() {
     try {
       const saved = JSON.parse(localStorage.getItem(this.MANUAL_ROBOTS_STORAGE_KEY) || '[]');
-      return Array.isArray(saved) ? saved.filter(robot => robot?.ip && robot?.robotId) : [];
+      if (!Array.isArray(saved)) return [];
+      const normalized = saved
+        .map(robot => ({ ...robot, robotId: this.formatRobotId(robot?.robotId) }))
+        .filter(robot => robot?.ip && robot?.robotId);
+      if (JSON.stringify(normalized) !== JSON.stringify(saved)) {
+        _safeSetItem(this.MANUAL_ROBOTS_STORAGE_KEY, JSON.stringify(normalized));
+      }
+      return normalized;
     } catch (error) {
       console.warn('수동 로봇 설정 읽기 실패:', error.message);
       return [];
@@ -2454,7 +2488,7 @@ const App = {
   },
 
   // Show SSH password modal
-  showPasswordModal(message, callback) {
+  showPasswordModal(message, callback, onCancel = null) {
     const modal = document.getElementById('ssh-password-modal');
     const msgEl = document.getElementById('ssh-password-message');
     const passwordInput = document.getElementById('modal-ssh-password');
@@ -2472,6 +2506,7 @@ const App = {
 
     const handleCancel = () => {
       modal.classList.remove('show');
+      if (onCancel) onCancel();
     };
 
     connectBtn.onclick = handleConnect;
@@ -3045,7 +3080,11 @@ document.addEventListener('DOMContentLoaded', () => {
         if (slot.connectedAt && (now - slot.connectedAt) > gracePeriod) {
           const index = App.activeSlotIndex;
           const health = this._topicHealth[index] || {};
-          const staleTopics = ['bms', 'workstate'].filter(k => {
+          const healthKeys = typeof RosManager !== 'undefined'
+              && typeof RosManager.expectedHealthTopicKeys === 'function'
+            ? RosManager.expectedHealthTopicKeys(index)
+            : [];
+          const staleTopics = healthKeys.filter(k => {
             const topicHealth = health[k];
             const lastAt = topicHealth?.lastAt || this._lastTopicTime[k] || now;
             return now - lastAt > threshold;
@@ -3054,17 +3093,12 @@ document.addEventListener('DOMContentLoaded', () => {
           // open while monitoring subscriptions have already been removed.
           // Restore only missing subscriptions; re-subscribing every stale
           // topic can amplify a congested remote rosbridge connection.
-          const hasMonitoringSubscriptions = Boolean(
-            slot.dataSubscribed && slot.subscriptions &&
-            slot.subscriptions.bms && slot.subscriptions['work-state']
-          );
           const lastResubscribe = this._lastTopicResubscribeAt[index] || 0;
-          if (!hasMonitoringSubscriptions && slot.ros && now - lastResubscribe > threshold) {
-            this._lastTopicResubscribeAt[index] = now;
-            if (typeof RosManager !== 'undefined') {
-              RosManager.subscribeSlotMonitoring(index);
-              RosManager.subscribeActiveSlotUI(index);
-            }
+          if (slot.ros && now - lastResubscribe > threshold
+              && typeof RosManager !== 'undefined'
+              && typeof RosManager.restoreMissingHealthSubscriptions === 'function') {
+            const restored = RosManager.restoreMissingHealthSubscriptions(index);
+            if (restored > 0) this._lastTopicResubscribeAt[index] = now;
           }
           staleTopics.forEach(k => {
             const alarmKey = `${index}:${k}`;
@@ -3073,7 +3107,7 @@ document.addEventListener('DOMContentLoaded', () => {
               this._fireAlarm(`Topic dropped: ${k} (${s.topicDropSec}s no response, ${slot.robotId})`);
             }
           });
-          ['bms', 'workstate'].filter(k => !staleTopics.includes(k)).forEach(k => {
+          healthKeys.filter(k => !staleTopics.includes(k)).forEach(k => {
             this._topicDropAlarmed[`${index}:${k}`] = false;
           });
         }

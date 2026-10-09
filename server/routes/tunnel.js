@@ -34,8 +34,9 @@ function createTunnelRouter() {
       });
       res.json(result);
     } catch (err) {
-      res.status(500).json({
+      res.status(err.needPassword ? 200 : 500).json({
         success: false,
+        needPassword: Boolean(err.needPassword),
         message: err.message
       });
     }

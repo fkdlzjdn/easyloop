@@ -209,6 +209,15 @@ const RosManager = {
   connectSlot(index, ip, robotId) {
     if (index < 0 || index >= App.robotSlots.length) return;
     const slot = App.robotSlots[index];
+    const canonicalRobotId = typeof App.formatRobotId === 'function'
+      ? App.formatRobotId(robotId || slot.robotId)
+      : String(robotId || slot.robotId || '');
+    if (!canonicalRobotId) {
+      console.error(`ROS slot[${index}] invalid robot ID: ${robotId || slot.robotId || '(없음)'}`);
+      return;
+    }
+    robotId = canonicalRobotId;
+    slot.robotId = canonicalRobotId;
     if (typeof RobotCompatibility !== 'undefined') RobotCompatibility.clear(slot);
 
     // B9 fix: 수동 재연결 전 auto-reconnect 타이머 해제
@@ -531,6 +540,47 @@ const RosManager = {
     // Also read footprint from ROS parameter as fallback
     this._fetchFootprintParam(index, rid);
     this._probeSlamDimensions(index);
+  },
+
+  // Restore only health topics that were verified in the live ROS graph.
+  // Unsupported BMS/RobotState endpoints are valid model differences, not a
+  // reason to recreate every map/TF/UI subscription on each alarm interval.
+  restoreMissingHealthSubscriptions(index) {
+    const slot = App.robotSlots[index];
+    if (!slot?.ros || index !== App.activeSlotIndex) return 0;
+    const monitoring = this._compatibilityForSlot(index)?.monitoring;
+    if (!monitoring?.verified) return 0;
+    const topics = monitoring.topics || {};
+    let restored = 0;
+
+    if (topics.bms?.name && topics.bms?.type && !slot.subscriptions?.bms) {
+      this._subscribeSlotTopic(index, 'bms', topics.bms.name, topics.bms.type, (msg) => {
+        this._handleSlotBmsData(index, msg);
+      });
+      restored++;
+    }
+    if (topics.robotState?.name && topics.robotState?.type
+        && !slot.subscriptions?.['work-state']) {
+      this._subscribeSlotTopic(
+        index,
+        'work-state',
+        topics.robotState.name,
+        topics.robotState.type,
+        (msg) => this._handleSlotWorkState(index, msg)
+      );
+      restored++;
+    }
+    return restored;
+  },
+
+  expectedHealthTopicKeys(index) {
+    const monitoring = this._compatibilityForSlot(index)?.monitoring;
+    if (!monitoring?.verified) return [];
+    const topics = monitoring.topics || {};
+    const keys = [];
+    if (topics.bms?.name && topics.bms?.type) keys.push('bms');
+    if (topics.robotState?.name && topics.robotState?.type) keys.push('workstate');
+    return keys;
   },
 
   // Fetch footprint from ROS parameter (move_base footprint param)

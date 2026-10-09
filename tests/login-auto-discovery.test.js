@@ -67,6 +67,68 @@ function loadApp() {
 }
 
 describe('login robot auto-discovery', () => {
+  test('canonicalizes lowercase and legacy RID spellings before creating a slot', () => {
+    const { App } = loadApp();
+    App.activeSlotIndex = -1;
+
+    expect(App.formatRobotId('r_105')).toBe('R_105');
+    expect(App.formatRobotId('R-5')).toBe('R_005');
+    expect(App.formatRobotId('5')).toBe('R_005');
+    expect(App.formatRobotId('BMA')).toBe('');
+
+    expect(App.addRobotSlot(
+      '172.25.20.105', 'r_105', 22, false, '', 105, null,
+      { activateFirst: false, deferRender: true, silent: true, skipSave: true }
+    )).toBe(true);
+    expect(App.robotSlots[0].robotId).toBe('R_105');
+  });
+
+  test('migrates a saved lowercase RID before restoring the manual robot', () => {
+    const { App, storage } = loadApp();
+    storage.set(App.MANUAL_ROBOTS_STORAGE_KEY, JSON.stringify([{
+      ip: '172.25.20.105', robotId: 'r_105', sshPort: 22, manualAdded: true
+    }]));
+
+    const configs = App._readManualRobotConfigs();
+
+    expect(configs[0].robotId).toBe('R_105');
+    expect(JSON.parse(storage.get(App.MANUAL_ROBOTS_STORAGE_KEY))[0].robotId).toBe('R_105');
+  });
+
+  test('retries an SSH tunnel with an entered password after key rejection', async () => {
+    const { App, context } = loadApp();
+    App.robotSlots = [{
+      ip: '192.168.20.63',
+      robotId: 'R_013',
+      robotNumber: 13,
+      sshPort: 2222,
+      tunnelMode: true,
+      sshPassword: 'must-not-be-sent-before-key-auth'
+    }];
+    App.toast = jest.fn();
+    App.showPasswordModal = jest.fn((_message, submit) => submit('field-password'));
+    context.RosManager = { connectSlot: jest.fn() };
+    context.fetch
+      .mockResolvedValueOnce({
+        json: async () => ({
+          success: false,
+          needPassword: true,
+          message: 'SSH key authentication failed. Password required.'
+        })
+      })
+      .mockResolvedValueOnce({
+        json: async () => ({ success: true, localIp: '127.0.0.13', localPort: 9090 })
+      });
+
+    await App.connectSlot(0);
+
+    const requests = context.fetch.mock.calls.map(([, options]) => JSON.parse(options.body));
+    expect(requests[0].sshPassword).toBeNull();
+    expect(requests[1].sshPassword).toBe('field-password');
+    expect(App.robotSlots[0].sshPassword).toBe('must-not-be-sent-before-key-auth');
+    expect(context.RosManager.connectSlot).toHaveBeenCalledWith(0, '127.0.0.13', 'R_013');
+  });
+
   test('map tool menus are mutually exclusive and close on outside click', () => {
     const { App, document } = loadApp();
     const menus = [createElement(), createElement(), createElement(), createElement()];

@@ -40,6 +40,12 @@ function normalizeRobotId(value, allowNumeric = false) {
   return null;
 }
 
+function normalizeConfiguredRobotId(value) {
+  const text = String(value || '').trim();
+  const match = text.match(/^R[_-]?(\d{1,3})$/i) || text.match(/^(\d{1,3})$/);
+  return match ? `R_${match[1].padStart(3, '0')}` : null;
+}
+
 function extractRobotIdFromValues(values) {
   try {
     return normalizeRobotId(JSON.stringify(values));
@@ -233,7 +239,10 @@ function createRobotsRouter({
 
   router.get('/', (req, res) => {
     const config = loadRobotsConfig();
-    res.json(config.robots);
+    res.json(config.robots.map(robot => ({
+      ...robot,
+      id: normalizeConfiguredRobotId(robot.id) || robot.id
+    })));
   });
 
   // Scan reachability of all configured robots
@@ -243,7 +252,12 @@ function createRobotsRouter({
     const results = await Promise.all(
       config.robots.map(async (robot) => {
         const reachable = await checkHost(robot.ip, robot.rosBridgePort || 9090, timeout);
-        return { id: robot.id, name: robot.name, ip: robot.ip, reachable };
+        return {
+          id: normalizeConfiguredRobotId(robot.id) || robot.id,
+          name: robot.name,
+          ip: robot.ip,
+          reachable
+        };
       })
     );
     res.json(results);
@@ -262,6 +276,8 @@ function createRobotsRouter({
       maxLength: VALIDATION_LIMITS.robotId
     });
     if (idError) return badRequest(res, idError);
+    const normalizedId = normalizeConfiguredRobotId(robot.id);
+    if (!normalizedId) return badRequest(res, 'id must be R_### or a number from 0 to 999');
 
     const nameError = validateStringField('name', robot.name, {
       maxLength: VALIDATION_LIMITS.robotName
@@ -273,11 +289,12 @@ function createRobotsRouter({
     });
     if (ipError) return badRequest(res, ipError);
 
-    const existingIndex = config.robots.findIndex(r => r.id === robot.id);
+    const normalizedRobot = { ...robot, id: normalizedId };
+    const existingIndex = config.robots.findIndex(r => normalizeConfiguredRobotId(r.id) === normalizedId);
     if (existingIndex >= 0) {
-      config.robots[existingIndex] = robot;
+      config.robots[existingIndex] = normalizedRobot;
     } else {
-      config.robots.push(robot);
+      config.robots.push(normalizedRobot);
     }
 
     saveRobotsConfig(config);
@@ -291,8 +308,10 @@ function createRobotsRouter({
     });
     if (idError) return badRequest(res, idError);
 
+    const normalizedId = normalizeConfiguredRobotId(req.params.id);
+    if (!normalizedId) return badRequest(res, 'id must be R_### or a number from 0 to 999');
     const config = loadRobotsConfig();
-    config.robots = config.robots.filter(r => r.id !== req.params.id);
+    config.robots = config.robots.filter(r => normalizeConfiguredRobotId(r.id) !== normalizedId);
     saveRobotsConfig(config);
     res.json({ success: true });
   });
@@ -353,6 +372,7 @@ module.exports = {
   FIXED_DISCOVERY_IP,
   normalizeSubnetBase,
   normalizeRobotId,
+  normalizeConfiguredRobotId,
   extractRobotIdFromValues,
   scanSubnet,
   createRobotsRouter

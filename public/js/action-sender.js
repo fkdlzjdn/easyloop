@@ -6225,16 +6225,20 @@ const ActionSender = {
     try {
       const taskInterface = await this._resolveTaskInterface(slot);
       if (token !== this._taskTelemetryToken) return;
-      const feedback = new ROSLIB.Topic({
-        ros: slot.ros,
-        name: taskInterface.feedbackName,
-        messageType: taskInterface.feedbackType
-      });
-      const result = new ROSLIB.Topic({
-        ros: slot.ros,
-        name: taskInterface.resultName,
-        messageType: taskInterface.resultType
-      });
+      const feedback = taskInterface.feedbackName && taskInterface.feedbackType
+        ? new ROSLIB.Topic({
+          ros: slot.ros,
+          name: taskInterface.feedbackName,
+          messageType: taskInterface.feedbackType
+        })
+        : null;
+      const result = taskInterface.resultName && taskInterface.resultType
+        ? new ROSLIB.Topic({
+          ros: slot.ros,
+          name: taskInterface.resultName,
+          messageType: taskInterface.resultType
+        })
+        : null;
       const state = taskInterface.stateName && taskInterface.stateType
         ? new ROSLIB.Topic({
           ros: slot.ros,
@@ -6242,9 +6246,15 @@ const ActionSender = {
           messageType: taskInterface.stateType
         })
         : null;
-      feedback.subscribe(message => this._handleTaskFeedback(slot.robotId, message, taskInterface.variant));
-      result.subscribe(message => this._handleTaskResult(slot.robotId, message, taskInterface.variant));
+      feedback?.subscribe(message => this._handleTaskFeedback(slot.robotId, message, taskInterface.variant));
+      result?.subscribe(message => this._handleTaskResult(slot.robotId, message, taskInterface.variant));
       state?.subscribe(message => this._handleTaskState(slot.robotId, message));
+      if (!feedback && !result && !state) {
+        this._taskTelemetry = null;
+        this._updateTaskControlsAvailability();
+        this._setTaskExecutionFeedback('idle', `${slot.robotId} · Task 실행 가능 · 상태 topic 미지원`);
+        return;
+      }
       this._taskTelemetry = { feedback, result, state, slotIndex };
       this._updateTaskControlsAvailability();
       this._setTaskExecutionFeedback('idle', `${slot.robotId} · Task 상태 수신 대기`);

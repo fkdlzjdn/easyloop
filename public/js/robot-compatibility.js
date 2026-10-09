@@ -649,6 +649,7 @@ const RobotCompatibility = {
       resultType: result.verified ? result.type : null,
       stateName: state.verified ? state.name : null,
       stateType: state.verified ? state.type : null,
+      telemetryVerified: feedback.verified || result.verified || state.verified,
       operations: { goal, pause, resume, cancel, feedback, result, state }
     };
   },

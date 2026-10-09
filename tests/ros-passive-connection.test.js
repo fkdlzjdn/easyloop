@@ -124,6 +124,47 @@ function makeElement() {
 }
 
 describe('ROS passive fleet connections', () => {
+  test('restores only verified missing BMS and RobotState subscriptions', () => {
+    const { manager, slot, App, context } = loadRosManager(0);
+    slot.connected = true;
+    slot.ros = {};
+    slot.subscriptions = { 'tf-static': {} };
+    context.RobotCompatibility = {
+      get: jest.fn(() => ({
+        monitoring: {
+          verified: true,
+          topics: {
+            bms: { name: '/R_001/bms', type: 'std_msgs/Float32MultiArray' },
+            robotState: { name: '/R_001/robot_state', type: 'syscon_msgs/RobotState' }
+          }
+        }
+      }))
+    };
+    manager._subscribeSlotTopic = jest.fn((_index, key) => {
+      slot.subscriptions[key] = {};
+    });
+
+    expect(manager.restoreMissingHealthSubscriptions(0)).toBe(2);
+    expect(manager.expectedHealthTopicKeys(0)).toEqual(['bms', 'workstate']);
+    expect(manager._subscribeSlotTopic.mock.calls.map(call => call[1]))
+      .toEqual(['bms', 'work-state']);
+    expect(App.alarmSystem.resetTopicTimes).not.toHaveBeenCalled();
+  });
+
+  test('does not invent health subscriptions for an unsupported model', () => {
+    const { manager, slot, context } = loadRosManager(0);
+    slot.connected = true;
+    slot.ros = {};
+    context.RobotCompatibility = {
+      get: jest.fn(() => ({ monitoring: { verified: false, topics: {} } }))
+    };
+    manager._subscribeSlotTopic = jest.fn();
+
+    expect(manager.restoreMissingHealthSubscriptions(0)).toBe(0);
+    expect(manager.expectedHealthTopicKeys(0)).toEqual([]);
+    expect(manager._subscribeSlotTopic).not.toHaveBeenCalled();
+  });
+
   test('does not treat robot_state.type as the ROBOT_MODEL environment value', () => {
     const { manager, slot } = loadRosManager(0);
 

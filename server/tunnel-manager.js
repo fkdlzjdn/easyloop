@@ -11,6 +11,12 @@ function getSSHKeyPath() {
   return path.join(os.homedir(), '.ssh', 'id_rsa');
 }
 
+function createTunnelAuthError(message, needPassword = false) {
+  const error = new Error(message);
+  error.needPassword = Boolean(needPassword);
+  return error;
+}
+
 function parsePort(port, name = 'port') {
   const n = parseInt(port, 10);
   if (isNaN(n) || n < 1 || n > 65535) throw new Error(`Invalid ${name}: ${port}`);
@@ -39,11 +45,15 @@ function buildAuthConfig(config) {
   if (config.sshPassword) {
     authConfig.password = config.sshPassword;
   } else if (fs.existsSync(sshKeyPath)) {
-    authConfig.privateKey = fs.readFileSync(sshKeyPath);
+    try {
+      authConfig.privateKey = fs.readFileSync(sshKeyPath);
+    } catch (error) {
+      throw createTunnelAuthError('SSH key could not be read. Password required.', true);
+    }
   } else if (process.env.SSH_AUTH_SOCK) {
     authConfig.agent = process.env.SSH_AUTH_SOCK;
   } else {
-    throw new Error('No SSH password, key, or agent available for tunnel authentication.');
+    throw createTunnelAuthError('No SSH key or agent available. Password required.', true);
   }
 
   return authConfig;
@@ -205,7 +215,11 @@ function startTunnel(tunnelId, config) {
     });
 
     conn.on('error', (err) => {
-      fail(new Error(`SSH tunnel connection failed: ${err.message}`));
+      if (err?.level === 'client-authentication' && !authConfig.password) {
+        fail(createTunnelAuthError('SSH key authentication failed. Password required.', true));
+        return;
+      }
+      fail(createTunnelAuthError(`SSH tunnel connection failed: ${err.message}`));
     });
 
     conn.on('close', () => {

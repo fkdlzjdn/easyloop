@@ -148,6 +148,24 @@ describe('RobotCompatibility four-generation runtime profiles', () => {
     expect(profile.chassis.drive).toMatchObject({ verified: true, type: 'geometry_msgs/Twist' });
   });
 
+  test('keeps task commands usable but marks telemetry unavailable when feedback topics are absent', () => {
+    const fixture = legacyFixture('R_105', 'sr5_bma');
+    fixture.topics = fixture.topics.filter(name => (
+      !name.endsWith('/TARU/feedback')
+      && !name.endsWith('/TARU/result')
+      && !name.endsWith('/taru_state')
+    ));
+    const profile = build(fixture);
+
+    expect(profile.task).toMatchObject({
+      verified: true,
+      telemetryVerified: false,
+      feedbackName: null,
+      resultName: null,
+      stateName: null
+    });
+  });
+
   test('core-submodule lineage can use the same TARU runtime protocol', () => {
     const fixture = legacyFixture('R_020', 'sr5_stator');
     const profile = build(fixture);

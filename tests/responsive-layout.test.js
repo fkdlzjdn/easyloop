@@ -29,7 +29,7 @@ describe('Resolution-adaptive layout contract', () => {
     expect(canStyle).toContain('@media (max-width: 620px)');
     expect(app).toContain("btn.title = '지도 패널 표시/숨김'");
     expect(html).toContain('css/style.css?v=20260806-stl-ulsan-jog');
-    expect(html).toContain('js/app.js?v=20260731-manual-on-robot-switch');
+    expect(html).toContain('js/app.js?v=20261001-rid-connection-fix');
   });
 
   test('keeps the global Quick Task entry prominent and full-width on mobile', () => {

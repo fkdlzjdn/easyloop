@@ -82,6 +82,20 @@ describe('robot configuration routes without network access', () => {
     expect(saveRobotsConfig).toHaveBeenCalledTimes(3);
   });
 
+  test('normalizes configured lowercase robot IDs and deletes them canonically', async () => {
+    const added = await requestJson(port, 'POST', '/api/robots', {
+      id: 'r_105', name: 'BMA', ip: '172.25.20.105', rosBridgePort: 9090
+    });
+    const afterAdd = await requestJson(port, 'GET', '/api/robots');
+    const removed = await requestJson(port, 'DELETE', '/api/robots/r_105');
+    const afterDelete = await requestJson(port, 'GET', '/api/robots');
+
+    expect(added.status).toBe(200);
+    expect(afterAdd.body).toContainEqual(expect.objectContaining({ id: 'R_105' }));
+    expect(removed.status).toBe(200);
+    expect(afterDelete.body.map(robot => robot.id)).toEqual(['R_001']);
+  });
+
   test('rejects malformed robot and subnet requests before any scan', async () => {
     const malformedRobot = await requestJson(port, 'POST', '/api/robots', []);
     const missingId = await requestJson(port, 'POST', '/api/robots', {

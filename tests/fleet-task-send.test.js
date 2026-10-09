@@ -5,6 +5,7 @@ const vm = require('vm');
 function loadActionSender() {
   const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'action-sender.js'), 'utf8');
   const calls = [];
+  const topicCalls = [];
   const availableServices = ['/R_002/spx/task/goal'];
   const unresponsiveServices = new Set();
   const saved = {
@@ -38,6 +39,16 @@ function loadActionSender() {
   class FakeServiceRequest {
     constructor(values) {
       Object.assign(this, values);
+    }
+  }
+
+  class FakeTopic {
+    constructor(options) {
+      this.options = options;
+      this.subscribe = jest.fn(callback => {
+        topicCalls.push({ options, callback });
+      });
+      this.unsubscribe = jest.fn();
     }
   }
 
@@ -103,7 +114,7 @@ function loadActionSender() {
       logAudit: jest.fn(),
       toast: jest.fn()
     },
-    ROSLIB: { Service: FakeService, ServiceRequest: FakeServiceRequest },
+    ROSLIB: { Service: FakeService, ServiceRequest: FakeServiceRequest, Topic: FakeTopic },
     RobotCompatibility: {
       get: jest.fn(compatibilityForServices),
       discover: jest.fn(async () => compatibilityForServices())
@@ -125,6 +136,7 @@ function loadActionSender() {
     manager: context.__ActionSender,
     context,
     calls,
+    topicCalls,
     availableServices,
     unresponsiveServices,
     saved,
@@ -136,6 +148,32 @@ function loadActionSender() {
 }
 
 describe('fleet saved task sending', () => {
+  test('does not send null subscriptions when task feedback and result are unavailable', async () => {
+    const { manager, slot, topicCalls } = loadActionSender();
+    slot.taskInterface = {
+      verified: true,
+      variant: 'sp_task',
+      goalName: '/R_002/TARU/goal',
+      goalType: 'sp_task/TaskGoal',
+      feedbackName: null,
+      feedbackType: null,
+      resultName: null,
+      resultType: null,
+      stateName: null,
+      stateType: null
+    };
+    manager.getTargetSlot = jest.fn(() => 0);
+    manager._updateTaskControlsAvailability = jest.fn();
+    manager._setTaskExecutionFeedback = jest.fn();
+
+    await manager._subscribeTaskTelemetry();
+
+    expect(topicCalls).toEqual([]);
+    expect(manager._taskTelemetry).toBeNull();
+    expect(manager._setTaskExecutionFeedback)
+      .toHaveBeenCalledWith('idle', expect.stringContaining('상태 topic 미지원'));
+  });
+
   test('sends a saved task to the clicked robot connection without switching active data', async () => {
     const { manager, calls, App } = loadActionSender();
 
