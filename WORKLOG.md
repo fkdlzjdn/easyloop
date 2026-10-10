@@ -19,3 +19,7 @@
 - lint, Jest 53 suites / 523 tests, Python bridge 20 tests 통과. 실제 HTTP/WebSocket 전송, 브라우저 모의 RPC 동작, Linux 패키지 시작/로그인/API 검증 통과. Windows/Linux 빌드와 ZIP 무결성 검증 통과.
 - r56 읽기 전용 SSH는 `No route to host`. 로봇 설치·설정·실행 상태를 변경하지 않았으며 실기 지도·주행·Task·충전 검증은 미수행이다. R_006의 NavigateToPose 부재 및 과거 Task ingress 비활성은 로봇의 제공 인터페이스에 따른 제한이다.
 - 사용 안내: `docs/ros2-migration.md`. 패키지는 `.env`와 비밀번호를 포함하지 않으며 `.env.example`만 제공한다.
+
+## 2026-10-10 — 마이그레이션 브랜치 이름 변경
+
+- 사용자 요청에 따라 `feat/ros2-r006-mode`를 `feat/ros2-migration`으로 변경하고 사용 안내를 갱신했다.

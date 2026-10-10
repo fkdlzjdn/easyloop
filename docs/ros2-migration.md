@@ -1,6 +1,6 @@
 # EasyLoop v1.4.0 — ROS1 / ROS2 사용 안내
 
-ROS1 rosbridge 연결과 기존 기능을 유지하면서 Syscon SPX ROS2 Jazzy 환경을 추가했다. 구현 브랜치는 `feat/ros2-r006-mode`이며 R_006 / sl400_vri의 수집 자료를 기준으로 작성했다.
+ROS1 rosbridge 연결과 기존 기능을 유지하면서 Syscon SPX ROS2 Jazzy 환경을 추가했다. 구현 브랜치는 `feat/ros2-migration`이며 R_006 / sl400_vri의 수집 자료를 기준으로 작성했다.
 
 ## 실행
 
