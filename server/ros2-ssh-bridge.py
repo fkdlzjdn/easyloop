@@ -212,6 +212,16 @@ class Bridge:
         args = request.get('args') or {}
         topics = self.node.get_topic_names_and_types()
         services = self.node.get_service_names_and_types()
+        if operation == 'runtime_contract':
+            names = ['route_contract.schema', 'route_navigation.current_map_id', 'route_contract.frame_id', 'factsheet.maximum_speed']
+            def received(response):
+                values = {name: parameter_value_to_python(value) for name, value in zip(names, response.values)}
+                self.respond(request, {'schema': values.get(names[0]), 'mapId': values.get(names[1]),
+                                       'frameId': values.get(names[2]), 'maximumSpeed': values.get(names[3]),
+                                       'robot': {'manufacturer': 'SysconRobotics', 'serial_number': self.scope.strip('/')}})
+            self.service(self.scope + '/vda_unified_runtime_node/get_parameters', {'names': names}, received,
+                         lambda error: self.error(request, error))
+            return
         if operation == 'drive_model':
             name = self.scope + '/wheel_driver_node_exe'
             def received(response):

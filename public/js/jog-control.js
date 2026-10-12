@@ -673,6 +673,10 @@ const JogControl = {
       this._recordSafety('idle', Number.isFinite(state) && state === 0);
     });
     subscribe(monitoring.emergency, msg => {
+      if (typeof msg.data === 'boolean') {
+        this._recordSafety('emo', !msg.data);
+        return;
+      }
       const data = Array.isArray(msg.data) ? msg.data : [];
       this._recordSafety('emo', data.length > 0 ? Number(data[0]) === 0 : null);
       this._lidarSafetyInputs.emergency = {
@@ -685,7 +689,7 @@ const JogControl = {
     subscribe(monitoring.lidarField, msg => {
       this._lidarSafetyInputs.field = {
         // HMI contract: field value 1 means a Lidar stop condition.
-        value: Number(msg.data) !== 1,
+        value: typeof msg.data === 'boolean' ? !msg.data : Number(msg.data) !== 1,
         at: Date.now()
       };
       this._mergeLidarSafety();
@@ -782,7 +786,7 @@ const JogControl = {
         reasons: [profile?.reason || 'ROS graph 검증 전']
       };
     }
-    if (!this._isStlUlsanSlot(slot)) {
+    if (!this._isStlUlsanSlot(slot) && profile?.transport?.rosMajor !== 2) {
       return { safe: true, strict: false, reasons: [] };
     }
     const labels = {
@@ -810,6 +814,19 @@ const JogControl = {
     return { safe: reasons.length === 0, strict: true, reasons };
   },
 
+  _nativeLiftSafetyEvaluation() {
+    const slot = App.robotSlots?.[App.activeSlotIndex];
+    const reasons = [];
+    if (!slot?.connected || !slot?.ros) reasons.push('활성 로봇 미연결');
+    const now = Date.now();
+    for (const [key, expected, label] of [['manual', false, 'AUTO 모드 미확인'], ['idle', true, 'IDLE 미확인'], ['sto', true, 'STO 정상 미확인']]) {
+      const value = this._safetyState?.[key];
+      if (!value || value.value !== expected || now - value.at > this.SAFETY_STALE_MS) reasons.push(label);
+    }
+    if (this._safetyState?.emo?.value === false) reasons.push('EMO');
+    return { safe: !reasons.length, strict: true, reasons };
+  },
+
   _requireSafety(actionLabel = 'Jog 명령', capabilityName = null) {
     const slot = App.robotSlots?.[App.activeSlotIndex];
     const virtual = typeof TestMode !== 'undefined' && TestMode.enabled && slot?.virtualTestRobot;
@@ -827,7 +844,8 @@ const JogControl = {
         return false;
       }
     }
-    const evaluation = this._safetyEvaluation();
+    const evaluation = capabilityName === 'lift' && this._compatibilityProfile()?.lift?.admission === 'auto'
+      ? this._nativeLiftSafetyEvaluation() : this._safetyEvaluation();
     if (evaluation.safe) return true;
     const reason = evaluation.reasons.join(', ');
     this._stopVel();
@@ -837,13 +855,15 @@ const JogControl = {
   },
 
   _enforceSafetyGate() {
+    if (this._manualLiftState && this._compatibilityProfile()?.lift?.admission === 'auto' && !this._nativeLiftSafetyEvaluation().safe) this._stopManualLift();
     const evaluation = this._safetyEvaluation();
     this._refreshSafetyUi(evaluation);
     if (!evaluation.strict || evaluation.safe) {
       this._lastSafetyBlockSignature = '';
       return;
     }
-    const moving = this._publishing || this._manualLiftState
+    const liftSafe = this._manualLiftState && this._compatibilityProfile()?.lift?.admission === 'auto' && this._nativeLiftSafetyEvaluation().safe;
+    const moving = this._publishing || (!liftSafe && this._manualLiftState)
       || this._currentLx !== 0 || this._currentLy !== 0 || this._currentAz !== 0;
     if (!moving) return;
     this._stopJogControls();
@@ -912,7 +932,8 @@ const JogControl = {
     const profile = this._compatibilityProfile();
     const virtual = evaluation.virtual === true;
     const driveDisabled = disabled || (!virtual && !profile?.chassis?.drive?.verified);
-    const liftDisabled = disabled || (!virtual && !profile?.lift?.verified);
+    const liftDisabled = (profile?.lift?.admission === 'auto' ? !this._nativeLiftSafetyEvaluation().safe : disabled)
+      || (!virtual && !profile?.lift?.verified);
     const turntableDisabled = disabled || (!virtual && !profile?.actions?.turntable?.verified);
     ['jog-fwd', 'jog-bwd', 'jog-left', 'jog-right', 'jog-rot-left', 'jog-rot-right'].forEach(id => {
       const button = document.getElementById(id);
@@ -969,7 +990,7 @@ const JogControl = {
     const error = document.getElementById('jog-lift-error');
     const feedback = this._liftFeedback;
     const fresh = feedback && Date.now() - feedback.at <= this.TELEMETRY_STALE_MS;
-    if (height) height.textContent = fresh ? `${(Number(feedback.height || 0) / 100).toFixed(2)}°` : '--';
+    if (height) height.textContent = fresh ? (this._compatibilityProfile()?.lift?.feedbackUnit === 'mm' ? `${Number(feedback.height || 0)} mm` : `${(Number(feedback.height || 0) / 100).toFixed(2)}°`) : '--';
     if (status) status.textContent = fresh ? this._feedbackStatus(feedback.status) : '--';
     if (error) error.textContent = fresh ? `0x${Number(feedback.error_code || 0).toString(16).toUpperCase().padStart(4, '0')}` : '--';
   },
@@ -1913,7 +1934,7 @@ const JogControl = {
     const text = slot?.connected ? `활성 로봇: ${slot.robotId}` : '활성 로봇: 미연결';
     if (target) target.textContent = text;
     const liftTarget = document.getElementById('jog-manual-lift-target');
-    if (liftTarget) liftTarget.textContent = text;
+    if (liftTarget) liftTarget.textContent = text + (this._compatibilityProfile()?.lift?.admission === 'auto' ? ' · AUTO / IDLE 필요' : '');
     const stlTarget = document.getElementById('jog-stl-ulsan-target');
     if (stlTarget) {
       stlTarget.textContent = slot?.robotModel

@@ -25,6 +25,8 @@ ROS2 그래프의 실제 endpoint/type을 확인한 기능만 활성화합니다
 
 `192.168.20.56` R_006은 ROS2 Jazzy이고 로봇에 `rosbridge_server`가 없어 ROS2 모드를 사용합니다. 충전 명령·Task 유입 상태·ROS2 구성 및 현장 확인 범위는 [R_006 ROS2 구조](docs/ros2-r006.md)에 기록했습니다. `bringup`이 실행 중이어야 ROS 그래프와 서비스가 나타납니다.
 
+현재 확인한 ROS2 로봇은 `192.168.20.75:2222`, 실제 RID는 `R_025`입니다. RouteNavigation 입력·기존 경로 변환·변경된 파라미터 및 남은 기능 제한은 [전체 기능 감사](docs/ros2-full-migration-audit.md)에 기록했습니다.
+
 ROS2의 사용법과 지원 범위는 [ROS1/ROS2 마이그레이션 안내](docs/ros2-migration.md)를 참조하세요. 로컬 bringup이 확인되지 않으면 ROS 제어를 차단하고 조회를 제공합니다.
 
 ## 주요 기능

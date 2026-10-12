@@ -432,6 +432,10 @@ const InitSetup = {
   },
 
   async saveBashrc() {
+    if (typeof RosManager !== 'undefined' && RosManager.isRos2?.()) {
+      App.toast('이 설정 도구는 ROS1 scorpion 환경용입니다. ROS2의 DDS/RID/모델 설정은 별도로 확인해야 하므로 실행하지 않았습니다.', 'warning');
+      return;
+    }
     const statusEl = document.getElementById('init-setup-bashrc-status');
     statusEl.textContent = 'Saving...';
     try {
@@ -469,6 +473,10 @@ const InitSetup = {
   },
 
   async saveHosts() {
+    if (typeof RosManager !== 'undefined' && RosManager.isRos2?.()) {
+      App.toast('이 설정 도구는 ROS1 scorpion 환경용입니다. ROS2의 DDS/RID/모델 설정은 별도로 확인해야 하므로 실행하지 않았습니다.', 'warning');
+      return;
+    }
     const statusEl = document.getElementById('init-setup-hosts-status');
     statusEl.textContent = 'Saving...';
     try {
@@ -674,6 +682,10 @@ const InitSetup = {
   },
 
   async applyNetworkSettings() {
+    if (typeof RosManager !== 'undefined' && RosManager.isRos2?.()) {
+      App.toast('이 설정 도구는 ROS1 scorpion 환경용입니다. ROS2의 DDS/RID/모델 설정은 별도로 확인해야 하므로 실행하지 않았습니다.', 'warning');
+      return;
+    }
     const statusEl = document.getElementById('init-setup-network-status');
     statusEl.textContent = 'Applying...';
 

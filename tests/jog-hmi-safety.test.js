@@ -375,3 +375,23 @@ describe('HMI-derived Jog safety and telemetry', () => {
     expect(text).toContain('Payload: { data: true }');
   });
 });
+
+
+describe('native ROS2 Lift admission versus drive Jog', () => {
+  test('AUTO permits native Lift but blocks manual drive, with stale STO rejected', () => {
+    const { manager, slot } = loadJog();
+    slot.robotModel = 'stl1000_ros2';
+    slot.compatibilityProfile.transport = { rosMajor: 2 };
+    slot.compatibilityProfile.lift.admission = 'auto';
+    const at = Date.now();
+    manager._safetyState = Object.fromEntries(['manual', 'idle', 'emo', 'sto', 'lidar', 'brake'].map(key => [key, { value: key !== 'manual', at }]));
+    expect(manager._safetyEvaluation()).toMatchObject({ safe: false, strict: true });
+    expect(manager._nativeLiftSafetyEvaluation().safe).toBe(true);
+    manager._safetyState.manual.value = true;
+    expect(manager._safetyEvaluation().safe).toBe(true);
+    expect(manager._nativeLiftSafetyEvaluation().safe).toBe(false);
+    manager._safetyState.manual.value = false;
+    manager._safetyState.sto.at = at - manager.SAFETY_STALE_MS - 1;
+    expect(manager._nativeLiftSafetyEvaluation().reasons).toContain('STO 정상 미확인');
+  });
+});

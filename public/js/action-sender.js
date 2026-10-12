@@ -147,6 +147,10 @@ const ActionSender = {
   },
 
   actionTypes: {
+    '0x30': {
+      name: 'RouteNavigation', desc: 'ROS2 경로 계획 / 지정 경로 / 곡선', args: [],
+      params: [{ name: 'route_contract_json', type: 'string', default: '', desc: 'spx.route_contract.v1/v2 JSON' }]
+    },
     '0x01': {
       name: 'Way_Point',
       desc: 'Navigate to target coordinates',
@@ -968,6 +972,7 @@ const ActionSender = {
       this.refreshSavedQueueList();
       this.renderTaskLibrary(librarySearch?.value || '');
     });
+    document.getElementById('btn-convert-ros2-routes')?.addEventListener('click', () => this.reviewLegacyRouteConversion());
     document.getElementById('btn-new-task')?.addEventListener('click', () => {
       this.openTaskBuilder();
     });
@@ -1423,7 +1428,13 @@ const ActionSender = {
     if (!button || button.classList.contains('loading')) return;
     const slot = App.robotSlots?.[this.getTargetSlot()];
     const { profile, catalog } = this._taskActionCatalog(slot);
-    const actionTypes = this.compileQuickTaskItems().map(item => parseInt(item.actionType));
+    let actionTypes;
+    try { actionTypes = this.compileQuickTaskItems().map(item => parseInt(item.actionType)); }
+    catch (error) {
+      button.disabled = true;
+      button.title = String(error.message || error);
+      return;
+    }
     const unsupported = actionTypes.find(type => !this._actionTypeSupported(type, slot));
     button.disabled = !slot?.connected || !slot.ros || unsupported !== undefined
       || Boolean(catalog?.attempted && !catalog.verified);
@@ -1987,7 +1998,7 @@ const ActionSender = {
   _readQuickTrajectoryOptions() {
     return {
       laneName: document.getElementById('quick-trajectory-lane')?.value?.trim() || 'lane_tmp',
-      maxTransVel: Number(document.getElementById('quick-trajectory-velocity')?.value) || 0.7,
+      maxTransVel: this._usesRos2Route() ? (document.getElementById('quick-trajectory-velocity')?.value || undefined) : Number(document.getElementById('quick-trajectory-velocity')?.value) || 0.7,
       laneType: Number(document.getElementById('quick-trajectory-lane-type')?.value) || 0,
       laneDirection: Number(document.getElementById('quick-trajectory-direction')?.value) || 0
     };
@@ -2410,7 +2421,11 @@ const ActionSender = {
             : `0x10 · distance=${item.distance} m`
         }
       };
-      const label = labels[item.kind];
+      const label = { ...labels[item.kind] };
+      if (this._usesRos2Route() && ['waypoint', 'trajectory'].includes(item.kind)) {
+        label.title = item.kind === 'waypoint' ? 'RouteNavigation · 목적지 계획' : 'RouteNavigation · 지정 경로';
+        label.detail = item.kind === 'waypoint' ? `x=${item.pose.x}, y=${item.pose.y}, yaw=${item.pose.theta}` : `${item.points.length}개 경로점 · 현재 ROS2 controller 설정 사용`;
+      }
       row.innerHTML = `
         <span class="quick-task-item-num">${index + 1}</span>
         <span class="quick-task-item-icon">${label.icon}</span>
@@ -2699,7 +2714,55 @@ const ActionSender = {
     };
   },
 
+  reviewLegacyRouteConversion() {
+    const slot = App.robotSlots?.[this.getTargetSlot()];
+    if (!this._usesRos2Route(slot)) { App.toast('RouteNavigation을 제공하는 ROS2 로봇을 선택하세요.', 'error'); return; }
+    const profile = RobotCompatibility.get(slot);
+    const context = profile.task.routeContext || {};
+    try {
+      const drafts = this.actionQueue.map(action => [1, 21].includes(Number(action.actionType ?? action.action_type))
+        ? Ros2Route.convertLegacy(action, { ...context, routeId: action.name, robotId: slot.robotId }) : null);
+      if (!drafts.some(Boolean)) { App.toast('변환할 WayPoint/TrajectoryFollowing이 없습니다.', 'info'); return; }
+      const unmapped = Array.from(new Set(drafts.flatMap(draft => draft?.unmapped || [])));
+      const message = `ROS2 RouteNavigation으로 좌표·경로·방향을 변환합니다.\n기존 Task는 별도 로컬 백업으로 보존합니다.\n노드별 Params에서 다시 확인할 항목: ${unmapped.join(', ') || '없음'}\n속도·허용오차·플래너 설정은 ROS2 로봇의 현재 설정을 사용합니다.\n변환한 JSON을 검토한 후 별도로 실행해야 합니다. 변환을 적용할까요?`;
+      if (typeof confirm === 'function' && !confirm(message)) return;
+      localStorage.setItem(`easyloopLegacyRouteBackup_${Date.now()}`, JSON.stringify(this.actionQueue));
+      this.actionQueue = this.actionQueue.map((action, index) => drafts[index] ? drafts[index].action : action);
+      this.renderQueue();
+      const select = document.getElementById('action-type');
+      if (select) { select.value = '0x30'; this.updateActionForm('0x30'); }
+      App.toast('ROS2 경로로 변환했습니다. 로컬 Task 저장 전 내용과 파라미터 차이를 확인하세요.', 'success');
+    } catch (error) { App.toast(String(error.message || error), 'error'); }
+  },
+
+  _usesRos2Route(slot = App.robotSlots?.[this.getTargetSlot()]) {
+    const profile = typeof RobotCompatibility !== 'undefined' ? RobotCompatibility.get(slot) : slot?.compatibilityProfile;
+    return profile?.task?.protocol === 'ros2_spx' && profile.task.actionCatalog?.verified && profile.task.actionCatalog.types.includes(48);
+  },
+
+  _compileRos2QuickItems(items, slot) {
+    const profile = typeof RobotCompatibility !== 'undefined' ? RobotCompatibility.get(slot) : slot.compatibilityProfile;
+    const context = profile.task.routeContext || {};
+    return items.map((item, index) => {
+      if (item.kind === 'standby') return this._buildQuickAction('0x07', [item.duration], `StandBy_${index + 1}`);
+      if (!['waypoint', 'trajectory'].includes(item.kind)) throw new Error(`${item.kind}: 현재 ROS2 robot catalog에 독립 Action이 없습니다. RouteNavigation JSON의 검증된 도킹 계약을 사용하세요.`);
+      if (item.trajectory?.laneDirection !== undefined && ![0, 3].includes(Number(item.trajectory.laneDirection))) throw new Error('ROS2 RouteNavigation은 전진/후진을 사용합니다. 기존 측방 Lane 방향은 변환 검토가 필요합니다.');
+      const waypoint = item.kind === 'waypoint';
+      const points = waypoint ? [{ x: item.pose.x, y: item.pose.y, yaw: item.pose.theta }]
+        : item.points.map(p => ({ x: p.x, y: p.y, yaw: p.theta || 0 }));
+      const route = Ros2Route.build({ schema: context.schema || 'spx.route_contract.v2', routeId: `route_${index + 1}`,
+        mapId: context.mapId || '', frameId: context.frameId || 'map', points,
+        pathSource: waypoint ? 'ROBOT_FREESPACE' : 'PROVIDED_TRAJECTORY',
+        robot: context.robot, robotId: slot.robotId, direction: Number(item.trajectory?.laneDirection) === 3 ? 'BACKWARD' : 'FORWARD' });
+      const action = Ros2Route.action(route, 'RouteNavigation', { maximumSpeed: item.trajectory?.maxTransVel });
+      action.name = `RouteNavigation_${index + 1}`;
+      return action;
+    });
+  },
+
   compileQuickTaskItems(items = this._quickTaskItems) {
+    const slot = App.robotSlots?.[this.getTargetSlot()];
+    if (this._usesRos2Route(slot) && typeof Ros2Route !== 'undefined') return this._compileRos2QuickItems(items || [], slot);
     const actions = [];
     let waypointIndex = 0;
     let trajectoryIndex = 0;
@@ -2959,7 +3022,7 @@ const ActionSender = {
   _actionTypeSupported(actionType, slot = App.robotSlots?.[this.getTargetSlot()]) {
     const { profile, catalog } = this._taskActionCatalog(slot);
     if (!catalog?.attempted) return true;
-    if (!catalog.verified || !catalog.types.includes(Number(actionType))) return false;
+    if (!catalog.verified || catalog.executionAvailable === false || !catalog.types.includes(Number(actionType))) return false;
     const model = profile?.chassis?.driveModel;
     return !(this._requiresDetectedActionModel(actionType)
       && model?.attempted && !model.verified);
@@ -2978,6 +3041,9 @@ const ActionSender = {
       if (!slot?.connected || !slot.ros) {
         status.textContent = '로봇 연결 후 등록 Action과 차상 model_type을 자동 확인합니다.';
         status.className = 'action-compatibility-status';
+      } else if (catalog?.executionAvailable === false) {
+        status.textContent = `Task 실행 차단 · ${catalog.message || '실행 backend 미사용'}`;
+        status.className = 'action-compatibility-status blocked';
       } else if (catalog?.verified && model?.attempted && !model.verified) {
         status.textContent = `${slot.robotId} · Action ${catalog.types.length}개 · 차상 model_type 미확인 · 모델 의존 Action 차단`;
         status.className = 'action-compatibility-status blocked';
@@ -2998,18 +3064,24 @@ const ActionSender = {
       }
     }
 
+    const common = document.getElementById('action-common-params-container')?.parentElement;
+    if (common) common.hidden = profile?.task?.protocol === 'ros2_spx';
     const select = document.getElementById('action-type');
     if (select?.options) {
       Array.from(select.options).forEach(option => {
         if (!option.dataset.baseLabel) option.dataset.baseLabel = option.textContent;
         const supported = this._actionTypeSupported(parseInt(option.value), slot);
         option.disabled = !supported;
+        option.hidden = profile?.task?.protocol === 'ros2_spx' ? !supported : option.value === '0x30';
         option.textContent = `${option.dataset.baseLabel}${supported ? '' : ' · 미지원'}`;
       });
       const selected = select.options[select.selectedIndex];
       if (selected?.disabled) {
         const firstSupported = Array.from(select.options).find(option => !option.disabled);
-        if (firstSupported) select.value = firstSupported.value;
+        if (firstSupported) {
+          select.value = firstSupported.value;
+          this.updateActionForm(select.value);
+        }
       }
     }
 
@@ -3037,7 +3109,11 @@ const ActionSender = {
     Object.entries(quickTypes).forEach(([id, type]) => {
       const button = document.getElementById(id);
       if (!button) return;
-      const supported = this._actionTypeSupported(type, slot);
+      const nativeRoute = this._usesRos2Route(slot);
+      const routeInput = ['btn-quick-waypoint', 'btn-quick-trajectory', 'btn-quick-freehand'].includes(id);
+      const supported = this._actionTypeSupported(nativeRoute && routeInput ? 48 : type, slot);
+      if (!button.dataset.originalLabel) button.dataset.originalLabel = button.textContent;
+      button.textContent = nativeRoute && routeInput ? (id === 'btn-quick-waypoint' ? 'RouteNavigation · 목적지' : id === 'btn-quick-trajectory' ? 'RouteNavigation · 경로점' : 'RouteNavigation · 자유 곡선') : button.dataset.originalLabel;
       button.disabled = !supported;
       if (!supported) {
         button.title = catalog?.verified
@@ -3045,6 +3121,21 @@ const ActionSender = {
           : catalog?.reason || '등록 Action 목록 미검증';
       }
     });
+    const nativeRoute = this._usesRos2Route(slot);
+    for (const id of ['quick-trajectory-lane-type', 'quick-trajectory-lane']) {
+      const input = document.getElementById(id);
+      if (input?.parentElement) input.parentElement.hidden = nativeRoute;
+    }
+    const speed = document.getElementById('quick-trajectory-velocity');
+    if (speed) {
+      const maximum = profile?.task?.routeContext?.maximumSpeed;
+      if (nativeRoute && !speed.dataset.nativeRoute) { speed.dataset.legacyValue = speed.value; speed.value = ''; speed.dataset.nativeRoute = 'true'; }
+      else if (!nativeRoute && speed.dataset.nativeRoute) { speed.value = speed.dataset.legacyValue || '0.7'; delete speed.dataset.nativeRoute; }
+      speed.min = nativeRoute ? '0.01' : '0.1'; speed.step = nativeRoute ? '0.01' : '0.1';
+      if (nativeRoute && maximum) speed.max = String(maximum); else speed.removeAttribute('max');
+      speed.placeholder = nativeRoute ? `로봇 설정 사용${maximum ? ` · 상한 ${maximum}` : ''}` : '';
+      speed.title = nativeRoute ? `ROS2 maximum_speed_mps · 상한 ${maximum || 'runtime 확인 필요'} m/s · 비우면 로봇 설정 사용` : 'ROS1 max_trans_vel';
+    }
     this._updateQuickTaskRunAvailability();
   },
 
@@ -3076,7 +3167,7 @@ const ActionSender = {
     return definitions;
   },
 
-  updateActionForm(actionType, existingArgs = null) {
+  updateActionForm(actionType, existingArgs = null, existingAction = null) {
     const config = this.actionTypes[actionType];
     if (!config) return;
 
@@ -3112,6 +3203,19 @@ const ActionSender = {
       `;
       argsContainer.appendChild(div);
     });
+
+    if (actionType === '0x30' && typeof Ros2RouteEditor !== 'undefined') {
+      const paramsBox = document.getElementById('action-params-container');
+      const saved = existingAction || this.loadLastParams(actionType);
+      const params = saved?.params || saved?.action_params || [];
+      const carrier = params.find(param => (param.param_name || param.name) === 'route_contract_json');
+      const speed = params.find(param => (param.param_name || param.name) === 'maximum_speed_mps');
+      Ros2RouteEditor.render(argsContainer, paramsBox, App.robotSlots?.[this.getTargetSlot()], carrier?.value, {
+        maximumSpeed: speed?.value ?? '', dockingArgs: saved?.args || saved?.action_args || []
+      });
+      if (!existingAction && saved?.taskId) document.getElementById('action-work-id').value = saved.taskId;
+      return;
+    }
 
     // Add position helper buttons for Way_Point (0x01) and Change_Map (0x17)
     if (actionType === '0x01' || actionType === '0x17') {
@@ -3241,6 +3345,10 @@ const ActionSender = {
     const config = this.actionTypes[actionType];
     if (!config) return null;
 
+    if (actionType === '0x30' && typeof Ros2RouteEditor !== 'undefined') {
+      try { return Ros2Route.action(Ros2RouteEditor.read(), 'RouteNavigation', Ros2RouteEditor.extras()); }
+      catch (error) { App.toast(error.message, 'error'); return null; }
+    }
     const actionArgs = [];
     const actionArgDefinitions = this._actionArgDefinitions(actionType);
     actionArgDefinitions.forEach((arg, idx) => {
@@ -3570,7 +3678,7 @@ const ActionSender = {
     const typeSelect = document.getElementById('action-type');
     typeSelect.value = item.actionType;
     const itemArgs = item.args || item.action_args || [];
-    this.updateActionForm(item.actionType, itemArgs);
+    this.updateActionForm(item.actionType, itemArgs, item);
 
     // Set args
     const config = this.actionTypes[item.actionType];
@@ -3721,6 +3829,7 @@ const ActionSender = {
 
     const editedParams = Array.from(edited.params || []);
     const editedNames = new Set(editedParams.map(param => param.param_name));
+    if (editedType === '0x30') editedNames.add('maximum_speed_mps');
     const originalParams = Array.from(original?.params || original?.action_params || []);
     const params = [
       ...editedParams,
@@ -3921,7 +4030,7 @@ const ActionSender = {
 
     try {
       const slot = App.robotSlots?.[slotIndex] || { ros, robotId };
-      actions = await this._prepareActionsForSlot(actions, slot);
+      actions = await this._prepareActionsForSlot(actions, slot, { taskId });
     } catch (error) {
       const message = `Task Action 준비 실패: ${error.message}`;
       this.showResult(message, true);
@@ -4507,7 +4616,10 @@ const ActionSender = {
       const typeKey = this._actionTypeKey(item);
       const actionId = item.name || item.action_id || `Action_${actionIndex + 1}`;
       const args = Array.from(item.args || item.action_args || []).map(Number);
-      if ((typeKey === '0x01' || typeKey === '0x17')
+      if (typeKey === '0x30' && typeof Ros2Route !== 'undefined') {
+        Ros2Route.preview(item).forEach((p, pointIndex) => points.push({ ...p, actionIndex, actionId, typeKey,
+          pointIndex, kind: 'trajectory', label: `R${actionIndex + 1}.${pointIndex + 1}` }));
+      } else if ((typeKey === '0x01' || typeKey === '0x17')
           && args.length >= 3
           && args.slice(0, 3).every(Number.isFinite)) {
         points.push({
@@ -5363,7 +5475,7 @@ const ActionSender = {
     }));
     const preparedActions = await this._prepareActionsForSlot(
       normalizedGroups.flatMap(group => group.actions),
-      slot
+      slot, { taskId: taskId || sourceQueue }
     );
     let preparedIndex = 0;
     const missions = normalizedGroups.map(group => ({
@@ -5447,7 +5559,7 @@ const ActionSender = {
       action_params: []
     });
     normalized.action_id = 'jog_action';
-    const [action] = await this._prepareActionsForSlot([normalized], slot);
+    const [action] = await this._prepareActionsForSlot([normalized], slot, { taskId: resolvedTaskId });
     const request = {
       task_id: resolvedTaskId,
       loop_flag: 1,
@@ -5482,8 +5594,8 @@ const ActionSender = {
     return { result, robotId: slot.robotId, request, serviceName: taskInterface.goalName };
   },
 
-  async _prepareActionsForSlot(actions, slot) {
-    const prepared = (actions || []).map(action => ({ ...action }));
+  async _prepareActionsForSlot(actions, slot, context = {}) {
+    const prepared = (actions || []).map(action => JSON.parse(JSON.stringify(action)));
     let profile = typeof RobotCompatibility !== 'undefined'
       ? RobotCompatibility.get(slot)
       : slot?.compatibilityProfile;
@@ -5495,6 +5607,21 @@ const ActionSender = {
       profile = RobotCompatibility.get(slot);
     }
     const catalog = profile?.task?.actionCatalog;
+    if (catalog?.executionAvailable === false) throw new Error(`Task 실행 backend 미사용: ${catalog.message}`);
+    if (profile?.task?.protocol === 'ros2_spx') {
+      prepared.forEach((action, index) => {
+        action.action_id ||= `a${index + 1}`;
+        if (Number(action.action_type) === 48) {
+          if (typeof Ros2Route === 'undefined') throw new Error('ROS2 RouteNavigation adapter를 사용할 수 없습니다.');
+          if (profile.task.routeContext?.verified === false) throw new Error(`Route runtime 설정 미검증: ${profile.task.routeContext.reason}`);
+          const speed = action.action_params?.find(param => param.param_name === 'maximum_speed_mps');
+          if (speed && (!Number.isFinite(Number(speed.value)) || Number(speed.value) <= 0 || (profile.task.routeContext?.maximumSpeed && Number(speed.value) > profile.task.routeContext.maximumSpeed))) throw new Error('maximum_speed_mps는 양수이며 로봇의 factsheet.maximum_speed 이하여야 합니다.');
+          Ros2Route.bind(action, { taskId: context.taskId || 'test_task',
+            schema: profile.task.routeContext?.schema, mapId: profile.task.routeContext?.mapId, frameId: profile.task.routeContext?.frameId,
+            robot: profile.task.routeContext?.robot || { manufacturer: 'SysconRobotics', serial_number: slot.robotId } });
+        }
+      });
+    }
     if (catalog?.attempted && !catalog.verified) {
       throw new Error(`등록 Action 자동감지 실패: ${catalog.reason || 'ActionInfo 미검증'}`);
     }
@@ -5616,7 +5743,16 @@ const ActionSender = {
       [0x01, 3], [0x02, 2], [0x07, 1], [0x08, 4], [0x10, 1], [0x12, 1],
       [0x16, 2], [0x17, 3], [0x19, 2], [0x21, 2]
     ]);
+    if (type === 7 && profile?.task?.protocol === 'ros2_spx') exactCounts.delete(7);
     if (type === 0x22) exactCounts.set(type, profile?.actions?.turntable?.argCount || 2);
+    if (type === 48) {
+      if (args.length && (args.length !== 3 || ![0, 1].includes(args[0]) || ![1, -1, 2, 3].includes(args[1]) || !Number.isInteger(args[2]) || args[2] < 1 || args[2] > 7)) throw new Error('ROS2 도킹 입력은 [is_charge, direction, scan_type] 3개입니다.');
+      const route = Ros2Route.parse(this._actionParamValue(action, 'route_contract_json'));
+      if (['docking_transition', 'docking_target_selection', 'docking_parameters', 'docking_approach'].some(key => route[key] !== undefined) && args.length !== 3) throw new Error('도킹 계약에는 [is_charge, direction, scan_type]이 필요합니다.');
+    }
+    if (type === 7 && profile?.task?.protocol === 'ros2_spx' && (args.length > 1 || args.some(x => x < 0 || !Number.isInteger(x)))) {
+      throw new Error('ROS2 StandBy는 음수가 아닌 정수 대기 시간을 사용합니다.');
+    }
     const expected = exactCounts.get(type);
     if (expected !== undefined && args.length !== expected) {
       throw new Error(
@@ -6544,6 +6680,13 @@ const ActionSender = {
   },
 
   _callTaskService(ros, name, serviceType, args, timeoutMs = 0) {
+    if (serviceType === 'spx_task_msgs/srv/TaskGoal') {
+      if (args.missions?.length !== 1 || args.loop_flag !== 1) {
+        return Promise.reject(new Error('현재 ROS2 TaskSender 계약은 Mission 1개와 loop_flag=1을 요구합니다. 여러 Mission/반복 Task는 먼저 명시적으로 재구성하세요.'));
+      }
+      const ids = args.missions[0].actions.map(action => action.action_id);
+      if (new Set(ids).size !== ids.length || ids.some(id => !id)) return Promise.reject(new Error('ROS2 action_id는 비어 있지 않고 고유해야 합니다.'));
+    }
     return new Promise((resolve, reject) => {
       let settled = false;
       let timer = null;
@@ -6564,7 +6707,7 @@ const ActionSender = {
       service.callService(
         new ROSLIB.ServiceRequest(args || {}),
         result => finish(resolve, result),
-        error => finish(reject, new Error(String(error || `${name} 호출 실패`)))
+        error => finish(reject, new Error(String(error?.message || error || `${name} 호출 실패`)))
       );
     });
   },
@@ -6912,6 +7055,15 @@ const ActionSender = {
       savedData = JSON.parse(localStorage.getItem(this.STORAGE_KEY)) || {};
     } catch (e) {
       savedData = {};
+    }
+
+    if (actionType === '0x30' && typeof Ros2RouteEditor !== 'undefined') {
+      try {
+        const action = Ros2Route.action(Ros2RouteEditor.read(), 'RouteNavigation', Ros2RouteEditor.extras());
+        savedData[actionType] = { args: action.args, params: action.params.map(param => ({ name: param.param_name, value: param.value })), taskId: document.getElementById('action-work-id').value };
+        localStorage.setItem(this.STORAGE_KEY, JSON.stringify(savedData));
+      } catch (error) { App.toast(error.message, 'error'); }
+      return;
     }
 
     // Collect current args

@@ -45,6 +45,18 @@ const Diagnostics = {
     'request_nomotion_update'
   ],
 
+  _expectations() {
+    if (typeof RosManager === 'undefined' || !RosManager.isRos2?.()) return { nodes: this.EXPECTED_NODES, topics: this.EXPECTED_TOPICS, services: this.EXPECTED_SERVICES };
+    return {
+      nodes: { P0: ['wheel_driver_node_exe', 'cmd_vel_mux', 'cmd_safety_gate', 'robotstate_pub'],
+        P1: ['amcl', 'planner_server', 'controller_server', 'operation_manager'], P2: ['lidar_processor_node', 'map_server', 'vda_unified_runtime_node'] },
+      topics: { P0: [{ name: 'robot_state', minHz: 0 }, { name: 'io/state_monitor/sto', minHz: 0 }, { name: 'motor_status', minHz: 0 }],
+        P1: [{ name: 'localization/final_pose', minHz: 0 }, { name: 'odom', minHz: 0 }, { name: 'cmd_vel', minHz: 0 }],
+        P2: [{ name: 'scan', minHz: 0 }, { name: 'battery_state', minHz: 0 }] },
+      services: ['spx/set_mode', 'map_server/load_map', 'controller_server/get_state', 'planner_server/get_state']
+    };
+  },
+
   // System thresholds
   SYS_THRESHOLDS: {
     cpu: { warn: 80, fail: 95 },
@@ -197,9 +209,9 @@ const Diagnostics = {
       });
 
       const allExpected = [
-        ...this.EXPECTED_NODES.P0.map(n => ({ name: n, priority: 'P0' })),
-        ...this.EXPECTED_NODES.P1.map(n => ({ name: n, priority: 'P1' })),
-        ...this.EXPECTED_NODES.P2.map(n => ({ name: n, priority: 'P2' }))
+        ...this._expectations().nodes.P0.map(n => ({ name: n, priority: 'P0' })),
+        ...this._expectations().nodes.P1.map(n => ({ name: n, priority: 'P1' })),
+        ...this._expectations().nodes.P2.map(n => ({ name: n, priority: 'P2' }))
       ];
 
       allExpected.forEach(({ name, priority }) => {
@@ -243,9 +255,9 @@ const Diagnostics = {
       const topicList = result.topics || [];
 
       const allExpected = [
-        ...this.EXPECTED_TOPICS.P0.map(t => ({ ...t, priority: 'P0' })),
-        ...this.EXPECTED_TOPICS.P1.map(t => ({ ...t, priority: 'P1' })),
-        ...this.EXPECTED_TOPICS.P2.map(t => ({ ...t, priority: 'P2' }))
+        ...this._expectations().topics.P0.map(t => ({ ...t, priority: 'P0' })),
+        ...this._expectations().topics.P1.map(t => ({ ...t, priority: 'P1' })),
+        ...this._expectations().topics.P2.map(t => ({ ...t, priority: 'P2' }))
       ];
 
       // Check Hz from existing RosManager data
@@ -352,7 +364,7 @@ const Diagnostics = {
         ros.getServices((svcList) => { clearTimeout(timer); resolve(svcList); });
       });
 
-      this.EXPECTED_SERVICES.forEach(svcName => {
+      this._expectations().services.forEach(svcName => {
         const fullName = `/${rid}/${svcName}`;
         const found = services.some(s => s === fullName || s.endsWith('/' + svcName));
         items.push({

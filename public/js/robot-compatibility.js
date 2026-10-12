@@ -322,6 +322,8 @@ const RobotCompatibility = {
       || name === `${ns}/io/state_monitor/sto`
       || name === `${ns}/io/state_monitor/brake`
       || name === `${ns}/io/state_monitor/charging`
+      || name === `${ns}/io/state_monitor/emo`
+      || name === `${ns}/io/state_monitor/lccs`
       || name === `${ns}/io/do/charge_relay`
       || name === `${ns}/motor_status`
       || name === `${ns}/odom`
@@ -381,7 +383,8 @@ const RobotCompatibility = {
     await Promise.all([
       this._discoverActionCatalog(slot, profile, timeout),
       this._discoverDriveModel(slot, profile),
-      this._verifyRos2Drive(slot, profile, timeout)
+      this._verifyRos2Drive(slot, profile, timeout),
+      this._discoverRouteContext(slot, profile, timeout)
     ]);
     console.log(`[Compatibility] ${slot.robotId}: ${profile.id}`, {
       transport: profile.transport.protocol,
@@ -417,6 +420,17 @@ const RobotCompatibility = {
     } catch (error) {
       profile.chassis.drive.verified = false;
       profile.chassis.drive.reason = String(error.message || error);
+    }
+  },
+
+  async _discoverRouteContext(slot, profile, timeout) {
+    if (!slot.ros2SessionId) return;
+    try {
+      const context = await this._rosapi(slot.ros, '/rosapi/runtime_contract', 'rosapi/RuntimeContract', {}, timeout);
+      if (!['spx.route_contract.v1', 'spx.route_contract.v2'].includes(context.schema) || !context.mapId || !context.frameId) throw new Error('runtime schema/map/frame 파라미터를 확인할 수 없습니다.');
+      profile.task.routeContext = { ...context, verified: true };
+    } catch (error) {
+      profile.task.routeContext = { verified: false, reason: String(error.message || error) };
     }
   },
 
@@ -470,6 +484,8 @@ const RobotCompatibility = {
       if (response?.success === false) {
         throw new Error(response.message || 'scheduler가 ActionInfo 조회를 거부했습니다.');
       }
+      catalog.message = String(response?.message || '');
+      catalog.executionAvailable = !/EXECUTION_BACKEND_UNAVAILABLE|TASK_SENDER_ACTION_SUBSET_MISMATCH/.test(catalog.message);
       const raw = response?.actions || response?.data || response?.datas;
       if (!Array.isArray(raw)) throw new Error('ActionInfo 배열이 없습니다.');
       const actions = raw
@@ -504,6 +520,7 @@ const RobotCompatibility = {
   },
 
   _normalizeDriveModel(value) {
+    if (value === null || value === undefined || typeof value === 'boolean') return null;
     if ([0, 1, 2, 3].includes(Number(value)) && String(value).trim() !== '') {
       const numericModels = {
         0: { kind: 'dd', actionModelType: 0 },
@@ -871,7 +888,7 @@ const RobotCompatibility = {
     const liftServiceName = hasService(`${ns}/Lift/cmd`) ? `${ns}/Lift/cmd` : null;
     const liftService = this._verifiedEndpoint(
       liftServiceName, serviceTypes[liftServiceName],
-      ['syscon_msgs/lift_cmd', 'syscon_msgs/srv/LiftCmd'], `${ns}/Lift/cmd 미발견`
+      ['syscon_msgs/lift_cmd', 'syscon_msgs/srv/LiftCmd', 'spx_device_msgs/srv/LiftCmd'], `${ns}/Lift/cmd 미발견`
     );
     const liftTopicName = hasTopic(`${ns}/Lift/manual_cmd`) ? `${ns}/Lift/manual_cmd` : null;
     const liftTopic = this._verifiedEndpoint(
@@ -881,12 +898,12 @@ const RobotCompatibility = {
     const liftCancelName = hasService(`${ns}/Lift/cancel`) ? `${ns}/Lift/cancel` : null;
     const liftCancel = this._verifiedEndpoint(
       liftCancelName, serviceTypes[liftCancelName],
-      ['syscon_msgs/string_srv', 'syscon_msgs/srv/StringSrv'], `${ns}/Lift/cancel 미발견`
+      ['syscon_msgs/string_srv', 'syscon_msgs/srv/StringSrv', 'spx_task_msgs/srv/StringSrv'], `${ns}/Lift/cancel 미발견`
     );
     const liftFeedbackName = hasTopic(`${ns}/Lift/feedback`) ? `${ns}/Lift/feedback` : null;
     const liftFeedback = this._verifiedEndpoint(
       liftFeedbackName, topicTypes[liftFeedbackName],
-      ['syscon_msgs/LiftFeedback', 'syscon_msgs/msg/LiftFeedback'], `${ns}/Lift/feedback 미발견`
+      ['syscon_msgs/LiftFeedback', 'syscon_msgs/msg/LiftFeedback', 'spx_device_msgs/msg/LiftFeedback'], `${ns}/Lift/feedback 미발견`
     );
     if (liftService.verified || liftTopic.verified) {
       profile.lift = {
@@ -903,6 +920,8 @@ const RobotCompatibility = {
         cancelArgs: liftCancel.verified ? { data: '' } : null,
         feedbackTopic: liftFeedback.verified ? liftFeedback.name : null,
         feedbackType: liftFeedback.verified ? liftFeedback.type : null,
+        admission: liftService.type === 'spx_device_msgs/srv/LiftCmd' ? 'auto' : 'manual',
+        feedbackUnit: liftService.type === 'spx_device_msgs/srv/LiftCmd' ? 'mm' : 'degree100',
         commands: liftService.verified ? { stop: 0, up: 1, down: 2 } : { stop: 0, up: 1, down: -1 }
       };
     }
@@ -915,7 +934,7 @@ const RobotCompatibility = {
     const turntableCancelName = hasService(`${ns}/Turntable/cancel`) ? `${ns}/Turntable/cancel` : null;
     const turntableCancel = this._verifiedEndpoint(
       turntableCancelName, serviceTypes[turntableCancelName],
-      ['syscon_msgs/string_srv', 'syscon_msgs/srv/StringSrv'], `${ns}/Turntable/cancel 미발견`
+      ['syscon_msgs/string_srv', 'syscon_msgs/srv/StringSrv', 'spx_task_msgs/srv/StringSrv'], `${ns}/Turntable/cancel 미발견`
     );
     const syncName = hasService(`${ns}/Turntable/sync_mode`) ? `${ns}/Turntable/sync_mode` : null;
     const sync = this._verifiedEndpoint(
@@ -925,7 +944,7 @@ const RobotCompatibility = {
     const turntableFeedbackName = hasTopic(`${ns}/Turntable/feedback`) ? `${ns}/Turntable/feedback` : null;
     const turntableFeedback = this._verifiedEndpoint(
       turntableFeedbackName, topicTypes[turntableFeedbackName],
-      ['syscon_msgs/LiftFeedback', 'syscon_msgs/msg/LiftFeedback'], `${ns}/Turntable/feedback 미발견`
+      ['syscon_msgs/LiftFeedback', 'syscon_msgs/msg/LiftFeedback', 'spx_device_msgs/msg/LiftFeedback'], `${ns}/Turntable/feedback 미발견`
     );
     if (turntable.verified) {
       profile.actions.turntable = {
@@ -963,7 +982,7 @@ const RobotCompatibility = {
     const conveyorName = hasService(`${ns}/Conv/cmd`) ? `${ns}/Conv/cmd` : null;
     const conveyor = this._verifiedEndpoint(
       conveyorName, serviceTypes[conveyorName],
-      ['syscon_msgs/conv_cmd', 'syscon_msgs/srv/ConvCmd'], `${ns}/Conv/cmd 미발견`
+      ['syscon_msgs/conv_cmd', 'syscon_msgs/srv/ConvCmd', 'spx_device_msgs/srv/ConvCmdSrv'], `${ns}/Conv/cmd 미발견`
     );
     const motorResetName = hasService(`${ns}/motor_reset`) ? `${ns}/motor_reset` : null;
     const motorReset = this._verifiedEndpoint(
@@ -1014,9 +1033,9 @@ const RobotCompatibility = {
       motorStatus: [`${ns}/motor_status`, ['syscon_msgs/MotorState', 'syscon_msgs/msg/MotorState', 'spx_drive_msgs/msg/MotorState']],
       odom: [`${ns}/odom`, ['nav_msgs/Odometry', 'nav_msgs/msg/Odometry']],
       manualSelect: [hasRos2Type ? `${ns}/io/state_monitor/mode` : `${ns}/io/select`, ['std_msgs/Bool', 'std_msgs/msg/Bool']],
-      emergency: [`${ns}/emergency_sensor`, ['std_msgs/Int32MultiArray', 'std_msgs/msg/Int32MultiArray']],
+      emergency: hasRos2Type ? [`${ns}/io/state_monitor/emo`, ['std_msgs/msg/Bool']] : [`${ns}/emergency_sensor`, ['std_msgs/Int32MultiArray', 'std_msgs/msg/Int32MultiArray']],
       sto: [hasRos2Type ? `${ns}/io/state_monitor/sto` : `${ns}/sto_stop`, ['std_msgs/Bool', 'std_msgs/msg/Bool']],
-      lidarField: [`${ns}/io/lidar_field`, ['std_msgs/UInt8', 'std_msgs/msg/UInt8']],
+      lidarField: hasRos2Type ? [`${ns}/io/state_monitor/lccs`, ['std_msgs/msg/Bool']] : [`${ns}/io/lidar_field`, ['std_msgs/UInt8', 'std_msgs/msg/UInt8']],
       brakeReleased: [hasRos2Type ? `${ns}/io/state_monitor/brake` : `${ns}/io/break_released`, ['std_msgs/Bool', 'std_msgs/msg/Bool']],
       chargeRelay: [`${ns}/io/do/charge_relay`, ['std_msgs/msg/Bool']]
     };

@@ -1472,6 +1472,7 @@
               <div class="task-builder-heading-actions">
                 <button type="button" id="btn-builder-task-info" class="btn btn-small">Task Info 보기</button>
                 <button type="button" id="btn-close-task-builder" class="btn btn-small">취소</button>
+                <button type="button" id="btn-convert-ros2-routes" class="btn btn-small">ROS2 경로 변환 검토</button>
                 <button type="button" id="btn-save-task-builder" class="btn btn-small btn-primary">Task 저장</button>
               </div>
             </div>
@@ -1480,6 +1481,7 @@
             <div class="action-row">
               <label data-i18n="action.actionType">Action</label>
               <select id="action-type">
+                <option value="0x30">0x30 · RouteNavigation (ROS2)</option>
                 <option value="0x01">0x01 · WayPoint</option>
                 <option value="0x02">0x02 · Basic Move</option>
                 <option value="0x07">0x07 · Standby</option>
@@ -3345,6 +3347,7 @@ free -h"></textarea>
   <script src="js/ssh-terminal.js"></script>
   <script src="js/file-transfer.js?v=20260723-active-robot-session"></script>
   <script src="js/commands.js"></script>
+  <script src="js/ros2-route.js"></script>
   <script src="js/action-sender.js?v=20261001-task-telemetry"></script>
   <script src="js/jog-control.js?v=20260815-four-generation"></script>
   <script src="js/vel-monitor.js"></script>

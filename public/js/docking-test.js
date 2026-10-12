@@ -1188,6 +1188,10 @@ const DockingTest = {
   },
 
   startTest() {
+    if (RosManager.isRos2?.()) {
+      App.toast('이 반복 도킹 시험은 ROS1 전용입니다. ROS2는 Task의 RouteNavigation에서 도킹 연결과 상세 JSON을 입력하세요.', 'warning');
+      return;
+    }
     if (!RosManager.ros) {
       this.log('Error: ROS is not connected', true);
       App.addEvent('test', 'Docking test start failed', 'ROS disconnected', 'error');
@@ -1238,6 +1242,7 @@ const DockingTest = {
   },
 
   publishTestConfig(robotId, cycleCount, missionId, dockParams, dockArgs) {
+    if (RosManager.isRos2?.()) return;
     // Publish cycle count
     const cycleCountTopic = new ROSLIB.Topic({
       ros: RosManager.ros,
@@ -1288,6 +1293,7 @@ const DockingTest = {
   },
 
   subscribeDockingTopics(robotId) {
+    if (RosManager.isRos2?.()) return;
     // Unsubscribe existing
     this.unsubscribeDockingTopics();
 
@@ -1397,7 +1403,7 @@ const DockingTest = {
     this.unsubscribeDockingTopics();
 
     // Publish stop request
-    if (RosManager.ros) {
+    if (RosManager.ros && !RosManager.isRos2?.()) {
       const requestTopic = new ROSLIB.Topic({
         ros: RosManager.ros,
         name: '/mission_request',

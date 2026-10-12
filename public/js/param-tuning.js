@@ -72,7 +72,7 @@ const ParamTuning = {
       button.dataset.ns = ros2 ? `/${RosManager.getRobotId(App.activeSlotIndex)}/${names[index]}` : `/${names[index]}`;
       button.textContent = names[index];
     });
-    document.getElementById('param-search-input').placeholder = ros2 ? '/R_006/amcl::max_particles 또는 노드 이름' : 'Search parameter name...';
+    document.getElementById('param-search-input').placeholder = ros2 ? `/${RosManager.getRobotId(App.activeSlotIndex)}/amcl::max_particles 또는 노드 이름` : 'Search parameter name...';
   },
 
   async searchParams(prefix = null) {

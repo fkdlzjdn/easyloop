@@ -296,6 +296,16 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(self.events[-1]['values']['controller_type'], 'differential_drive')
         self.assertEqual(self.events[-1]['values']['parameter'], '/R_006/wheel_driver_node_exe::config_file')
 
+    def test_runtime_contract_reads_the_active_nodes_parameters(self):
+        def call(name, args, success, _fail):
+            self.assertEqual(name, '/R_006/vda_unified_runtime_node/get_parameters')
+            self.assertEqual(args['names'], ['route_contract.schema', 'route_navigation.current_map_id', 'route_contract.frame_id', 'factsheet.maximum_speed'])
+            success(types.SimpleNamespace(values=[types.SimpleNamespace(value=value) for value in ['spx.route_contract.v2', 'normal', 'map', 0.7]]))
+        self.bridge.service = call
+        self.bridge.handle(self.request('/rosapi/runtime_contract'))
+        self.assertEqual(self.events[-1]['values'], {'schema': 'spx.route_contract.v2', 'mapId': 'normal', 'frameId': 'map', 'maximumSpeed': 0.7, 'robot': {'manufacturer': 'SysconRobotics', 'serial_number': 'R_006'}})
+        self.node.create_publisher.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()
