@@ -1,6 +1,6 @@
 {
   "name": "easyloop",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "EasyLoop - AMR Mapping, Loop Closure, Control and Diagnostics",
   "main": "server.js",
   "scripts": {

@@ -18638,3 +18638,11 @@ body.light-mode .builtin-task-setting-row select {
 .ros2-route-editor input,.ros2-route-editor select,.ros2-route-editor textarea,.ros2-route-json textarea { width:100%; box-sizing:border-box; }
 .ros2-route-json textarea { font-family:monospace; resize:vertical; }
 .ros2-route-editor .action-position-helpers { display:flex; flex-wrap:wrap; gap:6px; }
+
+.task-runtime-summary { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 12px 0; padding: 12px; border: 1px solid var(--border-color, #ddd); border-radius: 8px; }
+.task-runtime-summary small { flex-basis: 100%; opacity: .8; }
+.task-format-preview-panel { margin: 12px 0; }
+.task-format-preview-panel pre { max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.task-runtime-warning { display: block; margin: 8px 12px; color: #b56b16; }
+.ros2-speed-param { display: grid; gap: 6px; margin-bottom: 12px; }
+.ros2-speed-param small { opacity: .75; }

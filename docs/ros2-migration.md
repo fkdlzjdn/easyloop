@@ -1,4 +1,4 @@
-# EasyLoop v1.5.0 — ROS1 / ROS2 사용 안내
+# EasyLoop v1.5.1 — ROS1 / ROS2 사용 안내
 
 ROS1 rosbridge 연결과 기존 기능을 유지하면서 Syscon SPX ROS2 Jazzy 환경을 추가했다. 구현 브랜치는 `feat/ros2-migration`이며 R_006 / sl400_vri의 기존 수집 자료와 2026-10-12 R_025 / stl1000_ros2의 실제 소스·실행 계약을 대조했다. 최신 액션·파라미터 검토는 [전체 기능 감사](ros2-full-migration-audit.md)를 참조한다.
 
@@ -62,6 +62,16 @@ ROS2 식별자는 `/node::parameter` 형식이다.
 Params에서 노드 이름 또는 파라미터 이름으로 검색하고 값을 변경한다. 노드가 변경을 거부하면 성공으로 표시하지 않는다. 배열은 JSON 배열로 입력한다. 타입은 현재 노드에 선언된 타입을 유지한다. 파라미터 목록은 응답하지 않는 노드가 있을 때 부분 결과를 표시할 수 있다.
 
 ROS2 차상 모델은 wheel driver의 실제 `config_file` 파라미터와 해당 YAML의 `wheel_controller.type`을 먼저 확인한다. 모델 이름이나 Git 프로젝트 이름만으로 action payload의 모델을 선택하지 않는다.
+
+## 작업 탭의 ROS2 폼
+
+활성 로봇의 ROS2 transport를 인식하면 작업 탭에 `ROS2 · SPX Task`와 실제 등록된 Action 목록을 표시한다. graph 확인 중에도 ROS2 입력 양식을 표시하되, 등록 여부가 확인되기 전에는 실행을 허용하지 않는다. 다른 로봇의 discovery 응답이나 반복 갱신은 현재 작성 중인 입력을 초기화하지 않는다.
+
+R_025에서는 RouteNavigation(48), StandBy(7)가 표시된다. RouteNavigation의 Action Params에는 `route_contract_json(string)`과 선택 `maximum_speed_mps(float)`를 표시한다. StandBy는 정수 timeout과 `id(string)`를 사용하며 ROS1 Common Params를 섞지 않는다. ROS1/ROS2의 마지막 입력 저장도 분리한다.
+
+Task 형식 확인 패널에서 `task_id → missions → actions`, `action_type`, `action_args`, `action_params`의 ROS2 요청 모양을 로컬에서 확인할 수 있다. 실제 로봇으로 전송하는 기능이 아니다. 기본 Task는 ROS 버전에 맞춰 보여주며, 기존 사용자 Task는 보존하고 ROS2 변환이 필요하면 실행 버튼에 이유를 표시한다. RouteNavigation 기본 양식에는 목표 좌표를 임의로 넣지 않는다.
+
+ROS1 로봇으로 전환하면 기존 Action 목록·파라미터·기본 Task가 복원된다. 등록되었지만 아직 입력 schema를 검증하지 못한 ROS2 Action은 이름을 표시하고 입력 정의 미확인으로 구분한다.
 
 ## R_025 경로 입력
 

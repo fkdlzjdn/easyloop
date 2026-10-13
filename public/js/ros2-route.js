@@ -294,7 +294,6 @@ const Ros2RouteEditor = {
         <input id="route-right-width" type="number" min="0.01" step="0.01" value="${esc(original?.edges?.[0]?.corridor?.right_width ?? 0.5)}"></label>
       <label>장애물 정책 <select id="route-obstacle-policy"><option value="STOP">정지</option><option value="ROLLOUT_WITHIN_CORRIDOR">허용 폭 안에서 회피</option></select></label>
       <label>주행 방향 <select id="route-direction"><option value="FORWARD">전진</option><option value="BACKWARD">후진</option></select></label>
-      <label>최대 선속도 (m/s) · 비우면 로봇 설정 사용 <input id="route-maximum-speed" type="number" min="0.01" step="0.01" placeholder="maximum_speed_mps"></label>
       <details><summary>도킹 연결 · RouteNavigation의 새 입력</summary>
         <label><input id="route-docking-enabled" type="checkbox"> 이 경로에 도킹 입력 포함</label>
         <label>충전 도킹 <select id="route-is-charge"><option value="0">일반 도킹</option><option value="1">충전 도킹</option></select></label>
@@ -313,7 +312,8 @@ const Ros2RouteEditor = {
       <p id="route-editor-status" role="status"></p>
       <p class="ros-info-hint">목적지 계획은 실행 시 현재 로봇 위치를 시작점으로 사용합니다. 최대 선속도는 maximum_speed_mps를 사용하며, 나머지 속도·허용 오차는 로봇의 ROS2 설정을 사용합니다. 실행 전 지도·경로 폭·주행 방향을 확인하세요.</p>
     </div>`;
-    paramsBox.innerHTML = `<details class="ros2-route-json"><summary>상세 RouteNavigation JSON · 도킹/혼합 경로 보존</summary>
+    paramsBox.innerHTML = `<label class="ros2-speed-param">최대 선속도 (m/s)<small>maximum_speed_mps · float · 선택</small><input id="route-maximum-speed" type="number" min="0.01" step="0.01" placeholder="로봇 설정 사용"></label>
+      <details class="ros2-route-json"><summary>route_contract_json · string · 경로 / 도킹 계약</summary>
       <textarea id="action-param-0" data-name="route_contract_json" data-type="string" rows="12">${esc(saved || '')}</textarea>
       <button type="button" id="route-apply-json" class="btn btn-small">JSON 검증</button></details>`;
     const get = id => document.getElementById(id);

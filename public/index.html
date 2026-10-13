@@ -1117,6 +1117,12 @@
               </div>
             </div>
 
+            <section class="task-runtime-summary" aria-live="polite">
+              <strong id="task-form-runtime">ROS1 · Task</strong>
+              <span id="task-form-contract">Task → Mission → Action</span>
+              <small id="task-form-note">로봇 연결 시 Task 형식을 확인합니다.</small>
+            </section>
+
             <section id="recent-task-runs" class="recent-task-runs" aria-labelledby="recent-task-runs-title" hidden>
               <div class="recent-task-runs-heading">
                 <div>
@@ -1191,8 +1197,8 @@
                   <span class="builtin-task-toggle-main">
                     <span class="builtin-task-toggle-icon" aria-hidden="true">◆</span>
                     <span>
-                      <strong>기본 Task</strong>
-                      <small>현장 용도에 맞게 Argument와 Parameter를 설정하면 이 프로그램에 저장됩니다.</small>
+                      <strong id="builtin-task-title">기본 Task</strong>
+                      <small id="builtin-task-note">현장 용도에 맞게 Argument와 Parameter를 설정하면 이 프로그램에 저장됩니다.</small>
                     </span>
                   </span>
                   <span id="builtin-task-count" class="builtin-task-count">0</span>
@@ -1503,17 +1509,17 @@
 
             <!-- Action Args -->
             <div class="action-args-section">
-              <h5>필수 입력</h5>
+              <h5 id="action-args-heading">필수 입력</h5>
               <div id="action-args-container">
                 <!-- Dynamically generated based on action type -->
               </div>
             </div>
 
-            <details class="action-advanced-panel">
-              <summary>상세 파라미터 · 공통 설정</summary>
+            <details id="action-advanced-panel" class="action-advanced-panel">
+              <summary id="action-advanced-title">상세 파라미터 · 공통 설정</summary>
               <!-- Action Params -->
               <div class="action-params-section">
-                <h5>Action Params</h5>
+                <h5 id="action-params-heading">Action Params</h5>
                 <div id="action-params-container">
                   <!-- Dynamically generated based on action type -->
                 </div>
@@ -1528,6 +1534,12 @@
                   <!-- Common params shared by all actions -->
                 </div>
               </div>
+            </details>
+
+            <details id="task-format-preview-panel" class="task-format-preview-panel" hidden>
+              <summary>ROS2 Task / Action 형식 확인</summary>
+              <p id="task-format-preview-status"></p>
+              <pre id="task-format-preview"></pre>
             </details>
 
             <!-- Action Name -->

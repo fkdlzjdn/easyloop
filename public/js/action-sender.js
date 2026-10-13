@@ -464,6 +464,84 @@ const ActionSender = {
     }
   },
 
+  ros2ActionTypes: {
+    '0x30': {
+      name: 'RouteNavigation', desc: 'ROS2 경로 계획 / 지정 경로 / 곡선', args: [],
+      params: [{ name: 'route_contract_json', type: 'string', default: '', desc: 'spx.route_contract.v1/v2 JSON' },
+        { name: 'maximum_speed_mps', type: 'float', default: '', unit: 'm/s', desc: '선택 · runtime 최대 속도 이하' }]
+    },
+    '0x07': {
+      name: 'StandBy', desc: 'ROS2 timeout 또는 wakeup 신호 대기',
+      args: [{ name: 'timeout', label: '대기 시간', unit: 'sec', type: 'int', min: 0, step: 1, default: 5,
+        desc: 'action_args[0] · 음수가 아닌 정수, 0은 wakeup 신호 대기' }],
+      params: [{ name: 'id', type: 'string', default: '', desc: 'wakeup 식별자 · 비우면 전송 시 Action ID 사용' }]
+    }
+  },
+
+  _isRos2TaskForm(slot = App.robotSlots?.[this.getTargetSlot()]) {
+    return Boolean(slot?.ros2SessionId || slot?.rosMode === 'ros2' || slot?.compatibilityProfile?.transport?.rosMajor === 2
+      || slot?.compatibilityProfile?.task?.protocol === 'ros2_spx');
+  },
+
+  _actionDefinition(actionType, slot = App.robotSlots?.[this.getTargetSlot()]) {
+    const raw = Number(actionType);
+    const key = Number.isFinite(raw) ? `0x${raw.toString(16).padStart(2, '0')}` : actionType;
+    return this._isRos2TaskForm(slot) ? this.ros2ActionTypes[key] : this.actionTypes[key];
+  },
+
+  _builtinTaskMatchesRuntime(entry) {
+    return !entry?.builtin || (this._isRos2TaskForm() ? entry.runtimeFamily === 'ros2_spx' : entry.runtimeFamily !== 'ros2_spx');
+  },
+
+  _ensureRos2DefaultTasks() {
+    const saved = this.getSavedQueues();
+    const specs = [
+      { name: 'ROS2 - RouteNavigation', key: '0x30', args: [], configured: false },
+      { name: 'ROS2 - StandBy', key: '0x07', args: [5], configured: true }
+    ];
+    let added = 0;
+    for (const spec of specs) {
+      if (saved[spec.name]) continue;
+      const definition = this.ros2ActionTypes[spec.key];
+      saved[spec.name] = { runtimeFamily: 'ros2_spx', builtin: true, builtinVersion: this.BUILTIN_TASK_VERSION,
+        loopFlag: 1, savedAt: Date.now(), queue: [{ name: spec.name, actionType: spec.key, args: spec.args,
+          params: definition.params.filter(param => param.name !== 'maximum_speed_mps').map(param => ({ param_name: param.name, type: param.type, value: param.default })),
+          summary: spec.configured ? 'StandBy · 5 sec' : 'RouteNavigation · 목표/경로 입력 필요' }] };
+      added++;
+    }
+    if (added) {
+      try { localStorage.setItem(this.QUEUE_STORAGE_KEY, JSON.stringify(saved)); this._notifyTaskStoreChanged(); }
+      catch (error) { console.warn('ROS2 기본 Task 저장 실패:', error.message); }
+    }
+    return added;
+  },
+
+  _taskQueueCompatibility(entry) {
+    if (!this._isRos2TaskForm()) return { editable: true, runnable: !(entry.queue || []).some(item => Number(item.actionType ?? item.action_type) === 48), reason: (entry.queue || []).some(item => Number(item.actionType ?? item.action_type) === 48) ? 'ROS2 Task · ROS2 로봇 선택 필요' : '' };
+    const { catalog } = this._taskActionCatalog();
+    if (!catalog?.verified) return { editable: true, runnable: false, reason: 'ROS2 등록 Action 확인 중' };
+    if (catalog.executionAvailable === false) return { editable: true, runnable: false, reason: 'Task 실행 backend 미사용' };
+    if (Number(entry.loopFlag ?? 1) !== 1 || this._queueToMissionGroups(entry.queue || []).length !== 1) return { editable: true, runnable: false, reason: 'ROS2는 Mission 1개 · loop_flag=1 필요' };
+    for (const item of entry.queue || []) {
+      const type = Number(item.actionType ?? item.action_type);
+      if (!catalog.types.includes(type)) return { editable: true, runnable: false, reason: `ROS2 변환 필요 · Action ${type}` };
+      if (!this.ros2ActionTypes[this._actionTypeKey(item)]) return { editable: false, runnable: false, reason: `등록 Action ${type}의 입력 정의 미확인` };
+      try { this._validateActionWireShape({ action_type: type, action_args: item.args || item.action_args || [], action_params: item.params || item.action_params || [] }, { task: { protocol: 'ros2_spx' } }); }
+      catch (error) { return { editable: true, runnable: false, reason: `입력 확인 · ${error.message}` }; }
+      if (type === 48) {
+        try {
+          const action = { action_id: item.name || item.action_id || 'route', action_params: JSON.parse(JSON.stringify(item.params || item.action_params || [])) };
+          const { profile } = this._taskActionCatalog();
+          if (profile?.task?.routeContext?.verified === false) throw new Error('runtime 경로 설정 미검증');
+          const speed = action.action_params.find(param => param.param_name === 'maximum_speed_mps');
+          if (speed && (!Number.isFinite(Number(speed.value)) || Number(speed.value) <= 0 || (profile?.task?.routeContext?.maximumSpeed && Number(speed.value) > profile.task.routeContext.maximumSpeed))) throw new Error('maximum_speed_mps가 runtime 속도 범위 밖입니다.');
+          Ros2Route.bind(action, { taskId: entry.yamlTaskId || 'preview', ...profile?.task?.routeContext });
+        } catch (error) { return { editable: true, runnable: false, reason: `경로 입력 확인 · ${error.message}` }; }
+      }
+    }
+    return { editable: true, runnable: Boolean(entry.queue?.length), reason: '' };
+  },
+
   turntableAsyncArg: {
     name: 'async_mode',
     label: '3번째 인자 · 비동기 완료',
@@ -495,7 +573,7 @@ const ActionSender = {
     this.setupEventListeners();
     this._setupTaskInterfaceSelector();
     this.setupCommonParamsUI();
-    this.updateActionForm('0x01'); // Default to WayPoint
+    this.updateActionForm(this._isRos2TaskForm() ? '0x30' : '0x01');
     this.ensureDefaultTasks();
     this.refreshSavedQueueList();
     this._loadRecentTaskRuns();
@@ -541,6 +619,7 @@ const ActionSender = {
   },
 
   ensureDefaultTasks() {
+    if (this._isRos2TaskForm()) return this._ensureRos2DefaultTasks();
     let saved = {};
     try {
       saved = JSON.parse(localStorage.getItem(this.QUEUE_STORAGE_KEY)) || {};
@@ -878,8 +957,10 @@ const ActionSender = {
     const taskBuilderView = document.getElementById('task-builder-view');
     ['input', 'change'].forEach(eventName => {
       taskBuilderView?.addEventListener(eventName, event => {
+        if (this._updatingActionForm) return;
         if (event.target?.closest?.('.action-buttons')) return;
         this._syncActionEditButtons();
+        this._refreshTaskFormatPreview();
         if (this._editingActionIndex >= 0) {
           this._showEditorTaskPreview(this._editingActionIndex, true);
         }
@@ -898,10 +979,11 @@ const ActionSender = {
       const targetCfgIndex = config.params.findIndex(param => param.name === 'target_cfg');
       if (targetCfgIndex >= 0) this._loadTargetCfgOptions(targetCfgIndex, true);
     });
-    document.addEventListener('amr:compatibility-updated', () => {
+    document.addEventListener('amr:compatibility-updated', event => {
+      const target = App.robotSlots?.[this.getTargetSlot()];
+      if (event.detail?.robotId && event.detail.robotId !== target?.robotId) return;
       this._syncActionCompatibilityUi();
-      const typeSelect = document.getElementById('action-type');
-      if (typeSelect?.value) this.updateActionForm(typeSelect.value);
+      this._syncTaskInterfaceSelector();
     });
 
     // Add to queue button
@@ -1290,6 +1372,7 @@ const ActionSender = {
   // Update target robot connection status display (called by App on switch)
   updateTargetStatus() {
     App.updateActionTargetLabel();
+    this._syncActionCompatibilityUi();
     this._syncTaskInterfaceSelector();
     this._updateTaskControlsAvailability();
     this._updateQuickTaskRunAvailability();
@@ -1310,6 +1393,7 @@ const ActionSender = {
 
   onCompatibilityProfileChanged(slotIndex) {
     if (slotIndex !== this.getTargetSlot()) return;
+    this._syncActionCompatibilityUi();
     const typeSelect = document.getElementById('action-type');
     if (typeSelect?.value !== '0x22') return;
 
@@ -2513,7 +2597,7 @@ const ActionSender = {
     entries.forEach((entry, index) => {
       const { action } = entry;
       const typeKey = this._actionTypeKey(action);
-      const config = this.actionTypes[typeKey];
+      const config = this._actionDefinition(typeKey) || this.actionTypes[typeKey];
       const chip = document.createElement('div');
       chip.className = 'quick-action-preview-chip';
       if (entry.key === this._quickTaskSelectedAction?.key) chip.classList.add('selected');
@@ -2942,6 +3026,7 @@ const ActionSender = {
 
     if (taskName) {
       this.loadSavedQueue(taskName, { silent: true });
+      if (entry?.queue?.length) this.loadActionToForm(0);
     } else {
       this.clearTaskPreview();
       this.actionQueue = [];
@@ -2959,6 +3044,7 @@ const ActionSender = {
       if (savedSelect) savedSelect.value = '';
     }
 
+    this._syncActionCompatibilityUi();
     libraryView.hidden = true;
     if (quickView) quickView.hidden = true;
     builderView.hidden = false;
@@ -3021,11 +3107,81 @@ const ActionSender = {
 
   _actionTypeSupported(actionType, slot = App.robotSlots?.[this.getTargetSlot()]) {
     const { profile, catalog } = this._taskActionCatalog(slot);
+    if (Number(actionType) === 48 && !this._isRos2TaskForm(slot)) return false;
+    if (this._isRos2TaskForm(slot) && !catalog?.verified) return false;
     if (!catalog?.attempted) return true;
     if (!catalog.verified || catalog.executionAvailable === false || !catalog.types.includes(Number(actionType))) return false;
     const model = profile?.chassis?.driveModel;
     return !(this._requiresDetectedActionModel(actionType)
       && model?.attempted && !model.verified);
+  },
+
+  _syncTaskFormPresentation(slot = App.robotSlots?.[this.getTargetSlot()]) {
+    const native = this._isRos2TaskForm(slot);
+    const { profile, catalog } = this._taskActionCatalog(slot);
+    const set = (id, value) => { const element = document.getElementById(id); if (element) element.textContent = value; };
+    set('task-form-runtime', native ? 'ROS2 · SPX Task' : 'ROS1 · Task');
+    set('task-form-contract', native ? 'Task → Mission → Action · spx_task_msgs' : 'Task → Mission → Action · 기존 ROS1 형식');
+    set('task-form-note', native ? `${slot?.robotId || ''} · ${catalog?.verified ? `등록 Action ${catalog.actions.map(action => `${action.name}(${action.type})`).join(', ')}` : '등록 Action 확인 중'} · Mission 1개 / loop_flag=1`
+      : 'ROS1 Action 입력과 파라미터를 사용합니다.');
+    set('action-args-heading', native ? 'ROS2 Action 입력 · action_args / 경로' : '필수 입력');
+    set('action-params-heading', native ? 'ROS2 Action 파라미터 · action_params' : 'Action Params');
+    set('action-advanced-title', native ? 'ROS2 파라미터' : '상세 파라미터 · 공통 설정');
+    set('builtin-task-title', native ? 'ROS2 기본 Task' : '기본 Task');
+    set('builtin-task-note', native ? 'RouteNavigation 경로 입력과 StandBy 대기 설정' : '용도별 초기값을 저장해 재사용합니다.');
+    const advanced = document.getElementById('action-advanced-panel');
+    if (advanced && advanced.dataset.runtime !== (native ? 'ros2' : 'ros1')) { advanced.open = native; advanced.dataset.runtime = native ? 'ros2' : 'ros1'; }
+    const convert = document.getElementById('btn-convert-ros2-routes');
+    if (convert) convert.hidden = !native;
+    for (const id of ['action-loop-count', 'quick-task-loop']) {
+      const input = document.getElementById(id);
+      if (input) { input.min = native ? '1' : '0'; input.max = native ? '1' : '9999'; input.title = native ? '현재 ROS2 Task는 loop_flag=1만 지원합니다.' : '0은 무한 반복'; }
+    }
+    const context = profile?.task?.routeContext || {};
+    if (native && document.getElementById('route-map-id')) {
+      for (const [id, value] of [['route-map-id', context.mapId], ['route-frame-id', context.frameId]]) {
+        const input = document.getElementById(id); if (input && !input.value && value) input.value = value;
+      }
+      const speed = document.getElementById('route-maximum-speed');
+      if (speed && context.maximumSpeed) { speed.max = String(context.maximumSpeed); speed.placeholder = `로봇 설정 사용 · 상한 ${context.maximumSpeed} m/s`; }
+    }
+    this._refreshTaskFormatPreview();
+  },
+
+  _buildTaskFormPayload(entry, taskId = 'draft_task') {
+    const groups = this._queueToMissionGroups(entry.queue || []);
+    return { task_id: taskId, loop_flag: Number(entry.loopFlag ?? 1), missions: groups.map(group => ({
+      mission_id: this._normalizeMissionId(group.missionId), actions: group.actions.map((item, index) => ({
+        action_id: item.name || item.action_id || `a${index + 1}`, action_type: Number(item.actionType ?? item.action_type),
+        action_args: JSON.parse(JSON.stringify(item.args || item.action_args || [])),
+        action_params: JSON.parse(JSON.stringify(item.params || item.action_params || [])), acs_data: JSON.parse(JSON.stringify(item.acs_data || []))
+      }))
+    })) };
+  },
+
+  _refreshTaskFormatPreview() {
+    const panel = document.getElementById('task-format-preview-panel');
+    if (!panel) return;
+    panel.hidden = !this._isRos2TaskForm();
+    if (panel.hidden) return;
+    let queue = JSON.parse(JSON.stringify(this.actionQueue || []));
+    if (!queue.length) {
+      const current = this.readCurrentAction({ quiet: true });
+      if (current) queue = [{ ...current, name: document.getElementById('action-name')?.value || 'action_1' }];
+    }
+    if (this._editingActionIndex >= 0 && queue[this._editingActionIndex]) {
+      const edited = this.readCurrentAction({ quiet: true });
+      if (edited) queue[this._editingActionIndex] = this._mergeEditedAction(queue[this._editingActionIndex], edited);
+    }
+    const entry = { queue, loopFlag: Number(document.getElementById('action-loop-count')?.value || 1) };
+    const payload = this._buildTaskFormPayload(entry, document.getElementById('action-work-id')?.value || 'draft_task');
+    const { profile } = this._taskActionCatalog();
+    for (const mission of payload.missions) for (const action of mission.actions) if (action.action_type === 48) {
+      try { Ros2Route.bind(action, { taskId: payload.task_id, ...profile?.task?.routeContext }); } catch (error) { /* preserve incomplete draft in preview */ }
+    }
+    document.getElementById('task-format-preview').textContent = JSON.stringify(payload, null, 2);
+    const status = document.getElementById('task-format-preview-status');
+    if (status) status.textContent = !queue.length ? '좌표 또는 Action 입력 후 형식을 확인할 수 있습니다.' : this._taskQueueCompatibility(entry).reason || 'ROS2 Task / Mission / Action 형식 · 로컬 미리보기';
   },
 
   _requiresDetectedActionModel(actionType) {
@@ -3044,7 +3200,7 @@ const ActionSender = {
       } else if (catalog?.executionAvailable === false) {
         status.textContent = `Task 실행 차단 · ${catalog.message || '실행 backend 미사용'}`;
         status.className = 'action-compatibility-status blocked';
-      } else if (catalog?.verified && model?.attempted && !model.verified) {
+      } else if (!this._isRos2TaskForm(slot) && catalog?.verified && model?.attempted && !model.verified) {
         status.textContent = `${slot.robotId} · Action ${catalog.types.length}개 · 차상 model_type 미확인 · 모델 의존 Action 차단`;
         status.className = 'action-compatibility-status blocked';
         status.title = model.reason || '차상 model_type 자동감지 실패';
@@ -3052,7 +3208,7 @@ const ActionSender = {
         const modelLabel = model?.verified
           ? `${String(model.kind).toUpperCase()} · model_type=${model.actionModelType}`
           : '차상 model_type 미확인';
-        status.textContent = `${slot.robotId} · Action ${catalog.types.length}개 자동감지 · ${modelLabel}`;
+        status.textContent = this._isRos2TaskForm(slot) ? `${slot.robotId} · ROS2 Action ${catalog.types.length}개 · ${profile.task.routeContext?.schema || '경로 설정 확인 중'}` : `${slot.robotId} · Action ${catalog.types.length}개 자동감지 · ${modelLabel}`;
         status.className = 'action-compatibility-status ready';
         status.title = `${catalog.service} · ${catalog.serviceType}`;
       } else if (catalog?.attempted) {
@@ -3064,26 +3220,42 @@ const ActionSender = {
       }
     }
 
+    const native = this._isRos2TaskForm(slot);
     const common = document.getElementById('action-common-params-container')?.parentElement;
-    if (common) common.hidden = profile?.task?.protocol === 'ros2_spx';
+    if (common) common.hidden = native;
     const select = document.getElementById('action-type');
     if (select?.options) {
-      Array.from(select.options).forEach(option => {
-        if (!option.dataset.baseLabel) option.dataset.baseLabel = option.textContent;
-        const supported = this._actionTypeSupported(parseInt(option.value), slot);
-        option.disabled = !supported;
-        option.hidden = profile?.task?.protocol === 'ros2_spx' ? !supported : option.value === '0x30';
-        option.textContent = `${option.dataset.baseLabel}${supported ? '' : ' · 미지원'}`;
-      });
-      const selected = select.options[select.selectedIndex];
-      if (selected?.disabled) {
-        const firstSupported = Array.from(select.options).find(option => !option.disabled);
-        if (firstSupported) {
-          select.value = firstSupported.value;
-          this.updateActionForm(select.value);
-        }
+      if (!this._ros1ActionOptions) this._ros1ActionOptions = Array.from(select.options)
+        .filter(option => option.value !== '0x30').map(option => ({ value: option.value, label: option.dataset.baseLabel || option.textContent }));
+      const previous = select.value;
+      const entries = native
+        ? (catalog?.verified ? catalog.actions : Object.entries(this.ros2ActionTypes).map(([value, definition]) => ({ type: Number(value), name: definition.name })))
+          .map(action => ({ value: `0x${Number(action.type).toString(16).padStart(2, '0')}`,
+            label: `${action.type} · ${action.name || action.key} · ROS2` }))
+        : this._ros1ActionOptions;
+      select.innerHTML = '';
+      for (const entry of entries) {
+        const option = document.createElement('option');
+        option.value = entry.value;
+        option.textContent = entry.label;
+        option.dataset.baseLabel = entry.label;
+        const supported = this._actionTypeSupported(Number(entry.value), slot);
+        option.disabled = native ? !this._actionDefinition(entry.value) || !catalog?.verified : !supported;
+        if (native && !this._actionDefinition(entry.value)) option.textContent += ' · 입력 정의 미확인';
+        select.appendChild(option);
+      }
+      if (entries.some(entry => entry.value === previous)) select.value = previous;
+      else select.value = entries[0]?.value || '';
+      const context = `${slot?.robotId || ''}:${native ? 'ros2' : 'ros1'}:${select.value}`;
+      if (select.value && this._actionFormContext !== context) this.updateActionForm(select.value);
+      if (!select.value) {
+        document.getElementById('action-args-container').textContent = '등록된 ROS2 Action이 없습니다.';
+        document.getElementById('action-params-container').textContent = catalog?.reason || 'Action 목록 확인 중';
       }
     }
+    this._syncTaskFormPresentation(slot);
+    this.ensureDefaultTasks();
+    this.renderTaskLibrary(document.getElementById('task-library-search')?.value || '');
 
     const selectedType = select?.value ? parseInt(select.value) : null;
     const addButton = document.getElementById('btn-add-to-queue');
@@ -3148,9 +3320,12 @@ const ActionSender = {
   },
 
   _actionArgDefinitions(actionType, existingArgs = null, slot = App.robotSlots?.[this.getTargetSlot()]) {
-    const config = this.actionTypes[actionType];
+    const config = this._actionDefinition(actionType, slot);
     if (!config) return [];
     const definitions = Array.from(config.args || []);
+    if (actionType === '0x30' && existingArgs?.length === 3) return [
+      { name: 'is_charge', label: '충전 여부' }, { name: 'direction', label: '도킹 방향' }, { name: 'scan_type', label: '인식 방식' }
+    ];
     if (actionType === '0x02' && this._usesNativeSpxBasicMove(slot)) {
       definitions[0] = {
         ...definitions[0],
@@ -3168,8 +3343,22 @@ const ActionSender = {
   },
 
   updateActionForm(actionType, existingArgs = null, existingAction = null) {
-    const config = this.actionTypes[actionType];
-    if (!config) return;
+    this._updatingActionForm = true;
+    try { return this._renderActionForm(actionType, existingArgs, existingAction); }
+    finally { this._updatingActionForm = false; this._refreshTaskFormatPreview(); }
+  },
+
+  _renderActionForm(actionType, existingArgs = null, existingAction = null) {
+    const select = document.getElementById('action-type');
+    if (select) select.value = actionType;
+    const slot = App.robotSlots?.[this.getTargetSlot()];
+    this._actionFormContext = `${slot?.robotId || ''}:${this._isRos2TaskForm(slot) ? 'ros2' : 'ros1'}:${actionType}`;
+    const config = this._actionDefinition(actionType);
+    if (!config) {
+      document.getElementById('action-args-container').textContent = '현재 ROS2 입력 정의가 없습니다. 원본 형식을 확인하거나 지원 Action으로 재구성하세요.';
+      document.getElementById('action-params-container').textContent = '가져온 원본 Action과 파라미터는 Task에 보존되어 있습니다.';
+      return;
+    }
 
     // Exit waypoint select mode when changing action type
     this._exitWaypointSelectMode();
@@ -3192,7 +3381,7 @@ const ActionSender = {
               `<option value="${option.value}" ${Number(option.value) === Number(arg.default) ? 'selected' : ''}>${option.label}</option>`
             ).join('')}
           </select>`
-        : `<input type="number" step="any" id="action-arg-${idx}" value="${arg.default}"
+        : `<input type="number" step="${arg.step || 'any'}" id="action-arg-${idx}" value="${arg.default}"
                   ${arg.min !== undefined ? `min="${arg.min}"` : ''}
                   ${arg.max !== undefined ? `max="${arg.max}"` : ''}
                   placeholder="${arg.desc}">`;
@@ -3340,14 +3529,15 @@ const ActionSender = {
   },
 
   // Read current form values and return an action object
-  readCurrentAction() {
+  readCurrentAction(options = {}) {
+    if (this._updatingActionForm) return null;
     const actionType = document.getElementById('action-type').value;
-    const config = this.actionTypes[actionType];
+    const config = this._actionDefinition(actionType);
     if (!config) return null;
 
     if (actionType === '0x30' && typeof Ros2RouteEditor !== 'undefined') {
       try { return Ros2Route.action(Ros2RouteEditor.read(), 'RouteNavigation', Ros2RouteEditor.extras()); }
-      catch (error) { App.toast(error.message, 'error'); return null; }
+      catch (error) { if (!options.quiet) App.toast(error.message, 'error'); return null; }
     }
     const actionArgs = [];
     const actionArgDefinitions = this._actionArgDefinitions(actionType);
@@ -3369,7 +3559,7 @@ const ActionSender = {
     });
 
     // Add common params (only if changed from default)
-    this.commonParams.forEach((param, idx) => {
+    (this._isRos2TaskForm() ? [] : this.commonParams).forEach((param, idx) => {
       const input = document.getElementById(`common-param-${idx}`);
       if (input && input.value !== param.default) {
         actionParams.push({
@@ -3433,7 +3623,7 @@ const ActionSender = {
 
     if (!actionName) {
       // Auto-generate name: ActionName_N
-      const config = this.actionTypes[item.actionType];
+      const config = this._actionDefinition(item.actionType) || this.actionTypes[item.actionType];
       const baseName = config ? config.name : 'Action';
       if (!this._actionNameCounters[baseName]) {
         this._actionNameCounters[baseName] = 0;
@@ -3550,6 +3740,7 @@ const ActionSender = {
   },
 
   renderQueue() {
+    this._refreshTaskFormatPreview();
     const listEl = document.getElementById('action-queue-list');
     const countEl = document.getElementById('action-queue-count');
     countEl.textContent = this.actionQueue.length;
@@ -3657,7 +3848,7 @@ const ActionSender = {
     const original = this.actionQueue[index];
     if (!original) return false;
     try {
-      const edited = editedAction || this.readCurrentAction();
+      const edited = editedAction || this.readCurrentAction({ quiet: true });
       if (!edited) return false;
       const merged = this._mergeEditedAction(original, edited);
       const baseline = this._editingActionBaselineSignature
@@ -3681,7 +3872,7 @@ const ActionSender = {
     this.updateActionForm(item.actionType, itemArgs, item);
 
     // Set args
-    const config = this.actionTypes[item.actionType];
+    const config = this._actionDefinition(item.actionType) || this.actionTypes[item.actionType];
     if (config && itemArgs.length > 0) {
       const formArgs = item.actionType === '0x15' && itemArgs.length > 3
         ? [itemArgs[0], itemArgs[1], itemArgs.at(-1)]
@@ -3711,7 +3902,7 @@ const ActionSender = {
     }
     const nameInput = document.getElementById('action-name');
     if (nameInput) nameInput.value = item.name || item.action_id || '';
-    const baselineEdited = this.readCurrentAction();
+    const baselineEdited = this.readCurrentAction({ quiet: true });
     this._editingActionBaselineSignature = baselineEdited
       ? this._actionEditSignature(this._mergeEditedAction(item, baselineEdited))
       : this._actionEditSignature(item);
@@ -3846,7 +4037,7 @@ const ActionSender = {
       merged.name = requestedName;
       if (merged.action_id !== undefined) merged.action_id = requestedName;
     }
-    const config = this.actionTypes[editedType];
+    const config = this._actionDefinition(editedType) || this.actionTypes[editedType];
     const displayName = merged.name || merged.action_id || `Action_${this._editingActionIndex + 1}`;
     merged.summary = `${displayName}: ${config?.name || editedType}`;
     if (edited.conveyorFloor !== undefined) merged.conveyorFloor = edited.conveyorFloor;
@@ -4335,6 +4526,7 @@ const ActionSender = {
       App.toast('반복 횟수는 0 이상의 숫자로 입력하세요.', 'error');
       return false;
     }
+    if (this._isRos2TaskForm() && numeric !== 1) { App.toast('현재 ROS2 Task는 loop_flag=1만 지원합니다.', 'error'); return false; }
     const loopFlag = Math.max(0, Math.min(9999, Math.trunc(numeric)));
     const saved = this.getSavedQueues();
     const entry = saved[taskName];
@@ -4378,6 +4570,7 @@ const ActionSender = {
   _getVisibleTaskKeys(saved = this.getSavedQueues()) {
     const source = this._activeTaskSource || this.LOCAL_TASK_SOURCE;
     return Object.keys(saved)
+      .filter(key => this._builtinTaskMatchesRuntime(saved[key]))
       .filter(key => source === this.LOCAL_TASK_SOURCE
         ? !saved[key]?.importedFrom
         : saved[key]?.importedFrom === source)
@@ -4455,7 +4648,7 @@ const ActionSender = {
       queue: taskQueue,
       actions: taskQueue.map((item, index) => {
         const typeKey = this._actionTypeKey(item);
-        const config = this.actionTypes[typeKey];
+        const config = this._actionDefinition(typeKey) || this.actionTypes[typeKey];
         const args = Array.from(item.args || item.action_args || []);
         const argFields = typeKey === '0x15' && args.length >= 3
           ? args.slice(0, -1).map((_, argIndex) => ({
@@ -4769,7 +4962,7 @@ const ActionSender = {
     if (useCurrentForm
         && Number.isInteger(actionIndex)
         && queue[actionIndex]) {
-      const edited = this.readCurrentAction();
+      const edited = this.readCurrentAction({ quiet: true });
       if (edited) queue[actionIndex] = this._mergeEditedAction(queue[actionIndex], edited);
     }
     const name = document.getElementById('action-queue-save-name')?.value?.trim()
@@ -5151,7 +5344,7 @@ const ActionSender = {
     const matchesFilter = name =>
       !filter || (saved[name]?.yamlTaskId || name).toLocaleLowerCase().includes(filter);
     const builtinNames = Object.keys(saved)
-      .filter(name => saved[name]?.builtin && matchesFilter(name))
+      .filter(name => saved[name]?.builtin && this._builtinTaskMatchesRuntime(saved[name]) && matchesFilter(name))
       .sort((a, b) => {
         const left = this.defaultTaskSpecs.findIndex(spec => spec.name === a);
         const right = this.defaultTaskSpecs.findIndex(spec => spec.name === b);
@@ -5184,6 +5377,7 @@ const ActionSender = {
       if (!grid) return;
       names.forEach(name => {
         const entry = saved[name];
+        const compatibility = this._taskQueueCompatibility(entry);
         const model = this.getTaskDetailModel(name);
         if (!model) return;
         const expanded = this._expandedTaskNames.has(name);
@@ -5209,7 +5403,7 @@ const ActionSender = {
         titleRow.appendChild(title);
         if (builtinSection) {
           const builtin = document.createElement('small');
-          builtin.textContent = entry.builtinCustomized ? '사용자 설정' : '추천 기본값';
+          builtin.textContent = entry.builtinCustomized ? '사용자 설정' : this._isRos2TaskForm() ? 'ROS2 입력 양식' : '추천 기본값';
           titleRow.appendChild(builtin);
         }
         const meta = document.createElement('span');
@@ -5246,7 +5440,7 @@ const ActionSender = {
         controls.className = 'task-library-card-controls';
         const loopEditor = document.createElement('label');
         loopEditor.className = 'task-library-loop-editor';
-        loopEditor.title = '0은 무한 반복입니다.';
+        loopEditor.title = this._isRos2TaskForm() ? '현재 ROS2 Task는 1회 실행만 지원합니다.' : '0은 무한 반복입니다.';
         const loopLabel = document.createElement('span');
         loopLabel.textContent = '반복';
         const loopInput = document.createElement('input');
@@ -5266,7 +5460,8 @@ const ActionSender = {
           if (updated === false) loopInput.value = String(model.loopFlag);
         });
         const loopHint = document.createElement('small');
-        loopHint.textContent = '0=∞';
+        loopHint.textContent = this._isRos2TaskForm() ? 'ROS2: 1회 실행' : '0=∞';
+        if (this._isRos2TaskForm()) { loopInput.min = '1'; loopInput.max = '1'; }
         loopEditor.appendChild(loopLabel);
         loopEditor.appendChild(loopInput);
         loopEditor.appendChild(loopHint);
@@ -5287,7 +5482,7 @@ const ActionSender = {
         editButton.className = 'btn btn-small';
         editButton.textContent = builtinSection ? '용도별 설정' : '수정';
         editButton.addEventListener('click', () => {
-          if (builtinSection) this.openBuiltinTaskSettings(name);
+          if (builtinSection && !this._isRos2TaskForm()) this.openBuiltinTaskSettings(name);
           else this.openTaskBuilder(name);
         });
         const copyButton = document.createElement('button');
@@ -5303,7 +5498,8 @@ const ActionSender = {
         runButton.className = 'btn btn-small btn-primary task-library-run';
         runButton.textContent = '실행';
         const activeSlot = App.robotSlots?.[this.getTargetSlot()];
-        runButton.disabled = !activeSlot?.connected || !activeSlot.ros || model.actions.length === 0;
+        runButton.disabled = !activeSlot?.connected || !activeSlot.ros || model.actions.length === 0 || !compatibility.runnable;
+        if (compatibility.reason) { runButton.title = compatibility.reason; const hint = document.createElement('small'); hint.className = 'task-runtime-warning'; hint.textContent = compatibility.reason; card.appendChild(hint); }
         runButton.addEventListener('click', () => this.runSavedTask(name, runButton));
         controls.appendChild(loopEditor);
         controls.appendChild(infoButton);
@@ -6529,9 +6725,8 @@ const ActionSender = {
   },
 
   _getTaskInterfaceMode(slot) {
-    return this._normalizeTaskInterfaceMode(
-      this._taskInterfaceModes?.[this._taskInterfaceKey(slot)]
-    );
+    const mode = this._normalizeTaskInterfaceMode(this._taskInterfaceModes?.[this._taskInterfaceKey(slot)]);
+    return this._isRos2TaskForm(slot) && mode === 'legacy' ? 'auto' : mode;
   },
 
   _setTaskInterfaceMode(slot, mode, persist = true) {
@@ -6614,6 +6809,11 @@ const ActionSender = {
     const connected = Boolean(slot?.connected && slot.ros);
     const mode = this._getTaskInterfaceMode(slot);
     select.disabled = !connected;
+    if (select.options) for (const option of Array.from(select.options)) {
+      option.hidden = this._isRos2TaskForm(slot) && option.value === 'legacy';
+      option.disabled = this._isRos2TaskForm(slot) && option.value === 'legacy';
+      if (option.value === 'spx') option.textContent = this._isRos2TaskForm(slot) ? 'SPX ROS2' : 'SPX';
+    }
     select.value = mode;
     const token = ++this._taskInterfaceUiToken;
     if (!connected) {
@@ -6917,7 +7117,7 @@ const ActionSender = {
 
     tasks.forEach(parsedTask => {
       parsedTask.queue.forEach((item, index) => {
-        const config = this.actionTypes[item.actionType];
+        const config = this._actionDefinition(item.actionType) || this.actionTypes[item.actionType];
         const argText = item.args.map((value, argIndex) =>
           `${config?.args?.[argIndex]?.name || `arg${argIndex + 1}`}:${value}`
         ).join(', ');
@@ -7046,7 +7246,7 @@ const ActionSender = {
 
   // Save current form values to localStorage
   saveLastParams(actionType) {
-    const config = this.actionTypes[actionType];
+    const config = this._actionDefinition(actionType);
     if (!config) return;
 
     // Load existing saved data
@@ -7060,7 +7260,7 @@ const ActionSender = {
     if (actionType === '0x30' && typeof Ros2RouteEditor !== 'undefined') {
       try {
         const action = Ros2Route.action(Ros2RouteEditor.read(), 'RouteNavigation', Ros2RouteEditor.extras());
-        savedData[actionType] = { args: action.args, params: action.params.map(param => ({ name: param.param_name, value: param.value })), taskId: document.getElementById('action-work-id').value };
+        savedData[this._lastParamsStorageKey(actionType)] = { args: action.args, params: action.params.map(param => ({ name: param.param_name, value: param.value })), taskId: document.getElementById('action-work-id').value };
         localStorage.setItem(this.STORAGE_KEY, JSON.stringify(savedData));
       } catch (error) { App.toast(error.message, 'error'); }
       return;
@@ -7089,7 +7289,7 @@ const ActionSender = {
     const taskId = document.getElementById('action-work-id').value;
 
     // Store for this action type
-    savedData[actionType] = {
+    savedData[this._lastParamsStorageKey(actionType)] = {
       args: args,
       params: params,
       taskId: taskId
@@ -7102,10 +7302,12 @@ const ActionSender = {
   },
 
   // Load saved values for an action type
+  _lastParamsStorageKey(actionType) { return this._isRos2TaskForm() ? `ros2:${actionType}` : actionType; },
+
   loadLastParams(actionType) {
     try {
       const savedData = JSON.parse(localStorage.getItem(this.STORAGE_KEY)) || {};
-      return savedData[actionType] || null;
+      return savedData[this._lastParamsStorageKey(actionType)] || (actionType === '0x30' ? savedData[actionType] : null) || null;
     } catch (e) {
       return null;
     }
@@ -7116,7 +7318,7 @@ const ActionSender = {
     const saved = this.loadLastParams(actionType);
     if (!saved) return;
 
-    const config = this.actionTypes[actionType];
+    const config = this._actionDefinition(actionType);
     if (!config) return;
 
     // Apply saved args

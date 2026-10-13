@@ -575,7 +575,7 @@ const serverReady = listenOnAvailablePort(server, {
   });
 
   console.log(`\n========================================`);
-  console.log(`  EasyLoop Server (v1.5.0)`);
+  console.log(`  EasyLoop Server (v1.5.1)`);
   console.log(`========================================`);
   console.log(`  Local:    http://localhost:${port}`);
   urls.forEach(u => console.log(`  Network:  ${u}`));
