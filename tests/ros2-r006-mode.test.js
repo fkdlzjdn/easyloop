@@ -136,12 +136,13 @@ describe('ROS runtime mode selection', () => {
       voltage: 51.2, current: 2.5, percentage: 0.64, power_supply_status: 1
     });
     expect(app.robotSlots[0].bms).toEqual({
-      voltage: 51.2, current: 2.5, soc: 64, charging: true
+      voltage: 51.2, current: 2.5, soc: 64, charging: true, receivedAt: expect.any(Number), socValid: true
     });
     manager._handleSlotBmsData(0, {
       voltage: 51.2, current: 0, percentage: -1, power_supply_status: 0
     });
     expect(app.robotSlots[0].bms.soc).toBe(0);
+    expect(app.robotSlots[0].bms.socValid).toBe(false);
   });
 
   test('manual ROS2 mode and simultaneous map/pose channels share one SSH session', async () => {
@@ -183,7 +184,7 @@ describe('ROS runtime mode selection', () => {
     runtime.handleUpgrade(request, socket, Buffer.alloc(0));
     runtime.handleUpgrade(request, socket, Buffer.alloc(0));
     expect(runtime.sessions.get(result.sessionId).channels.size).toBe(2);
-    expect(conn.exec.mock.calls[1][0]).toContain('source /opt/ros/jazzy/setup.bash');
+    expect(conn.exec.mock.calls.some(([command]) => command.includes('source /opt/ros/jazzy/setup.bash'))).toBe(true);
     expect([...runtime.sessions.get(result.sessionId).channels].every(channel => channel.ws.readyState === 1)).toBe(true);
     expect((await invokeRoute(runtime, '/close', { sessionId: result.sessionId })).success).toBe(true);
     expect(conn.end).toHaveBeenCalledTimes(1);

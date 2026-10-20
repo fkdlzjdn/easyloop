@@ -509,6 +509,29 @@ describe('ROS passive fleet connections', () => {
     }));
   });
 
+  test('late ROBOT_MODEL lookup cannot clear or replace a verified Jog adapter',async()=>{
+    const {manager,context,slot}=loadRosManager(0);slot.ros={};
+    const jog={protocol:'ros2_teleop',verified:true,motorMode:'auto'};slot.compatibilityProfile={discovered:true,chassis:{jog}};
+    slot.compatibilityDiscoveryToken=17;
+    context.RobotCompatibility={clear:jest.fn(),updatePresentation:jest.fn()};
+    context.fetchWithTimeout=jest.fn(async url=>({json:async()=>url.endsWith('/exec')?{success:true,stdout:'sl400_vri\n'}:{success:true}}));
+    manager._discoverCompatibility=jest.fn();await manager._fetchRobotModel(0);
+    expect(context.RobotCompatibility.clear).not.toHaveBeenCalled();expect(manager._discoverCompatibility).not.toHaveBeenCalled();
+    expect(slot.compatibilityProfile.chassis.jog).toBe(jog);expect(slot.compatibilityDiscoveryToken).toBe(17);
+    expect(context.RobotCompatibility.updatePresentation).toHaveBeenCalledWith(slot);
+  });
+
+  test('model metadata waits for an existing discovery instead of invalidating it',async()=>{
+    const {manager,context,slot}=loadRosManager(0);slot.ros={};let finish;
+    slot.compatibilityPromise=new Promise(resolve=>{finish=resolve;});
+    context.RobotCompatibility={clear:jest.fn(),updatePresentation:jest.fn()};
+    context.fetchWithTimeout=jest.fn(async url=>({json:async()=>url.endsWith('/exec')?{success:true,stdout:'sl400_vri\n'}:{success:true}}));
+    manager._discoverCompatibility=jest.fn();const pending=manager._fetchRobotModel(0);
+    await new Promise(resolve=>setImmediate(resolve));expect(context.RobotCompatibility.clear).not.toHaveBeenCalled();
+    expect(manager._discoverCompatibility).not.toHaveBeenCalled();slot.compatibilityProfile={discovered:true};finish(slot.compatibilityProfile);await pending;
+    expect(manager._discoverCompatibility).not.toHaveBeenCalled();expect(context.RobotCompatibility.updatePresentation).toHaveBeenCalledWith(slot);
+  });
+
   test('mapping controls bind independently and include map save', () => {
     const { manager, elements } = loadRosManager(0);
     const listeners = {};

@@ -5,6 +5,13 @@ const JogControl = {
   _currentLy: 0,  // QD strafe
   _currentAz: 0,
   _publishing: false,
+  _deceleration: null,
+  _decelerationSequence: 0,
+  _nativeJogRun: null,
+  _nativeJogAvailability: null,
+  _nativeJogCharging: null,
+  _teleopIoState: null,
+  _legacyJogSpeedBounds: null,
   _cmdVelTopic: null,
   _jogWorker: null,
   _jogWorkerReady: false,
@@ -19,6 +26,7 @@ const JogControl = {
   _telemetrySubscriptions: [],
   _telemetryTimer: null,
   _telemetrySlotIndex: -1,
+  _telemetryGeneration: 0,
   _safetyState: null,
   _lidarSafetyInputs: null,
   _actualVelocity: null,
@@ -70,6 +78,7 @@ const JogControl = {
     }
   ],
   PUB_RATE: 50,
+  RELEASE_DECEL_MS: 500,
   WORKER_LEASE_MS: 350,
   WORKER_RECONNECT_MS: 750,
   MANUAL_LIFT_PUB_RATE: 75,
@@ -94,6 +103,11 @@ const JogControl = {
     return (document.getElementById('jog-drive-type') || {}).value || 'dd';
   },
 
+  _usesAutoDriveTeleop() {
+    const jog = this._compatibilityProfile()?.chassis?.jog;
+    return jog?.protocol === 'ros2_teleop' && jog.motorMode === 'auto';
+  },
+
   init() {
     this._setupSliders();
     this._setupButtons();
@@ -104,6 +118,23 @@ const JogControl = {
     this._setupChassisCommandButtons();
     this._setupStlUlsanControls();
     this._setupQuickTasks();
+    document.addEventListener('amr:compatibility-updated', event => this._onCompatibilityUpdated(event));
+    document.addEventListener('amr:telemetry-connection-changed', event => {
+      if (event.detail?.slot !== App.robotSlots?.[App.activeSlotIndex] || !this._isPanelOpen()) return;
+      if (this._publishing || this._nativeJogRun) this._stopVel();
+      this._startTelemetry();
+    });
+  },
+
+  _onCompatibilityUpdated(event) {
+    const slot = App.robotSlots?.[App.activeSlotIndex];
+    if (!slot || event?.detail?.robotId !== slot.robotId) return;
+    if (this._publishing || this._nativeJogRun) this._stopVel();
+    this._syncChassisModelUi(false);
+    if (this._isPanelOpen()) {
+      // A panel opened before graph discovery had no verified telemetry yet.
+      this._startTelemetry();
+    }
   },
 
   _setupDriveTypeSwitch() {
@@ -329,6 +360,45 @@ const JogControl = {
     this._applyDriveType(model.driveType, stop);
     this._updateQuickTaskTarget();
     this._refreshChassisCommandHelp();
+    this._syncNativeJogUi();
+  },
+
+  _syncNativeJogUi() {
+    const jog = this._compatibilityProfile()?.chassis?.jog;
+    const panel = document.getElementById('jog-native-settings');
+    if (!panel) return;
+    panel.hidden = jog?.protocol !== 'ros2_manual_jog' || jog.modePending === true;
+    const releaseHint = document.getElementById('jog-release-hint');
+    if (releaseHint) releaseHint.hidden = !panel.hidden || jog?.modePending === true;
+    if (panel.hidden) {
+      for (const [id, bounds] of Object.entries(this._legacyJogSpeedBounds || {})) {
+        const input = document.getElementById(id);
+        if (!input) continue;
+        input.min = bounds.min; input.max = bounds.max;
+        const value = document.getElementById(`${id}-val`); if (value) value.textContent = Number(input.value).toFixed(2);
+      }
+      this._legacyJogSpeedBounds = null;
+      return;
+    }
+    const limits = jog?.limits;
+    const detail = document.getElementById('jog-native-limits');
+    if (detail) detail.textContent = jog.limitsVerified
+      ? `허용 범위: ${limits.max_translation_m} m / ${(limits.max_rotation_rad * 180 / Math.PI).toFixed(1)}° · ${limits.max_linear_speed_mps} m/s · ${(limits.max_angular_speed_radps * 180 / Math.PI).toFixed(1)}°/s · ${limits.max_duration_sec}초`
+      : jog.reason;
+    if (!jog.limitsVerified) return;
+    this._legacyJogSpeedBounds ||= Object.fromEntries(['jog-linear-speed', 'jog-angular-speed'].map(id => {
+      const input = document.getElementById(id);
+      return [id, { min: input?.min || '', max: input?.max || '' }];
+    }));
+    document.getElementById('jog-native-distance').max = String(limits.max_translation_m);
+    document.getElementById('jog-native-angle').max = String(limits.max_rotation_rad * 180 / Math.PI);
+    for (const [id, maximum] of [['jog-linear-speed', limits.max_linear_speed_mps], ['jog-angular-speed', limits.max_angular_speed_radps]]) {
+      const input = document.getElementById(id);
+      if (!input) continue;
+      input.min = String(Math.min(0.01, maximum)); input.max = String(maximum);
+      input.value = String(Math.min(Number(input.value) || maximum, maximum));
+      const value = document.getElementById(`${id}-val`); if (value) value.textContent = Number(input.value).toFixed(2);
+    }
   },
 
   _refreshCompatibilitySummary(model, state = {}) {
@@ -525,7 +595,9 @@ const JogControl = {
     const slotIndex = App.activeSlotIndex;
     const slot = App.robotSlots?.[slotIndex];
     const rid = RosManager.getRobotId(slotIndex);
-    const profileTopic = this._compatibilityProfile()?.chassis?.drive?.topic;
+    const profile = this._compatibilityProfile();
+    if (profile?.chassis?.jog?.protocol === 'ros2_manual_jog') return null;
+    const profileTopic = profile?.chassis?.drive?.topic;
     if (profileTopic) return profileTopic;
     if (typeof TestMode !== 'undefined' && TestMode.enabled && slot?.virtualTestRobot) {
       return rid ? `/${rid}/cmd_vel` : '/cmd_vel';
@@ -545,7 +617,8 @@ const JogControl = {
     return {
       url: slot.rosUrl || `${protocol}//${location.host}/ws-proxy?target=${encodeURIComponent(`${slot.ip}:${slot.wsPort || 9090}`)}`,
       topic,
-      messageType
+      messageType,
+      waitForRos2Ready: Boolean(slot.ros2SessionId)
     };
   },
 
@@ -557,12 +630,17 @@ const JogControl = {
     if (this._jogWorker && this._jogWorkerConfigKey === key) return true;
     this._shutdownJogWorker();
     try {
-      const worker = new Worker('/js/jog-publisher-worker.js');
+      const worker = new Worker('/js/jog-publisher-worker.js?v=20261020-worker-deceleration');
       this._jogWorker = worker;
       this._jogWorkerConfigKey = key;
       this._jogWorkerReady = false;
       worker.onmessage = event => {
-        if (this._jogWorker !== worker || event.data?.type !== 'status') return;
+        if (this._jogWorker !== worker) return;
+        if (event.data?.type === 'deceleration-complete') {
+          if (this._deceleration?.worker === worker && this._deceleration.id === event.data.id) this._stopVel();
+          return;
+        }
+        if (event.data?.type !== 'status') return;
         const state = event.data.state;
         this._jogWorkerReady = state === 'ready' || state === 'lease-expired';
         const status = document.getElementById('jog-pub-status');
@@ -572,6 +650,11 @@ const JogControl = {
             : `Jog Worker: ${state}${event.data.detail ? ` · ${event.data.detail}` : ''}`;
         }
         this._updateDisplay();
+        if (state === 'error') {
+          if (this._publishing) this._stopVel();
+          App.toast?.(`Jog 전송 오류 · ${event.data.detail || '전용 연결 실패'}`, 'error');
+          return;
+        }
         if (state === 'lease-expired' && this._publishing) {
           this._stopVel();
           App.toast?.('Jog heartbeat 지연으로 안전 정지했습니다. 다시 입력하세요.', 'warning');
@@ -630,10 +713,15 @@ const JogControl = {
     this._stopTelemetry(false);
     const slotIndex = App.activeSlotIndex;
     const slot = App.robotSlots?.[slotIndex];
-    const ros = typeof RosManager.getRos === 'function' ? RosManager.getRos(slotIndex) : slot?.ros;
+    const ros = typeof RosManager.getTelemetryRos === 'function' ? RosManager.getTelemetryRos(slotIndex)
+      : typeof RosManager.getRos === 'function' ? RosManager.getRos(slotIndex) : slot?.ros;
     const rid = typeof RosManager.getRobotId === 'function' ? RosManager.getRobotId(slotIndex) : slot?.robotId;
+    const generation = this._telemetryGeneration, mainRos = slot?.ros;
     this._telemetrySlotIndex = slotIndex;
     this._safetyState = this._emptySafetyState();
+    this._nativeJogAvailability = null;
+    this._nativeJogCharging = null;
+    this._teleopIoState = {};
     this._lidarSafetyInputs = {
       field: { value: null, at: 0 },
       emergency: { value: null, at: 0 }
@@ -653,10 +741,11 @@ const JogControl = {
           name: endpoint.name,
           messageType: endpoint.type,
           throttle_rate: options.throttleRate ?? this.TELEMETRY_THROTTLE_MS,
-          queue_length: 1
+          queue_length: options.queueLength ?? 1
         });
         topic.subscribe(message => {
-          if (this._telemetrySlotIndex !== slotIndex || App.activeSlotIndex !== slotIndex) return;
+          if (this._telemetryGeneration !== generation || this._telemetrySlotIndex !== slotIndex
+              || App.activeSlotIndex !== slotIndex || App.robotSlots[slotIndex] !== slot || slot.ros !== mainRos) return;
           callback(message || {});
         });
         this._telemetrySubscriptions.push(topic);
@@ -666,11 +755,30 @@ const JogControl = {
     };
     const profile = this._compatibilityProfile();
     const monitoring = profile?.monitoring?.topics || {};
+    subscribe(monitoring.manualJogAvailable, msg => {
+      this._nativeJogAvailability = { value: msg.data, at: Date.now() };
+      this._refreshSafetyUi();
+    }, { throttleRate: 50 });
+    if (['ros2_manual_jog', 'ros2_teleop'].includes(profile?.chassis?.jog?.protocol)) {
+      subscribe(monitoring.charging, msg => {
+        this._nativeJogCharging = { value: msg.data, at: Date.now() };
+        this._enforceSafetyGate();
+      }, { throttleRate: 50 });
+    }
+    if (this._usesAutoDriveTeleop()) {
+      for (const key of ['localRelease', 'deviceHealthy', 'safetyAllowed', 'safetyStatus', 'bumper']) {
+        subscribe(monitoring[key], msg => {
+          this._teleopIoState[key] = { value: msg.data, at: Date.now() };
+          this._enforceSafetyGate();
+        }, { throttleRate: ['safetyStatus', 'safetyAllowed'].includes(key) ? 0 : 50,
+          queueLength: ['safetyStatus', 'safetyAllowed'].includes(key) ? 0 : 1 });
+      }
+    }
 
-    subscribe(monitoring.manualSelect, msg => this._recordSafety('manual', !msg.data));
+    subscribe(monitoring.manualSelect, msg => this._recordSafety('manual', typeof msg.data === 'boolean' ? !msg.data : null));
     subscribe(monitoring.robotState, msg => {
-      const state = Number(msg.workstate ?? msg.data);
-      this._recordSafety('idle', Number.isFinite(state) && state === 0);
+      const state = msg.workstate ?? msg.data;
+      this._recordSafety('idle', typeof state === 'number' && Number.isInteger(state) ? state === 0 : null);
     });
     subscribe(monitoring.emergency, msg => {
       if (typeof msg.data === 'boolean') {
@@ -685,8 +793,12 @@ const JogControl = {
       };
       this._mergeLidarSafety();
     });
-    subscribe(monitoring.sto, msg => this._recordSafety('sto', !msg.data));
+    subscribe(monitoring.sto, msg => this._recordSafety('sto', typeof msg.data === 'boolean' ? !msg.data : null));
     subscribe(monitoring.lidarField, msg => {
+      if (typeof msg.data === 'boolean') {
+        this._recordSafety('lidar', !msg.data);
+        return;
+      }
       this._lidarSafetyInputs.field = {
         // HMI contract: field value 1 means a Lidar stop condition.
         value: typeof msg.data === 'boolean' ? !msg.data : Number(msg.data) !== 1,
@@ -694,7 +806,10 @@ const JogControl = {
       };
       this._mergeLidarSafety();
     });
-    subscribe(monitoring.brakeReleased, msg => this._recordSafety('brake', Boolean(msg.data)));
+    subscribe(monitoring.brakeReleased, msg => {
+      const nativeJog = ['ros2_manual_jog', 'ros2_teleop'].includes(profile?.chassis?.jog?.protocol);
+      this._recordSafety('brake', typeof msg.data === 'boolean' ? (nativeJog ? !msg.data : msg.data) : null);
+    });
     subscribe(monitoring.motorStatus, msg => {
       const twist = msg.feed_vel;
       if (twist) this._recordActualVelocity('motor', twist);
@@ -726,6 +841,7 @@ const JogControl = {
   },
 
   _stopTelemetry(resetUi = true) {
+    this._telemetryGeneration++;
     this._telemetrySubscriptions.forEach(topic => {
       try { topic.unsubscribe(); } catch (error) { /* ignore stale ROS subscription */ }
     });
@@ -789,22 +905,70 @@ const JogControl = {
     if (!this._isStlUlsanSlot(slot) && profile?.transport?.rosMajor !== 2) {
       return { safe: true, strict: false, reasons: [] };
     }
+    const autoDrive = this._usesAutoDriveTeleop();
+    const modePending = profile.transport?.rosMajor === 2 && profile.chassis?.jog?.modePending === true;
     const labels = {
-      manual: 'MANUAL 모드 미확인',
+      manual: autoDrive ? '모터 구동 허용(AUTO) 미확인' : 'MANUAL 모드 미확인',
       idle: 'IDLE 상태 미확인',
       emo: 'EMO 정상 미확인',
       sto: 'STO 정상 미확인',
       lidar: 'Lidar 정상 미확인',
-      brake: 'Brake Release 미확인'
+      brake: ['ros2_manual_jog', 'ros2_teleop'].includes(profile.chassis?.jog?.protocol) ? 'Brake Locked 상태 미확인' : 'Brake Release 미확인'
     };
     const now = Date.now();
     const reasons = [];
     if (!slot?.connected || !slot?.ros) reasons.push('활성 로봇 미연결');
+    if (slot?.nativeJogUnconfirmed) reasons.push('이전 Jog의 물리 정지 결과 미확인 · 실제 상태 확인 필요');
+    if (profile.chassis?.jog?.protocol === 'ros2_teleop') {
+      if (!profile.chassis.jog.verified || !autoDrive) reasons.push('로봇의 모터 구동 모드 설정 미검증');
+      if (!profile.chassis.drive?.verified) reasons.push('주행 안전 MUX 경로 미검증');
+      const charging = this._nativeJogCharging;
+      if (charging?.value !== false || now - charging.at > this.SAFETY_STALE_MS) reasons.push('충전 해제 상태 미확인');
+      for (const [key, expected, label] of [['localRelease', false, '모터 해제 비활성 상태 미확인'],
+        ['deviceHealthy', true, 'IO 장치 정상 상태 미확인'], ['bumper', false, '범퍼 해제 상태 미확인']]) {
+        const state = this._teleopIoState?.[key];
+        if (!state || state.value !== expected || now - state.at > this.SAFETY_STALE_MS) reasons.push(label);
+      }
+      const allowed = this._teleopIoState?.safetyAllowed, status = this._teleopIoState?.safetyStatus;
+      const statusFresh = typeof status?.value === 'string' && now - status.at <= this.SAFETY_STALE_MS;
+      const allowedFresh = typeof allowed?.value === 'boolean' && now - allowed.at <= this.SAFETY_STALE_MS;
+      // The gate publishes status then allowed on separate DDS topics. They
+      // are not an atomic pair: NORMAL/false and command_timeout/true occur
+      // during benign watchdog transitions. The single status message carries
+      // the decision and reason; allowed describes forwarding at another sample.
+      // Only these exact known-benign states admit ingress. The robot's final
+      // gate still enforces every command; all other states block immediately.
+      const normalGate = statusFresh && status.value === 'state=NORMAL reason=normal';
+      const idleWatchdog = statusFresh
+        && /^state=STALE_SAFETY reason=(startup_hold|command_timeout)$/.test(status.value);
+      if (!allowedFresh || !statusFresh || !(normalGate || idleWatchdog)) {
+        const detail = `status=${String(status?.value ?? '미수신').slice(0, 160)}, allowed=${String(allowed?.value ?? '미수신')}`;
+        reasons.push(`${!allowedFresh || !statusFresh ? '로봇 안전 게이트 응답 미확인' : '로봇 안전 게이트 차단'} · ${detail}`);
+      }
+      const task = typeof ActionSender !== 'undefined' ? ActionSender._runningTasks?.get(slot?.robotId) : null;
+      if (task && !task.finishedAt && ['work', 'pause', 'cancel'].includes(task.state)) reasons.push('다른 Task 실행 또는 종료 확인 중');
+      if (typeof MissionScheduler !== 'undefined' && [...(MissionScheduler._runs?.values() || [])].some(run => run.target?.robotId === slot?.robotId)) reasons.push('Scheduler Task 준비 또는 실행 추적 중');
+    }
+    if (profile.chassis?.jog?.protocol === 'ros2_manual_jog') {
+      const jog = profile.chassis.jog;
+      if (jog.modePending || !jog.integrated || !jog.enabled || !jog.actionVerified || !jog.limitsVerified
+          || typeof Ros2ManualJog === 'undefined') reasons.push(jog.reason || 'ROS2 Jog 설정·Action 미검증');
+      if (jog.enabled && jog.actionVerified) {
+        const charging = this._nativeJogCharging, available = this._nativeJogAvailability;
+        if (charging?.value !== false || now - charging.at > this.SAFETY_STALE_MS) reasons.push('충전 해제 상태 미확인');
+        if (!this._nativeJogRun && (available?.value !== true || now - available.at > 1000)) reasons.push('로봇의 Jog 준비 상태 미확인');
+      }
+    }
     Object.entries(labels).forEach(([key, label]) => {
+      // Diagnostic topics alone do not establish a physical MANUAL contract.
+      // The unverified Jog adapter above still blocks every motion request.
+      if (modePending && ['manual', 'brake'].includes(key)) return;
       const state = this._safetyState?.[key];
       const required = this.SAFETY_REQUIRED_KEYS.has(key);
-      if (required && (!state || state.value !== true || now - state.at > this.SAFETY_STALE_MS)) {
-        reasons.push(label);
+      const expected = key === 'manual' && autoDrive ? false : true;
+      if (required && (!state || state.value !== expected || now - state.at > this.SAFETY_STALE_MS)) {
+        reasons.push(key === 'manual' && state?.value !== null && state?.value !== undefined && now - state.at <= this.SAFETY_STALE_MS
+          ? (autoDrive ? '로봇이 모터 해제(MANUAL) 상태입니다. 구동 허용(AUTO)이 필요합니다.' : '로봇이 AUTO 상태입니다. 물리 MANUAL 모드가 필요합니다.') : label);
       } else if (!required && state?.value === false) {
         // Event-driven/optional safety topics may not publish a periodic CLEAR.
         // An explicit unsafe value still blocks immediately and remains latched.
@@ -863,7 +1027,7 @@ const JogControl = {
       return;
     }
     const liftSafe = this._manualLiftState && this._compatibilityProfile()?.lift?.admission === 'auto' && this._nativeLiftSafetyEvaluation().safe;
-    const moving = this._publishing || (!liftSafe && this._manualLiftState)
+    const moving = this._publishing || this._nativeJogRun && !this._nativeJogRun.stopped || (!liftSafe && this._manualLiftState)
       || this._currentLx !== 0 || this._currentLy !== 0 || this._currentAz !== 0;
     if (!moving) return;
     this._stopJogControls();
@@ -907,15 +1071,28 @@ const JogControl = {
       lidar: ['LIDAR CLEAR', 'LIDAR STOP'],
       brake: ['BRAKE RELEASE', 'BRAKE ON']
     };
+    if (this._usesAutoDriveTeleop()) {
+      chipLabels.manual = ['모터 해제(MANUAL)', '구동 허용(AUTO)'];
+      chipLabels.brake = ['모터 해제 OFF', '모터 해제 ON'];
+    }
+    if (this._compatibilityProfile()?.chassis?.jog?.protocol === 'ros2_manual_jog') {
+      chipLabels.brake = ['BRAKE LOCKED', 'BRAKE RELEASE / LOCAL RELEASE'];
+    }
     const now = Date.now();
     Object.entries(chipLabels).forEach(([key, labels]) => {
       const el = document.getElementById(`jog-safety-${key}`);
       if (!el) return;
+      if (this._compatibilityProfile()?.chassis?.jog?.modePending && ['manual', 'brake'].includes(key)) {
+        el.className = 'jog-safety-chip unknown';
+        el.textContent = key === 'manual' ? 'MODE 확인 중' : 'BRAKE 계약 확인 중';
+        return;
+      }
       const item = this._safetyState?.[key];
       const required = this.SAFETY_REQUIRED_KEYS.has(key);
       const known = item && item.value !== null;
       const fresh = known && (!required || now - item.at <= this.SAFETY_STALE_MS);
-      el.className = `jog-safety-chip ${fresh ? (item.value ? 'safe' : 'blocked') : 'unknown'}`;
+      const expected = key === 'manual' && this._usesAutoDriveTeleop() ? false : true;
+      el.className = `jog-safety-chip ${fresh ? (item.value === expected ? 'safe' : 'blocked') : 'unknown'}`;
       el.textContent = fresh
         ? labels[item.value ? 0 : 1]
         : required ? `${key.toUpperCase()} --` : `${key.toUpperCase()} N/A`;
@@ -1063,7 +1240,8 @@ const JogControl = {
       }
 
       // Pointer capture keeps a held Jog command stable even if the cursor or
-      // finger drifts outside the button. Release/cancel still sends STOP.
+      // finger drifts outside the button. Normal release decelerates; lost
+      // capture/cancel remains an immediate stop.
       let activePointerId = null;
       btn.addEventListener('pointerdown', event => {
         if (activePointerId !== null) return;
@@ -1072,7 +1250,7 @@ const JogControl = {
         try { btn.setPointerCapture?.(event.pointerId); } catch (error) { /* unsupported pointer capture */ }
         action();
       });
-      const finish = event => {
+      const finish = (event, smooth = false) => {
         if (activePointerId === null) return;
         if (event?.pointerId !== undefined && event.pointerId !== activePointerId) return;
         const pointerId = activePointerId;
@@ -1080,9 +1258,10 @@ const JogControl = {
         try {
           if (btn.hasPointerCapture?.(pointerId)) btn.releasePointerCapture(pointerId);
         } catch (error) { /* pointer was already released */ }
-        this._stopVel();
+        if (smooth) this._releaseVel();
+        else this._stopVel();
       };
-      btn.addEventListener('pointerup', finish);
+      btn.addEventListener('pointerup', event => finish(event, true));
       btn.addEventListener('pointercancel', finish);
       btn.addEventListener('lostpointercapture', finish);
     });
@@ -2055,7 +2234,8 @@ const JogControl = {
         this._stopManualLift();
         return;
       }
-      this._activeKeys.delete(normalizedKey);
+      const wasHeld = this._activeKeys.delete(normalizedKey);
+      if (!wasHeld) return;
       if (!this._isPanelOpen()) return;
       this._updateFromKeys();
     });
@@ -2105,15 +2285,65 @@ const JogControl = {
     }
 
     if (lx === 0 && ly === 0 && az === 0) {
-      this._stopVel();
+      this._releaseVel();
     } else {
       this._setVel(lx, ly, az);
     }
   },
 
+  _startNativeJog(lx, ly, az) {
+    const index = App.activeSlotIndex, slot = App.robotSlots[index], ros = slot?.ros;
+    const jog = this._compatibilityProfile()?.chassis?.jog;
+    try {
+      if (ly !== 0 || Number(lx !== 0) + Number(az !== 0) !== 1) throw new Error('ROS2 Jog는 전후 이동 또는 회전을 한 축씩 입력하세요.');
+      const axis = lx !== 0 ? 'x' : 'theta';
+      const input = document.getElementById(axis === 'x' ? 'jog-native-distance' : 'jog-native-angle');
+      const value = Number(input?.value);
+      if (!Number.isFinite(value) || value <= 0) throw new Error('먼저 Jog 이동거리 또는 회전각도를 입력하세요.');
+      const displacement = value * Math.sign(axis === 'x' ? lx : az) * (axis === 'theta' ? Math.PI / 180 : 1);
+      this._stopManualLift();
+      const run = Ros2ManualJog.start({
+        ros, robotId: slot.robotId, contract: jog, axis, displacement, speed: Math.abs(axis === 'x' ? lx : az),
+        canContinue: () => App.robotSlots[index] === slot && App.activeSlotIndex === index && slot.ros === ros
+          && this._isPanelOpen() && this._safetyEvaluation().safe,
+        createAction: (name, type, goal, feedback, options) => RosManager.createRos2Action(name, type, goal, index, feedback, options),
+        onState: state => {
+          if (App.robotSlots[index] !== slot || App.activeSlotIndex !== index) return;
+          if (state.phase === 'stopping') { this._currentLx = 0; this._currentLy = 0; this._currentAz = 0; }
+          const status = document.getElementById('jog-native-status');
+          if (status) status.textContent = ({ starting:'요청 준비', waiting:'응답 대기', running:'이동 중', stopping:'정지 결과 확인 중',
+            completed:'이동 및 정지 확인', stopped:'정지 확인', unknown:'물리 정지 결과 미확인' })[state.phase] || state.phase;
+          this._updateDisplay();
+        }
+      });
+      this._nativeJogRun = run;
+      this._currentLx = lx; this._currentLy = 0; this._currentAz = az;
+      this._updateDisplay();
+      run.result.then(result => {
+        if (!result.stopConfirmed) {
+          slot.nativeJogUnconfirmed = true;
+          App.toast(`ROS2 Jog 정지 결과 미확인 · ${result.message}`, 'error');
+        }
+        if (this._nativeJogRun !== run) return;
+        this._nativeJogRun = null;
+        this._currentLx = 0; this._currentLy = 0; this._currentAz = 0; this._activeKeys.clear();
+        this._updateDisplay(); this._refreshSafetyUi();
+      });
+      return true;
+    } catch (error) { this._stopVel(); App.toast(error.message || String(error), 'error'); return false; }
+  },
+
   _setVel(lx, ly, az) {
+    if (this._nativeJogRun) {
+      this._stopVel();
+      App.toast('이전 Jog 정지 결과를 확인한 뒤 다시 입력하세요.', 'info');
+      return false;
+    }
     if (!this._requireSafety('주행 Jog', 'chassis')) return false;
+    if (this._usesAutoDriveTeleop() && typeof MissionScheduler !== 'undefined') MissionScheduler.disarm('Jog 수동 조작 · 예약 실행 중지');
+    if (this._compatibilityProfile()?.chassis?.jog?.protocol === 'ros2_manual_jog') return this._startNativeJog(lx, ly, az);
     this._stopManualLift();
+    this._deceleration = null;
     this._currentLx = lx;
     this._currentLy = ly || 0;
     this._currentAz = az;
@@ -2123,7 +2353,49 @@ const JogControl = {
     return true;
   },
 
+  _jogClock() {
+    return typeof performance !== 'undefined' ? performance.now() : Date.now();
+  },
+
+  _releaseVel() {
+    // Native bounded Actions already own their deceleration and stop result.
+    // Safety/focus loss/STOP keep using _stopVel(), never this release ramp.
+    if (!this._publishing || this._nativeJogRun
+        || this._compatibilityProfile()?.chassis?.jog?.protocol === 'ros2_manual_jog'
+        || !this._safetyEvaluation().safe) { this._stopVel(); return; }
+    if (this._deceleration) return;
+    const slot = App.robotSlots?.[App.activeSlotIndex];
+    this._deceleration = { id: ++this._decelerationSequence, startedAt: this._jogClock(), slot, ros: slot?.ros,
+      lx: this._currentLx, ly: this._currentLy, az: this._currentAz };
+    this._activeKeys.clear();
+    this._updateDisplay();
+    this._publishOnce();
+  },
+
+  _stepDeceleration() {
+    const ramp = this._deceleration;
+    if (!ramp) return true;
+    const slot = App.robotSlots?.[App.activeSlotIndex];
+    if (slot !== ramp.slot || slot?.ros !== ramp.ros || !slot?.connected || !this._safetyEvaluation().safe) {
+      this._stopVel();
+      return false;
+    }
+    const elapsed = this._jogClock() - ramp.startedAt;
+    if (elapsed >= this.RELEASE_DECEL_MS) { this._stopVel(); return false; }
+    const t = Math.max(0, elapsed / this.RELEASE_DECEL_MS);
+    // Smoothstep keeps deceleration continuous at both ends, preserving the
+    // sign and the ratio of translation/rotation until the final exact zero.
+    const scale = 1 - t * t * (3 - 2 * t);
+    this._currentLx = ramp.lx * scale;
+    this._currentLy = ramp.ly * scale;
+    this._currentAz = ramp.az * scale;
+    this._updateDisplay();
+    return true;
+  },
+
   _stopVel() {
+    this._deceleration = null;
+    this._nativeJogRun?.stop();
     this._currentLx = 0;
     this._currentLy = 0;
     this._currentAz = 0;
@@ -2145,8 +2417,8 @@ const JogControl = {
     document.getElementById('jog-cur-az').textContent = this._currentAz.toFixed(2);
     const publishStatus = document.getElementById('jog-pub-status');
     if (publishStatus) {
-      publishStatus.textContent = this._publishing
-        ? (this._jogWorkerReady ? 'Worker 20Hz' : 'Fallback 20Hz')
+      publishStatus.textContent = this._nativeJogRun ? (this._nativeJogRun.stopped ? '정지 확인 중' : 'ROS2 Jog') : this._publishing
+        ? (this._deceleration ? '감속 중' : this._jogWorkerReady ? 'Worker 20Hz' : 'Fallback 20Hz')
         : 'Off';
     }
     this._renderVelocityComparison();
@@ -2194,7 +2466,17 @@ const JogControl = {
   },
 
   _publishOnce() {
+    if (this._compatibilityProfile()?.chassis?.jog?.protocol === 'ros2_manual_jog') return false;
     if (this._jogWorkerReady && this._jogWorker) {
+      if (this._deceleration) {
+        if (this._deceleration.worker !== this._jogWorker) {
+          this._deceleration.worker = this._jogWorker;
+          this._jogWorker.postMessage({ type: 'decelerate', id: this._deceleration.id,
+            durationMs: Math.max(0, this.RELEASE_DECEL_MS - (this._jogClock() - this._deceleration.startedAt)),
+            velocity: { lx: this._currentLx, ly: this._currentLy, az: this._currentAz } });
+        } else this._jogWorker.postMessage({ type: 'heartbeat' });
+        return true;
+      }
       this._jogWorker.postMessage({
         type: 'command',
         active: this._publishing,
@@ -2226,6 +2508,7 @@ const JogControl = {
     this._publishOnce();
 
     this._pubInterval = setInterval(() => {
+      if (!this._stepDeceleration()) return;
       this._publishOnce();
     }, this.PUB_RATE);
   },

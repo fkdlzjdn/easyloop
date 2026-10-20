@@ -879,3 +879,24 @@ describe('fleet saved task sending', () => {
     expect(message.textContent).toContain('IDLE');
   });
 });
+
+describe('scheduler guarded Task wire boundary',()=>{
+  test('virtual Jog does not reference the saved-task scheduler options or send ROS goals', async () => {
+    const { manager, calls, context, slot } = loadActionSender();
+    slot.virtualTestRobot = true;
+    context.TestMode = { enabled: true, runTask: jest.fn(async () => ({ success: true })) };
+    await expect(manager.sendJogActionToSlot(0, 0x07, [0], 'virtual-jog-regression')).resolves.toMatchObject({ serviceName: '[TestMode virtual task]' });
+    expect(context.TestMode.runTask).toHaveBeenCalledTimes(1);
+    expect(calls.filter(c => c.options.name.endsWith('/goal'))).toHaveLength(0);
+  });
+  test('readiness guard runs after conversion and prevents any real ROS service call',async()=>{
+    const {manager,calls}=loadActionSender();
+    await expect(manager.sendSavedQueueToSlot('patrol',0,1,'scheduler-guard',{beforeSend:()=>{throw new Error('target connection changed');}})).rejects.toThrow('target connection changed');
+    expect(calls.filter(c=>c.options.name.endsWith('/goal'))).toHaveLength(0);
+  });
+  test('scheduler timeout bounds a nonresponsive Task service without retrying it',async()=>{
+    const {manager,calls,unresponsiveServices}=loadActionSender();unresponsiveServices.add('/R_002/TARU/goal');
+    await expect(manager.sendSavedQueueToSlot('patrol',0,1,'scheduler-timeout',{beforeSend:()=>{},timeoutMs:10})).rejects.toMatchObject({code:'TASK_CONTROL_TIMEOUT'});
+    expect(calls.filter(c=>c.options.name.endsWith('/goal'))).toHaveLength(1);
+  });
+});

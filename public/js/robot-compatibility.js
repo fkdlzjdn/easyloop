@@ -214,13 +214,51 @@ const RobotCompatibility = {
     return slot?.compatibilityProfile || this._defaultProfile(slot);
   },
 
+  updatePresentation(slot) {
+    const profile = slot?.compatibilityProfile;
+    if (!profile) return;
+    const { model, project, lineage } = this._defaultProfile(slot);
+    Object.assign(profile, { model, project, lineage });
+  },
+
   clear(slot) {
     if (!slot) return;
     slot.compatibilityDiscoveryToken = (slot.compatibilityDiscoveryToken || 0) + 1;
     delete slot.compatibilityProfile;
     delete slot.compatibilityPromise;
+    delete slot.monitoringProfile;
     delete slot.taskInterface;
     delete slot.taskInterfaceModeResolved;
+  },
+
+  monitoring(slot) {
+    if (slot?.compatibilityProfile?.monitoring?.verified) return slot.compatibilityProfile.monitoring;
+    if (slot?.monitoringProfile && slot.monitoringProfile.ros === slot.ros) return slot.monitoringProfile.monitoring;
+    return this.get(slot).monitoring;
+  },
+
+  _graphTypes(names, types) {
+    if (!Array.isArray(names) || !Array.isArray(types) || names.length !== types.length) return {};
+    const result = {};
+    names.forEach((name, index) => {
+      if (typeof name === 'string' && typeof types[index] === 'string' && types[index]) result[name] = types[index];
+    });
+    return result;
+  },
+
+  _publishMonitoring(slot, result, ros, token) {
+    if (slot.ros !== ros || slot.compatibilityDiscoveryToken !== token) return;
+    const types = this._graphTypes(result?.topics, result?.types);
+    if (!Object.keys(types).length) return;
+    const monitoring = this._buildProfile(slot, [], Object.keys(types), {}, types).monitoring;
+    if (!monitoring?.verified) return;
+    // Read-only telemetry may start from this fresh topic/type snapshot. It
+    // never supplies Task/drive/mode/control capabilities before full checks.
+    slot.monitoringProfile = { ros, monitoring };
+    if (typeof document !== 'undefined' && typeof document.dispatchEvent === 'function'
+        && typeof CustomEvent !== 'undefined') {
+      document.dispatchEvent(new CustomEvent('amr:monitoring-updated', { detail: { slot, ros } }));
+    }
   },
 
   async discover(slot, options = {}) {
@@ -317,11 +355,18 @@ const RobotCompatibility = {
       || name === `${ns}/Conv/cmd`
       || name === `${ns}/bms`
       || name === `${ns}/battery_state`
+      || name === `${ns}/manual_jog/available`
+      || name === `${ns}/manual_jog/status`
       || name === `${ns}/robot_state`
       || name === `${ns}/io/state_monitor/mode`
       || name === `${ns}/io/state_monitor/sto`
       || name === `${ns}/io/state_monitor/brake`
       || name === `${ns}/io/state_monitor/charging`
+      || name === `${ns}/io/state_monitor/local_release`
+      || name === `${ns}/io/state_monitor/device_healthy`
+      || name === `${ns}/cmd_safety_gate/allowed`
+      || name === `${ns}/cmd_safety_gate/status`
+      || name === `${ns}/io/state_monitor/bumper`
       || name === `${ns}/io/state_monitor/emo`
       || name === `${ns}/io/state_monitor/lccs`
       || name === `${ns}/io/do/charge_relay`
@@ -338,9 +383,13 @@ const RobotCompatibility = {
 
   async _discover(slot) {
     const timeout = this._discoveryTimeout(slot);
+    const ros = slot.ros, token = slot.compatibilityDiscoveryToken;
     const [servicesSettled, topicsSettled] = await Promise.allSettled([
       this._rosapi(slot.ros, '/rosapi/services', 'rosapi/Services', {}, timeout),
-      this._rosapi(slot.ros, '/rosapi/topics', 'rosapi/Topics', {}, timeout)
+      this._rosapi(slot.ros, '/rosapi/topics', 'rosapi/Topics', {}, timeout).then(result => {
+        this._publishMonitoring(slot, result, ros, token);
+        return result;
+      })
     ]);
     const warnings = [];
     const servicesResult = servicesSettled.status === 'fulfilled' ? servicesSettled.value : null;
@@ -364,12 +413,14 @@ const RobotCompatibility = {
     const ns = `/${rid}`;
     const serviceNames = services.filter(name => this._isRelevantService(name, ns));
     const topicNames = topics.filter(name => this._isRelevantTopic(name, ns));
+    const advertisedServices = this._graphTypes(servicesResult?.services, servicesResult?.types);
+    const advertisedTopics = this._graphTypes(topicsResult?.topics, topicsResult?.types);
     const [serviceEntries, topicEntries] = await Promise.all([
-      Promise.all(serviceNames.map(name => this._lookupType(
-        slot.ros, '/rosapi/service_type', 'rosapi/ServiceType', { service: name }, name, timeout
+      Promise.all(serviceNames.map(name => advertisedServices[name] ? [name, advertisedServices[name]] : this._lookupType(
+        ros, '/rosapi/service_type', 'rosapi/ServiceType', { service: name }, name, timeout
       ))),
-      Promise.all(topicNames.map(name => this._lookupType(
-        slot.ros, '/rosapi/topic_type', 'rosapi/TopicType', { topic: name }, name, timeout
+      Promise.all(topicNames.map(name => advertisedTopics[name] ? [name, advertisedTopics[name]] : this._lookupType(
+        ros, '/rosapi/topic_type', 'rosapi/TopicType', { topic: name }, name, timeout
       )))
     ]);
     const serviceTypes = Object.fromEntries(serviceEntries);
@@ -383,7 +434,7 @@ const RobotCompatibility = {
     await Promise.all([
       this._discoverActionCatalog(slot, profile, timeout),
       this._discoverDriveModel(slot, profile),
-      this._verifyRos2Drive(slot, profile, timeout),
+      this._verifyRos2Drive(slot, profile, timeout).then(() => this._discoverRos2Jog(slot, profile, timeout)),
       this._discoverRouteContext(slot, profile, timeout)
     ]);
     console.log(`[Compatibility] ${slot.robotId}: ${profile.id}`, {
@@ -431,6 +482,108 @@ const RobotCompatibility = {
       profile.task.routeContext = { ...context, verified: true };
     } catch (error) {
       profile.task.routeContext = { verified: false, reason: String(error.message || error) };
+    }
+  },
+
+  async _discoverRos2Jog(slot, profile, timeout) {
+    const candidate = profile.chassis?.jog;
+    if (candidate?.protocol === 'ros2_manual_jog') {
+      candidate.modePending = true;
+      candidate.motorMode = 'unknown';
+      candidate.reason = 'ROS2 Jog 방식·구동 모드를 확인하는 중입니다.';
+    }
+    if (await this._discoverAutoDriveTeleop(slot, profile, timeout)) return;
+    const jog = profile.chassis?.jog;
+    if (jog?.protocol !== 'ros2_manual_jog') return;
+    try {
+      const response = await this._rosapi(slot.ros, '/rosapi/get_param', 'rosapi/srv/GetParam',
+        { name: `/${slot.robotId}/cmd_safety_gate::manual_jog.enabled`, default: '' }, Math.min(timeout, 2500));
+      const enabled = this._parseRosParamValue(response?.value);
+      if (typeof enabled !== 'boolean') throw new Error('manual_jog.enabled 응답 미확인');
+      jog.enabled = enabled;
+      if (!enabled) {
+        jog.reason = `ROS2 Jog 구동 모드 미확인 · 별도 ManualJog가 비활성 상태입니다 (manual_jog.enabled=false).${jog.driveModeWarning ? ` IO 설정 조회: ${jog.driveModeWarning}` : ''}`;
+        return;
+      }
+      const keys = ['max_translation_m', 'max_rotation_rad', 'max_linear_speed_mps', 'max_angular_speed_radps',
+        'max_linear_accel_mps2', 'max_angular_accel_radps2', 'max_duration_sec', 'max_stop_wait_sec',
+        'position_tolerance', 'linear_stop_tolerance_mps', 'angular_stop_tolerance_radps'];
+      const [parameters, actions] = await Promise.all([
+        this._rosapi(slot.ros, `/${slot.robotId}/cmd_safety_gate/get_parameters`, 'rcl_interfaces/srv/GetParameters',
+          { names: keys.map(key => `manual_jog.${key}`) }, timeout),
+        this._rosapi(slot.ros, '/rosapi/actions', 'rosapi/Actions', {}, timeout)
+      ]);
+      jog.limits = Object.fromEntries(keys.map((key, index) => [key,
+        parameters.values?.[index]?.type === 3 ? parameters.values[index].double_value : null]));
+      const limits = jog.limits;
+      jog.limitsVerified = keys.every(key => typeof limits[key] === 'number' && Number.isFinite(limits[key]) && limits[key] > 0)
+        && limits.max_rotation_rad < Math.PI && limits.position_tolerance < Math.min(limits.max_translation_m, limits.max_rotation_rad);
+      const actionTypes = this._graphTypes(actions.actions, actions.types);
+      jog.actionVerified = actionTypes[jog.actionName] === 'spx_task_msgs/action/ManualJog';
+      jog.reason = !jog.limitsVerified ? 'ROS2 Jog 허용 범위·정지 판정값이 설정되지 않았습니다.'
+        : !jog.actionVerified ? '로봇의 ManualJog Action을 확인하지 못했습니다.' : '';
+      if (jog.limitsVerified && jog.actionVerified) {
+        jog.modePending = false;
+        jog.motorMode = 'manual';
+      }
+    } catch (error) {
+      jog.discoveryWarning = String(error.message || error);
+      jog.reason = `ROS2 Jog 방식·구동 모드 확인 실패 · ${jog.driveModeWarning || jog.discoveryWarning}`;
+    }
+  },
+
+  async _discoverAutoDriveTeleop(slot, profile, timeout) {
+    const ros = slot?.ros, session = slot?.ros2SessionId, rid = slot?.robotId;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (await this._readAutoDriveTeleop(slot, profile, timeout)) return true;
+      if (slot?.ros !== ros || slot?.ros2SessionId !== session || slot?.robotId !== rid
+          || !profile.chassis?.jog?.driveModeWarning) break;
+    }
+    return false;
+  },
+
+  async _readAutoDriveTeleop(slot, profile, timeout) {
+    if (!slot?.ros2SessionId || !profile.chassis?.drive?.verified
+        || profile.chassis.drive.topic !== `/${slot.robotId}/cmd_vel_teleop`
+        || profile.chassis.drive.topicType !== 'geometry_msgs/msg/Twist'
+        || typeof RosManager === 'undefined' || typeof RosManager.execRuntimeCommand !== 'function'
+        || typeof App === 'undefined') return false;
+    const index = App.robotSlots?.indexOf(slot), ros = slot.ros, session = slot.ros2SessionId, rid = slot.robotId;
+    if (!(index >= 0)) return false;
+    try {
+      const queryRos = RosManager.getTelemetryRos?.(index) || ros;
+      const response = await this._rosapi(queryRos, '/rosapi/get_param', 'rosapi/srv/GetParam',
+        { name: `/${rid}/io_driver_node::config_path`, default: '' }, Math.min(timeout, 3000));
+      const configPath = this._parseRosParamValue(response.value);
+      if (typeof configPath !== 'string' || !configPath.startsWith('/')) throw new Error('IO 설정 경로 미확인');
+      if (slot.ros !== ros || slot.ros2SessionId !== session || slot.robotId !== rid || App.robotSlots[index] !== slot) throw new Error('IO 설정 조회 중 연결 변경');
+      // Read only the live IO node's own configuration. A model name, saved
+      // setting or the presence of optional ManualJog diagnostics is not proof
+      // of the hardware operating-mode contract.
+      const source = `import json,sys,pathlib,yaml
+p=pathlib.Path(sys.argv[1])
+if not p.is_absolute(): raise ValueError('absolute IO configuration required')
+with p.open(encoding='utf-8') as f: text=f.read(1048577)
+if len(text)>1048576: raise ValueError('IO configuration too large')
+root=yaml.safe_load(text)
+policy=root.get('local_release',{}) if isinstance(root,dict) else {}
+print('EASYLOOP_DRIVE_MODE='+json.dumps({'schema':1,'modeTopic':policy.get('mode_topic'),'brakeSwitchTopic':policy.get('brake_switch_topic',''),'sourceTimeoutMs':policy.get('source_timeout_ms',20000)}))`;
+      const result = await RosManager.execRuntimeCommand(
+        `python3 -B -c ${RosManager._shellQuote(source)} ${RosManager._shellQuote(configPath)}`, index, { timeoutMs: 4000 });
+      if (!result.success) throw new Error(result.message || 'IO 모드 설정 조회 실패');
+      if (slot.ros !== ros || slot.ros2SessionId !== session || slot.robotId !== rid || App.robotSlots[index] !== slot) throw new Error('IO 설정 조회 중 연결 변경');
+      const line = String(result.stdout || '').split(/\r?\n/).find(item => item.startsWith('EASYLOOP_DRIVE_MODE='));
+      const policy = JSON.parse(line?.slice('EASYLOOP_DRIVE_MODE='.length) || '{}');
+      if (policy.schema !== 1 || !['io/state_monitor/mode', `/${slot.robotId}/io/state_monitor/mode`].includes(policy.modeTopic)
+          || policy.brakeSwitchTopic !== '' || !Number.isFinite(policy.sourceTimeoutMs) || policy.sourceTimeoutMs <= 0) return false;
+      profile.chassis.boundedJog = profile.chassis.jog;
+      profile.chassis.jog = { protocol: 'ros2_teleop', verified: true, integrated: true,
+        motorMode: 'auto', modePending: false, brakeState: 'not_released', reason: '',
+        evidence: { configPath, ...policy, semantics: 'MANUAL releases motors; AUTO permits drive commands' } };
+      return true;
+    } catch (error) {
+      if (profile.chassis.jog) profile.chassis.jog.driveModeWarning = String(error.message || error);
+      return false;
     }
   },
 
@@ -1029,6 +1182,14 @@ const RobotCompatibility = {
       bms: hasRos2Type
         ? [`${ns}/battery_state`, ['sensor_msgs/msg/BatteryState']]
         : [`${ns}/bms`, ['std_msgs/Float32MultiArray', 'std_msgs/msg/Float32MultiArray']],
+      manualJogAvailable: [`${ns}/manual_jog/available`, ['std_msgs/msg/Bool']],
+      manualJogStatus: [`${ns}/manual_jog/status`, ['std_msgs/msg/String']],
+      charging: [`${ns}/io/state_monitor/charging`, ['std_msgs/msg/Bool']],
+      localRelease: [`${ns}/io/state_monitor/local_release`, ['std_msgs/msg/Bool']],
+      deviceHealthy: [`${ns}/io/state_monitor/device_healthy`, ['std_msgs/msg/Bool']],
+      safetyAllowed: [`${ns}/cmd_safety_gate/allowed`, ['std_msgs/msg/Bool']],
+      safetyStatus: [`${ns}/cmd_safety_gate/status`, ['std_msgs/msg/String']],
+      bumper: [`${ns}/io/state_monitor/bumper`, ['std_msgs/msg/Bool']],
       robotState: [`${ns}/robot_state`, ['syscon_msgs/RobotState', 'syscon_msgs/msg/RobotState', 'spx_robot_msgs/msg/RobotState']],
       motorStatus: [`${ns}/motor_status`, ['syscon_msgs/MotorState', 'syscon_msgs/msg/MotorState', 'spx_drive_msgs/msg/MotorState']],
       odom: [`${ns}/odom`, ['nav_msgs/Odometry', 'nav_msgs/msg/Odometry']],
@@ -1052,6 +1213,15 @@ const RobotCompatibility = {
       reason: Object.keys(monitoringTopics).length ? '' : '검증된 monitoring topic이 없습니다.',
       topics: monitoringTopics
     };
+    if (hasRos2Type && (monitoringTopics.manualJogAvailable || monitoringTopics.manualJogStatus)) {
+      // This is a separate bounded motion/lease contract. A verified teleop
+      // mux does not make the legacy continuous-velocity Jog its adapter.
+      profile.chassis.jog = {
+        protocol: 'ros2_manual_jog', integrated: true, enabled: null, modePending: true, motorMode: 'unknown',
+        actionName: `${ns}/manual_jog/execute`, actionVerified: false, limitsVerified: false,
+        reason: 'ROS2 Jog 방식·구동 모드를 확인하는 중입니다.'
+      };
+    }
 
     profile.capabilities = {
       task: profile.task,

@@ -77,7 +77,7 @@ describe('Map layer controls contract', () => {
     expect(style).toMatch(/\.map-layer-popover\s*\{[\s\S]*?max-height:[\s\S]*?overflow-y:\s*auto/);
     expect(style).toContain('.map-layer-count');
     expect(style).toContain('.map-correction-badge[hidden]');
-    expect(html).toContain('js/ros-manager.js?v=20261001-health-subscriptions');
+    expect(html).toContain('js/ros-manager.js?v=20261020-static-tf-alignment');
     expect(html).toContain('js/test-mode.js?v=20260815-action-contract');
     expect(html).toContain('id="test-mapping-status"');
     expect(html).toContain('id="btn-test-mapping-demo"');

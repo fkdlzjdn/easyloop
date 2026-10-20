@@ -22,6 +22,7 @@ const { createRateLimiterStore } = require('./server/rate-limit');
 const { createAuthMiddleware, getAuthToken, isAuthTokenValid } = require('./server/auth');
 const { createAuthRouter } = require('./server/routes/auth');
 const { createRobotsRouter } = require('./server/routes/robots');
+const { createSchedulerRouter } = require('./server/routes/scheduler');
 const { createSshRouter } = require('./server/routes/ssh');
 const { createSftpRouter } = require('./server/routes/sftp');
 const { createTunnelRouter } = require('./server/routes/tunnel');
@@ -352,6 +353,7 @@ app.use('/api/sftp', commandRateLimiter, createSftpRouter({
   sshConnections,
   upload
 }));
+app.use('/api/scheduler', createSchedulerRouter({ statePath: path.join(APP_DIR, 'runtime/mission-scheduler-reservations.json'), getAuthToken }));
 app.use('/api/robots', createRobotsRouter({
   loadRobotsConfig: robotsStore.load,
   saveRobotsConfig: robotsStore.save,

@@ -10,6 +10,10 @@ const RosManager = {
   // connection receives every small TF packet and filters locally by RID.
   TF_THROTTLE_MS: 0,
   POSE_RECONNECT_MS: 1500,
+  SCAN_RECONNECT_MS: 1500,
+  // Stay below a 30 Hz sensor period: a 33 ms gate can discard every other
+  // frame when its actual period is 32.6 ms. Drawing remains frame-coalesced.
+  SCAN_THROTTLE_MS: 25,
   POSE_SOURCE_FRESH_MS: 600,
   AMCL_SOURCE_FRESH_MS: 1500,
   POSE_MESSAGE_MAX_AGE_MS: 10000,
@@ -31,14 +35,14 @@ const RosManager = {
     return `'${String(value).replace(/'/g, "'\\''")}'`;
   },
 
-  async execRuntimeCommand(command, index = App.activeSlotIndex) {
+  async execRuntimeCommand(command, index = App.activeSlotIndex, options = {}) {
     const slot = App.robotSlots?.[index];
     if (!this.isRos2(index)) return SSHTerminal.execCommand(command);
     if (!slot?.ros2SessionId) throw new Error('ROS2 runtime 연결이 필요합니다.');
     const response = await fetchWithTimeout('/api/ros-runtime/exec', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionId: slot.ros2SessionId, command })
-    }, 35000);
+    }, Number.isFinite(options?.timeoutMs) && options.timeoutMs > 0 ? Math.min(options.timeoutMs, 35000) : 35000);
     return response.json();
   },
 
@@ -74,7 +78,7 @@ const RosManager = {
     return { values, partial: response.partial };
   },
 
-  createRos2Action(action, type, goal, index = App.activeSlotIndex, onFeedback = null) {
+  createRos2Action(action, type, goal, index = App.activeSlotIndex, onFeedback = null, options = {}) {
     const slot = App.robotSlots?.[index];
     if (!slot?.ros || !this.isRos2(index)) throw new Error('ROS2 연결이 필요합니다.');
     if (slot.rosControlEnabled === false) throw new Error('로컬 bringup을 실행한 뒤 다시 연결하세요.');
@@ -106,14 +110,15 @@ const RosManager = {
     slot.ros2Actions.add(handle);
     feedback.subscribe(message => onFeedback?.(message));
     response.subscribe(message => {
-      if (message.status === 4) finish(null, message.result);
+      if (options.terminalResult && [4, 5, 6].includes(message.status)) finish(null, { status: message.status, result: message.result });
+      else if (message.status === 4) finish(null, message.result);
       else finish(new Error(message.message || `ROS2 action status=${message.status}`));
     });
     ros.on?.('close', disconnected);
     timer = setTimeout(() => {
       handle.cancel().catch(() => {});
       finish(new Error('ROS2 action timed out'));
-    }, 30 * 60 * 1000);
+    }, Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? Math.min(options.timeoutMs, 30 * 60 * 1000) : 30 * 60 * 1000);
     call('send_goal', { id, action, type, goal }).then(value => {
       if (!value.accepted) finish(new Error(value.message || 'ROS2 액션 요청이 거부되었습니다.'));
     }).catch(error => finish(error instanceof Error ? error : new Error(String(error))));
@@ -314,11 +319,47 @@ const RosManager = {
     return RobotCompatibility.get(slot);
   },
 
+  _monitoringForSlot(index = App.activeSlotIndex) {
+    const slot = App.robotSlots?.[index];
+    return typeof RobotCompatibility !== 'undefined' && typeof RobotCompatibility.monitoring === 'function'
+      ? RobotCompatibility.monitoring(slot) : this._compatibilityForSlot(index)?.monitoring;
+  },
+
+  getTelemetryRos(index = App.activeSlotIndex) {
+    const slot = App.robotSlots?.[index];
+    return slot?.poseRosConnected ? slot.poseRos : slot?.ros;
+  },
+
+  _subscribeVerifiedHealth(index) {
+    const slot = App.robotSlots?.[index];
+    if (!slot?.ros || index !== App.activeSlotIndex) return;
+    const mainRos = slot.ros, ros = this.getTelemetryRos(index);
+    const monitoring = this._monitoringForSlot(index);
+    const specs = [['bms', monitoring?.topics?.bms, msg => this._handleSlotBmsData(index, msg)],
+      ['work-state', monitoring?.topics?.robotState, msg => this._handleSlotWorkState(index, msg)]];
+    for (const [key, endpoint, handle] of specs) {
+      if (!endpoint?.name || !endpoint?.type) continue;
+      const previous = slot.subscriptions?.[key];
+      if (previous?.ros === ros && previous.name === endpoint.name && previous.messageType === endpoint.type) continue;
+      this._subscribeSlotTopic(index, key, endpoint.name, endpoint.type, msg => {
+        if (App.robotSlots[index] === slot && slot.ros === mainRos && this.getTelemetryRos(index) === ros) handle(msg);
+      }, { ros });
+    }
+  },
+
+  _notifyTelemetryConnection(index) {
+    this._subscribeVerifiedHealth(index);
+    if (typeof CustomEvent !== 'undefined') document.dispatchEvent(new CustomEvent('amr:telemetry-connection-changed', {
+      detail: { slot: App.robotSlots[index] }
+    }));
+  },
+
   _discoverCompatibility(index) {
     const slot = App.robotSlots?.[index];
     if (!slot?.ros || typeof RobotCompatibility === 'undefined') return Promise.resolve(null);
+    const ros = slot.ros;
     return RobotCompatibility.discover(slot).then(profile => {
-      if (!profile || slot.ros !== this.getRos(index)) return profile;
+      if (!profile || App.robotSlots[index] !== slot || slot.ros !== ros) return profile;
       if (index === App.activeSlotIndex) {
         const modelEl = document.getElementById('robot-model-name');
         if (modelEl && slot.robotModel) modelEl.textContent = slot.robotModel;
@@ -396,7 +437,9 @@ const RosManager = {
         this.subscribeSlotMonitoring(index);
         this.subscribeActiveSlotUI(index);
         this._discoverCompatibility(index);
-        if (typeof RosInfo !== 'undefined') RosInfo.refreshAll();
+        // Inspect the large node/parameter lists when their tab is opened.
+        // Graph verification and first telemetry take priority on this socket.
+        if (typeof RosInfo !== 'undefined' && document.getElementById('tab-ros')?.classList.contains('active')) RosInfo.refreshAll();
         // Start latency monitoring
         this.startLatencyMonitor(index);
         // Fetch robot model name
@@ -420,6 +463,7 @@ const RosManager = {
       console.log(`ROS slot[${index}] closed`);
       slot.connected = false;
       this._closeSlotPoseConnection(index);
+      this._closeSlotScanConnection(index);
       slot.ros = null;
 
       if (index === App.activeSlotIndex) {
@@ -525,6 +569,9 @@ const RosManager = {
     if (!slot) return;
 
     if (clearCachedData) this._closeSlotPoseConnection(index);
+    this._closeSlotScanConnection(index);
+    slot.scanTopicConfigs = {};
+    slot.scanMessageState = {};
 
     if (slot.mapCompressionFallbackTimer) {
       clearTimeout(slot.mapCompressionFallbackTimer);
@@ -551,6 +598,10 @@ const RosManager = {
     slot.lastOdomTime = 0;
 
     if (clearCachedData) {
+      slot.tfStaticEdges = null;
+      slot.tfStaticMap = null;
+      slot.tfStaticCacheRos = null;
+      slot.tfPoseBaseFrame = null;
       slot.tfMapToOdom = null;
       slot.tfOdomToBase = null;
       slot.tfCacheRos = null;
@@ -568,26 +619,7 @@ const RosManager = {
     const rid = slot.robotId;
     slot.dataSubscribed = true;
 
-    const monitoring = this._compatibilityForSlot(index)?.monitoring;
-    const bmsEndpoint = monitoring?.topics?.bms;
-    const robotStateEndpoint = monitoring?.topics?.robotState;
-
-    // Model-independent telemetry may be absent. Subscribe only after its live
-    // topic/type pair has been verified by RobotCompatibility.
-    if (bmsEndpoint?.name && bmsEndpoint?.type) {
-      this._subscribeSlotTopic(index, 'bms', bmsEndpoint.name, bmsEndpoint.type, (msg) => {
-        this._handleSlotBmsData(index, msg);
-      });
-    }
-    if (robotStateEndpoint?.name && robotStateEndpoint?.type) {
-      this._subscribeSlotTopic(
-        index,
-        'work-state',
-        robotStateEndpoint.name,
-        robotStateEndpoint.type,
-        (msg) => this._handleSlotWorkState(index, msg)
-      );
-    }
+    this._subscribeVerifiedHealth(index);
 
     // TF for pose (like RViz) - primary source for robot position. Start on the
     // shared connection immediately, then move it to a dedicated WebSocket so
@@ -596,9 +628,11 @@ const RosManager = {
     this._subscribeSlotTf(index, poseRos);
     this._subscribeSlotAmcl(index, poseRos);
     this._ensureSlotPoseConnection(index);
+    const staticTfRos = slot.ros;
     this._subscribeSlotTopic(index, 'tf-static', '/tf_static', 'tf2_msgs/TFMessage', (msg) => {
+      if (App.robotSlots[index] !== slot || slot.ros !== staticTfRos) return;
       this._handleSlotTfStatic(index, msg);
-    });
+    }, { throttle_rate: 0, queue_length: 0 });
 
     // Pose from odom (SLAM mode fallback) - always subscribe
     this._subscribeSlotTopic(index, 'odom-pose', `/${rid}/odom`, 'nav_msgs/Odometry', (msg) => {
@@ -673,7 +707,7 @@ const RosManager = {
         this._handleChargeRelayState(index, msg);
       });
     }
-    const ros2Relay = this._compatibilityForSlot(index)?.monitoring?.topics?.chargeRelay;
+    const ros2Relay = this._monitoringForSlot(index)?.topics?.chargeRelay;
     if (ros2Relay?.name && ros2Relay?.type) {
       this._subscribeSlotTopic(index, 'ros2-charge-relay-state', ros2Relay.name, ros2Relay.type,
         msg => this._handleChargeRelayState(index, msg));
@@ -690,7 +724,7 @@ const RosManager = {
   restoreMissingHealthSubscriptions(index) {
     const slot = App.robotSlots[index];
     if (!slot?.ros || index !== App.activeSlotIndex) return 0;
-    const monitoring = this._compatibilityForSlot(index)?.monitoring;
+    const monitoring = this._monitoringForSlot(index);
     if (!monitoring?.verified) return 0;
     const topics = monitoring.topics || {};
     let restored = 0;
@@ -716,7 +750,7 @@ const RosManager = {
   },
 
   expectedHealthTopicKeys(index) {
-    const monitoring = this._compatibilityForSlot(index)?.monitoring;
+    const monitoring = this._monitoringForSlot(index);
     if (!monitoring?.verified) return [];
     const topics = monitoring.topics || {};
     const keys = [];
@@ -781,6 +815,7 @@ const RosManager = {
       slot.poseRosConnected = true;
       this._subscribeSlotTf(index, poseRos);
       this._subscribeSlotAmcl(index, poseRos);
+      this._notifyTelemetryConnection(index);
       console.log(`[TF] Slot ${index}: dedicated pose WebSocket connected`);
     });
 
@@ -791,6 +826,7 @@ const RosManager = {
       if (slot.ros && slot.connected && index === App.activeSlotIndex) {
         this._subscribeSlotTf(index, slot.ros);
         this._subscribeSlotAmcl(index, slot.ros);
+        this._notifyTelemetryConnection(index);
         clearTimeout(slot.poseRosReconnectTimer);
         slot.poseRosReconnectTimer = setTimeout(() => {
           slot.poseRosReconnectTimer = null;
@@ -820,6 +856,85 @@ const RosManager = {
     if (poseRos && poseRos !== slot.ros) {
       try { poseRos.close(); } catch (e) { /* already closed */ }
     }
+  },
+
+  // LaserScan has its own read-only channel so map/camera serialization and
+  // service replies on the shared bridge cannot queue ahead of every scan.
+  _ensureSlotScanConnection(index) {
+    const slot = App.robotSlots[index];
+    if (!slot?.ros || !slot.connected || index !== App.activeSlotIndex
+        || ![...this._fastTopicKeys].some(key => slot.subscriptions?.[key])) return null;
+    if (slot.scanRos) return slot.scanRos;
+    const url = this._poseConnectionUrl(slot);
+    if (!url) return null;
+    const mainRos = slot.ros;
+    const scanRos = new ROSLIB.Ros({ url });
+    slot.scanRos = scanRos;
+    slot.scanRosConnected = false;
+    scanRos.on('connection', () => {
+      if (slot.scanRos !== scanRos || slot.ros !== mainRos || !slot.connected
+          || index !== App.activeSlotIndex) {
+        try { scanRos.close(); } catch (_error) { /* stale auxiliary socket */ }
+        return;
+      }
+      slot.scanRosConnected = true;
+      this._rebindSlotScanSubscriptions(index, scanRos);
+    });
+    scanRos.on('close', () => {
+      if (slot.scanRos !== scanRos) return;
+      slot.scanRos = null;
+      slot.scanRosConnected = false;
+      if (slot.ros !== mainRos || !slot.connected || index !== App.activeSlotIndex) return;
+      this._rebindSlotScanSubscriptions(index, mainRos);
+      clearTimeout(slot.scanRosReconnectTimer);
+      slot.scanRosReconnectTimer = setTimeout(() => {
+        slot.scanRosReconnectTimer = null;
+        this._ensureSlotScanConnection(index);
+      }, this.SCAN_RECONNECT_MS);
+    });
+    scanRos.on('error', error => {
+      if (slot.scanRos === scanRos) console.warn('[LiDAR] dedicated channel error; shared fallback active', error);
+    });
+    return scanRos;
+  },
+
+  _rebindSlotScanSubscriptions(index, ros) {
+    const slot = App.robotSlots[index];
+    if (!slot || index !== App.activeSlotIndex) return;
+    for (const key of this._fastTopicKeys) {
+      const config = slot.scanTopicConfigs?.[key];
+      if (!config || !slot.subscriptions?.[key]) continue;
+      this._subscribeSlotTopic(index, key, config.name, config.messageType, config.callback, { ...config.options, ros });
+    }
+  },
+
+  _closeSlotScanConnection(index) {
+    const slot = App.robotSlots[index];
+    if (!slot) return;
+    clearTimeout(slot.scanRosReconnectTimer);
+    slot.scanRosReconnectTimer = null;
+    const scanRos = slot.scanRos;
+    slot.scanRos = null;
+    slot.scanRosConnected = false;
+    if (scanRos && scanRos !== slot.ros) {
+      try { scanRos.close(); } catch (_error) { /* already closed */ }
+    }
+  },
+
+  _acceptScanMessage(slot, key, msg) {
+    const stamp = msg?.header?.stamp;
+    const seconds = stamp?.sec ?? stamp?.secs;
+    const nanos = stamp?.nanosec ?? stamp?.nsecs ?? 0;
+    const time = typeof seconds === 'number' && Number.isFinite(seconds)
+      && typeof nanos === 'number' && Number.isFinite(nanos) ? seconds * 1000 + nanos / 1e6 : 0;
+    const now = Date.now();
+    slot.scanMessageState ||= {};
+    const previous = slot.scanMessageState[key];
+    // Discard duplicates/late packets around a channel handoff. Allow a clock
+    // reset to recover after a one-second gap rather than freezing the layer.
+    if (time > 0 && previous?.stamp > 0 && time <= previous.stamp && now - previous.at < 1000) return false;
+    slot.scanMessageState[key] = { stamp: time, at: now };
+    return true;
   },
 
   // Subscribe to TF for robot pose (like RViz does)
@@ -917,37 +1032,59 @@ const RosManager = {
   _handleSlotTfStatic(index, msg) {
     const slot = App.robotSlots[index];
     if (!slot) return;
-    const identity = { x: 0, y: 0, r00: 1, r01: 0, r10: 0, r11: 1 };
-    const result = { base_link: identity, base_footprint: identity };
-    const remaining = Array.from(msg?.transforms || []).filter(transform =>
+    // ROS2 replays one TFMessage per static broadcaster, not one complete tree.
+    // Keep every edge for this connection; a camera packet must not erase lidar.
+    if (slot.tfStaticCacheRos !== slot.ros) {
+      slot.tfStaticEdges = Object.create(null);
+      slot.tfStaticCacheRos = slot.ros;
+    }
+    const edges = slot.tfStaticEdges ||= Object.create(null);
+    for (const transform of Array.from(msg?.transforms || []).filter(transform =>
       this._frameNamespaceBelongsToSlot(transform?.header?.frame_id, slot)
       && this._frameNamespaceBelongsToSlot(transform?.child_frame_id, slot)
-    );
+    )) {
+      const parent = this._frameKey(transform.header.frame_id), child = this._frameKey(transform.child_frame_id);
+      if (!parent || !child || parent === child || !Number.isFinite(transform.transform?.translation?.x)
+          || !Number.isFinite(transform.transform?.translation?.y)) continue;
+      if (edges[child] || Object.keys(edges).length < 512) edges[child] = transform;
+    }
+    this._rebuildSlotStaticTf(index);
+  },
 
-    for (let pass = 0; pass < 10 && remaining.length > 0; pass++) {
+  _rebuildSlotStaticTf(index) {
+    const slot = App.robotSlots[index];
+    if (!slot?.tfStaticEdges) return;
+    const remaining = Object.values(slot.tfStaticEdges);
+    const hasFootprint = remaining.some(t => this._frameKey(t.header.frame_id) === 'base_footprint'
+      || this._frameKey(t.child_frame_id) === 'base_footprint');
+    const root = slot.tfPoseBaseFrame || (hasFootprint ? 'base_footprint' : 'base_link');
+    const result = Object.create(null);
+    result[root] = { x: 0, y: 0, r00: 1, r01: 0, r10: 0, r11: 1 };
+    for (let pass = 0; pass < 64 && remaining.length > 0; pass++) {
       let changed = false;
       for (let i = remaining.length - 1; i >= 0; i--) {
         const transform = remaining[i];
-        const parent = this._frameKey(transform?.header?.frame_id);
-        const child = this._frameKey(transform?.child_frame_id);
-        if (!parent || !child) {
-          remaining.splice(i, 1);
-          continue;
-        }
-        const parentTf = result[parent];
-        if (!parentTf) continue;
+        const parent = this._frameKey(transform.header.frame_id);
+        const child = this._frameKey(transform.child_frame_id);
         const localYaw = this._quaternionYaw(transform?.transform?.rotation);
         const cosYaw = Math.cos(localYaw);
         const sinYaw = Math.sin(localYaw);
         const tx = Number(transform?.transform?.translation?.x) || 0;
         const ty = Number(transform?.transform?.translation?.y) || 0;
-        result[child] = {
-          x: parentTf.x + parentTf.r00 * tx + parentTf.r01 * ty,
-          y: parentTf.y + parentTf.r10 * tx + parentTf.r11 * ty,
-          r00: parentTf.r00 * cosYaw + parentTf.r01 * sinYaw,
-          r01: -parentTf.r00 * sinYaw + parentTf.r01 * cosYaw,
-          r10: parentTf.r10 * cosYaw + parentTf.r11 * sinYaw,
-          r11: -parentTf.r10 * sinYaw + parentTf.r11 * cosYaw
+        let parentTf = result[parent], target = child, x = tx, y = ty, c = cosYaw, s = sinYaw;
+        if (!parentTf && result[child]) {
+          // The live pose can refer to either base_link or base_footprint.
+          parentTf = result[child]; target = parent;
+          x = -cosYaw * tx - sinYaw * ty; y = sinYaw * tx - cosYaw * ty; s = -sinYaw;
+        }
+        if (!parentTf) continue;
+        if (!result[target]) result[target] = {
+          x: parentTf.x + parentTf.r00 * x + parentTf.r01 * y,
+          y: parentTf.y + parentTf.r10 * x + parentTf.r11 * y,
+          r00: parentTf.r00 * c + parentTf.r01 * s,
+          r01: -parentTf.r00 * s + parentTf.r01 * c,
+          r10: parentTf.r10 * c + parentTf.r11 * s,
+          r11: -parentTf.r10 * s + parentTf.r11 * c
         };
         remaining.splice(i, 1);
         changed = true;
@@ -975,6 +1112,10 @@ const RosManager = {
 
       // Direct map -> base_link
       if (isMapFrame(parent) && isBaseFrame(child)) {
+        if (slot.tfPoseBaseFrame !== this._frameKey(child)) {
+          slot.tfPoseBaseFrame = this._frameKey(child);
+          this._rebuildSlotStaticTf(index);
+        }
         this._updateSlotPoseFromTf(index, tf.transform);
         slot.tfReceived = true;
         return;
@@ -989,6 +1130,10 @@ const RosManager = {
 
       // odom -> base_link
       if (isOdomFrame(parent) && isBaseFrame(child)) {
+        if (slot.tfPoseBaseFrame !== this._frameKey(child)) {
+          slot.tfPoseBaseFrame = this._frameKey(child);
+          this._rebuildSlotStaticTf(index);
+        }
         slot.tfOdomToBase = tf.transform;
         slot.tfOdomToBaseTime = Date.now();
         updated = true;
@@ -1281,7 +1426,7 @@ const RosManager = {
   // Internal: subscribe a topic for a specific slot
   // Fast topics (pose, lidar) use lower throttle for smoother updates
   _poseTopicKeys: new Set(['work-state', 'robot-pose', 'odom-pose']),
-  _fastTopicKeys: new Set(['lidar']),
+  _fastTopicKeys: new Set(['lidar', 'lidar-front', 'lidar-rear']),
   _cameraTopicKeys: new Set(['cam1-color', 'cam2-color']),
   _cameraThrottleRate: 100,
   _unthrottledTopicKeys: new Set(['loop-closure-log']),
@@ -1302,10 +1447,10 @@ const RosManager = {
                  isDepth ? this._depthThrottleRate :
                  isCamera ? this._cameraThrottleRate :
                  this._poseTopicKeys.has(key) ? this.POSE_FAST_THROTTLE_MS :
-                 this._fastTopicKeys.has(key) ? 50 : this.throttleRate;
+                 this._fastTopicKeys.has(key) ? this.SCAN_THROTTLE_MS : this.throttleRate;
 
     const options = {
-      ros: slot.ros,
+      ros: this._fastTopicKeys.has(key) && slot.scanRosConnected ? slot.scanRos : slot.ros,
       name: name,
       messageType: messageType,
       throttle_rate: rate,
@@ -1318,9 +1463,20 @@ const RosManager = {
       options.queue_length = 1;
     }
     const topic = new ROSLIB.Topic(options);
-
-    topic.subscribe(callback);
     slot.subscriptions[key] = topic;
+    if (this._fastTopicKeys.has(key)) {
+      const mainRos = slot.ros;
+      const scanOptions = { ...topicOptions };
+      delete scanOptions.ros;
+      slot.scanTopicConfigs ||= {};
+      slot.scanTopicConfigs[key] = { name, messageType, callback, options: scanOptions };
+      topic.subscribe(msg => {
+        if (slot.ros !== mainRos || index !== App.activeSlotIndex
+            || slot.subscriptions[key] !== topic || !this._acceptScanMessage(slot, key, msg)) return;
+        callback(msg);
+      });
+      if (!topicOptions.ros) this._ensureSlotScanConnection(index);
+    } else topic.subscribe(callback);
   },
 
   _subscribeMapForSlot(index, topicName, useCompression = true) {
@@ -1513,10 +1669,14 @@ const RosManager = {
     const slot = App.robotSlots[index];
     if (!slot) return;
     const ros2Battery = msg && Object.prototype.hasOwnProperty.call(msg, 'percentage');
-    const percentage = Number(msg?.percentage);
+    // The bridge encodes unavailable/NaN values as null. Never coerce null,
+    // booleans or strings into a valid 0% battery-trigger input.
+    const percentage = msg?.percentage;
+    const percentageValid = typeof percentage === 'number' && Number.isFinite(percentage)
+      && percentage >= 0 && percentage <= 1;
     const data = ros2Battery
       ? [Number(msg.voltage) || 0, Number(msg.current) || 0,
-        Number.isFinite(percentage) && percentage >= 0 && percentage <= 1
+        percentageValid
           ? percentage * 100 : 0]
       : (Array.isArray(msg?.data) ? msg.data : []);
 
@@ -1527,12 +1687,14 @@ const RosManager = {
       ? Number(msg.power_supply_status) === 1 || current > this._bmsChargingCurrentThreshold
       : current > this._bmsChargingCurrentThreshold;
 
-    slot.bms = { voltage, current, soc, charging: isCharging };
+    slot.bms = { voltage, current, soc, charging: isCharging, receivedAt: Date.now(),
+      socValid: ros2Battery ? percentageValid
+        : data.length > 2 && typeof soc === 'number' && Number.isFinite(soc) && soc >= 0 && soc <= 100 };
 
     // Record trend for active slot
     if (index === App.activeSlotIndex) {
       const now = Date.now();
-      if (now - this._bmsTrendLastSampleAt >= 1000) {
+      if (slot.bms.socValid && now - this._bmsTrendLastSampleAt >= 1000) {
         this._bmsTrend.push({ time: now, soc, voltage, current });
         this._bmsTrendLastSampleAt = now;
         if (this._bmsTrend.length > this._bmsTrendMax) this._bmsTrend.shift();
@@ -1542,7 +1704,7 @@ const RosManager = {
 
     // If this is the active slot, update UI
     if (index === App.activeSlotIndex) {
-      this.handleBmsData(ros2Battery ? { data } : msg);
+      this.handleBmsData({ data, socValid: slot.bms.socValid, charging: isCharging });
       if (typeof JogControl !== 'undefined' && JogControl.updateChargeStatus) {
         JogControl.updateChargeStatus(slot);
       }
@@ -2719,6 +2881,10 @@ const RosManager = {
           if (currentSlot.subscriptions[cfg.key]) {
             currentSlot.subscriptions[cfg.key].unsubscribe();
             delete currentSlot.subscriptions[cfg.key];
+          }
+          if (this._fastTopicKeys.has(cfg.key)) {
+            if (currentSlot.scanTopicConfigs) delete currentSlot.scanTopicConfigs[cfg.key];
+            if (![...this._fastTopicKeys].some(key => currentSlot.subscriptions[key])) this._closeSlotScanConnection(currentIndex);
           }
           if (cfg.key === 'footprint' && currentSlot.subscriptions['footprint-lio']) {
             currentSlot.subscriptions['footprint-lio'].unsubscribe();
@@ -4003,6 +4169,8 @@ const RosManager = {
     const rangeMax = scan.range_max || 30.0;
     const slot = App.robotSlots[App.activeSlotIndex];
     const frame = this._frameKey(scan?.header?.frame_id);
+    if (this.isRos2(App.activeSlotIndex) && !slot?.tfStaticMap?.[frame]
+        && frame !== slot?.tfPoseBaseFrame) return;
     const sensorTf = slot?.tfStaticMap?.[frame]
       || { x: 0, y: 0, r00: 1, r01: 0, r10: 0, r11: 1 };
 
@@ -5642,27 +5810,30 @@ const RosManager = {
 
   // Handle BMS data (active slot UI update)
   handleBmsData(msg) {
-    const data = msg.data;
+    const data = Array.isArray(msg?.data) ? msg.data : [];
 
     document.getElementById('bms-content').textContent = JSON.stringify(data, null, 2);
 
     const soc = data.length > 2 ? data[2] : 0;
     const current = data.length > 1 ? data[1] : 0;
-    const isCharging = current > this._bmsChargingCurrentThreshold;
+    const socValid = msg.socValid !== false && data.length > 2
+      && typeof soc === 'number' && Number.isFinite(soc) && soc >= 0 && soc <= 100;
+    const isCharging = typeof msg.charging === 'boolean'
+      ? msg.charging : current > this._bmsChargingCurrentThreshold;
 
     const gauge = document.getElementById('bms-gauge-fill').parentElement;
     const gaugeFill = document.getElementById('bms-gauge-fill');
     const gaugeText = document.getElementById('bms-gauge-text');
 
     if (gaugeFill && gaugeText) {
-      const percentage = Math.min(100, Math.max(0, soc));
+      const percentage = socValid ? soc : 0;
       gaugeFill.style.width = `${percentage}%`;
-      gaugeText.textContent = `${percentage.toFixed(0)}%`;
+      gaugeText.textContent = socValid ? `${percentage.toFixed(0)}%` : '--%';
 
       gaugeFill.classList.remove('low', 'medium');
-      if (percentage <= 20) {
+      if (socValid && percentage <= 20) {
         gaugeFill.classList.add('low');
-      } else if (percentage <= 50) {
+      } else if (socValid && percentage <= 50) {
         gaugeFill.classList.add('medium');
       }
     }
@@ -5677,7 +5848,12 @@ const RosManager = {
 
     // SOC history ring buffer for charge/discharge rate estimation
     const now = Date.now();
-    if (isCharging && soc > 0) {
+    if (!socValid) {
+      this._bmsChargeStartTime = null;
+      this._bmsDischargeStartTime = null;
+      this._bmsSocHistory = [];
+      this._bmsDischargeHistory = [];
+    } else if (isCharging && soc > 0) {
       if (this._bmsChargeStartTime === null) {
         this._bmsChargeStartTime = now;
         this._bmsSocHistory = [];
@@ -5724,7 +5900,7 @@ const RosManager = {
       document.getElementById('bms-current').textContent = isCharging ? currentText + ' (charging)' : currentText;
     }
     if (document.getElementById('bms-soc')) {
-      document.getElementById('bms-soc').textContent = data.length > 2 ? `${data[2].toFixed(1)} %` : '--';
+      document.getElementById('bms-soc').textContent = socValid ? `${soc.toFixed(1)} %` : '--';
     }
 
     this._refreshBmsEtaDisplay();
@@ -9342,8 +9518,14 @@ free_thresh: 0.196
         if (model) console.log(`[RobotModel] ${slot.robotId}: ${model}`);
 
         if (previousModel !== (slot.robotModel || '')) {
-          if (typeof RobotCompatibility !== 'undefined') RobotCompatibility.clear(slot);
-          if (slot.ros) await this._discoverCompatibility(index);
+          // ROBOT_MODEL is a display hint, not new graph/control evidence.
+          // Do not invalidate a verified AUTO adapter or race an in-flight
+          // discovery merely because this slower SSH lookup has completed.
+          if (slot.compatibilityPromise) await slot.compatibilityPromise;
+          if (slot.ros !== sourceRos) return slot.robotModel || null;
+          if (slot.ros && !slot.compatibilityProfile?.discovered) await this._discoverCompatibility(index);
+          if (slot.ros !== sourceRos) return slot.robotModel || null;
+          if (typeof RobotCompatibility !== 'undefined') RobotCompatibility.updatePresentation?.(slot);
           document.dispatchEvent(new CustomEvent('amr:robot-model-changed', {
             detail: { slotIndex: index, robotId: slot.robotId, robotModel: slot.robotModel }
           }));
@@ -9369,6 +9551,12 @@ free_thresh: 0.196
 };
 
 // Setup ROS Control tab event handlers
+document.addEventListener('amr:monitoring-updated', event => {
+  const slot = event.detail?.slot;
+  const index = App.robotSlots?.indexOf(slot);
+  if (index >= 0 && index === App.activeSlotIndex && slot.ros === event.detail.ros) RosManager._subscribeVerifiedHealth(index);
+});
+
 document.addEventListener('DOMContentLoaded', () => {
   // Service Call
   document.getElementById('btn-service-call').addEventListener('click', () => {

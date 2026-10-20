@@ -67,6 +67,60 @@ function loadApp() {
 }
 
 describe('login robot auto-discovery', () => {
+  test('login reconnects the remembered robot before a slow scan and keeps that in-flight connection', async () => {
+    const { App, storage } = loadApp();
+    storage.set(App.LAST_ACTIVE_ROBOT_KEY, JSON.stringify({ robotId: 'R_025', ip: '192.168.20.75', sshPort: 2222, wsPort: 9091, rosMode: 'ros2', tunnelMode: false }));
+    for (const name of ['updateActiveRobotStatus','updateActionTargetLabel','renderActiveRobotSelector','renderRobotManagerList','renderMonitoringCards','updateMultiRobotButtons']) App[name] = jest.fn();
+    App.runNetworkScan = jest.fn();
+    let finish;
+    App._connectSlot = jest.fn(() => new Promise(resolve => { finish = resolve; }));
+    App.startLoginRobotDiscovery();
+    const original = App.robotSlots[0];
+    expect(original).toMatchObject({ robotId:'R_025', ip:'192.168.20.75', sshPort:2222, wsPort:9091, rosMode:'ros2', source:'remembered', manualAdded:false });
+    expect(App._connectSlot).toHaveBeenCalledTimes(1);
+    expect(App.runNetworkScan).toHaveBeenCalledWith(expect.objectContaining({ background:true, replaceCurrent:false }));
+    App.stageDiscoveredRobots([{ ip:'192.168.20.75', robotId:'R_025', sshPort:2222, discoveryMode:'auto', discoverySource:'ssh', rosMajor:2 }], { replaceCurrent:false, silent:true });
+    expect(App.robotSlots[0]).toBe(original);
+    expect(App._connectSlot).toHaveBeenCalledTimes(1);
+    finish(); await original.connectingPromise;
+  });
+
+  test('simultaneous connect requests share a single prepare attempt and can retry after it finishes', async () => {
+    const { App } = loadApp(); App.robotSlots = [{ ip:'192.168.20.56', robotId:'R_006' }];
+    let finish; App._connectSlot = jest.fn(() => new Promise(resolve => { finish = resolve; }));
+    const first = App.connectSlot(0), second = App.connectSlot(0);
+    expect(second).toBe(first); expect(App._connectSlot).toHaveBeenCalledTimes(1);
+    finish(); await first; expect(App.robotSlots[0].connectingPromise).toBeNull();
+    const retry = App.connectSlot(0); expect(App._connectSlot).toHaveBeenCalledTimes(2); finish(); await retry;
+  });
+
+  test('remembering connection settings never persists passwords or verified capabilities', () => {
+    const { App, storage } = loadApp();
+    App._rememberActiveRobot({ robotId:'R_006', ip:'192.168.20.56', sshPort:2222, rosMode:'ros2', sshPassword:'secret', compatibilityProfile:{controlReady:true} });
+    const remembered = JSON.parse(storage.get(App.LAST_ACTIVE_ROBOT_KEY));
+    expect(remembered).toMatchObject({ sshPort:2222, rosMode:'ros2' });
+    expect(remembered.sshPassword).toBeUndefined(); expect(remembered.compatibilityProfile).toBeUndefined();
+  });
+
+  test('a changed mode or cancelled connection generation starts a new attempt instead of reusing the old one', async () => {
+    const { App } = loadApp(); App.robotSlots = [{ip:'192.168.20.56',robotId:'R_006',rosMode:'auto',connectionGeneration:0}];
+    const finishes = []; App._connectSlot = jest.fn(() => new Promise(resolve => finishes.push(resolve)));
+    const first = App.connectSlot(0); App.robotSlots[0].connectionGeneration++;
+    const second = App.connectSlot(0); expect(second).not.toBe(first);
+    App.robotSlots[0].rosMode = 'ros2'; const third = App.connectSlot(0); expect(third).not.toBe(second);
+    finishes[0](); await first; expect(App.robotSlots[0].connectingPromise).toBe(third);
+    finishes[1](); await second; finishes[2](); await third;
+    expect(App._connectSlot).toHaveBeenCalledTimes(3);
+  });
+
+  test('cached connection hints do not create real slots during Test Mode or for malformed IPs', () => {
+    const { App, storage, context } = loadApp();
+    storage.set(App.LAST_ACTIVE_ROBOT_KEY, JSON.stringify({robotId:'R_006',ip:'192.168.20.56'}));
+    context.TestMode = { enabled:true }; expect(App._connectRememberedRobot()).toBe(false);
+    context.TestMode.enabled = false;
+    storage.set(App.LAST_ACTIVE_ROBOT_KEY, JSON.stringify({robotId:'R_006',ip:'999.168.20.56'}));
+    expect(App._connectRememberedRobot()).toBe(false); expect(App.robotSlots).toHaveLength(0);
+  });
   test('canonicalizes lowercase and legacy RID spellings before creating a slot', () => {
     const { App } = loadApp();
     App.activeSlotIndex = -1;
@@ -303,7 +357,7 @@ describe('login robot auto-discovery', () => {
       autoConnect: true,
       background: true,
       replaceCurrent: true,
-      discoveryMode: 'rosbridge',
+      discoveryMode: 'auto',
       scanPort: 9090,
       persistPreferences: false
     });
@@ -322,7 +376,7 @@ describe('login robot auto-discovery', () => {
       autoConnect: true,
       background: true,
       replaceCurrent: true,
-      discoveryMode: 'rosbridge',
+      discoveryMode: 'auto',
       scanPort: 9090,
       persistPreferences: false
     });
@@ -427,10 +481,10 @@ describe('login robot auto-discovery', () => {
     expect(App.activeSlotIndex).toBe(0);
     expect(App.connectSlot.mock.calls.map(call => call[0])).toEqual([0, 1]);
     expect(storage.has(App.SLOTS_STORAGE_KEY)).toBe(false);
-    expect(JSON.parse(storage.get(App.LAST_ACTIVE_ROBOT_KEY))).toEqual({
+    expect(JSON.parse(storage.get(App.LAST_ACTIVE_ROBOT_KEY))).toEqual(expect.objectContaining({
       robotId: 'R_002',
       ip: '192.168.20.52'
-    });
+    }));
   });
 
   test('replacement scans preserve manually added robot settings and persistent storage', () => {
@@ -606,5 +660,51 @@ describe('login robot auto-discovery', () => {
     expect(App.robotSlots[0].robotId).toBe('R_TEST_1');
     expect(App.activeSlotIndex).toBe(0);
     expect(result.testModePreserved).toBe(true);
+  });
+});
+
+describe('native ROS2 robot scan selection', () => {
+  function setup(app) {
+    app.connectSlot = jest.fn(); app.saveRobotSlots = jest.fn();
+    app.renderActiveRobotSelector = jest.fn(); app.renderRobotManagerList = jest.fn();
+    app.renderMonitoringCards = jest.fn(); app.updateActiveRobotStatus = jest.fn();
+    app.updateActionTargetLabel = jest.fn(); app.updateMultiRobotButtons = jest.fn();
+  }
+  test('stages discovered ROS2 RID using the actual SSH port and ROS2 mode without enabling a ROS1 tunnel', () => {
+    const { App } = loadApp(); setup(App);
+    App.stageDiscoveredRobots([{ ip: '192.168.20.75', robotId: 'R_025', sshPort: 2222,
+      rosMode: 'ros2', rosMajor: 2, model: 'stl1000_ros2', discoveryMode: 'auto', discoverySource: 'ssh', observationOnly: true }], { silent: true });
+    expect(App.robotSlots[0]).toMatchObject({ robotId: 'R_025', sshPort: 2222, rosMode: 'ros2', tunnelMode: false, discoveryModel: 'stl1000_ros2', discoveryObservationOnly: true });
+    expect(App.connectSlot).toHaveBeenCalledWith(0);
+  });
+  test('authentication-required and conflicting scan rows never start automatic connections', () => {
+    const { App } = loadApp(); setup(App);
+    App.stageDiscoveredRobots([
+      { ip: '192.168.20.75', robotId: 'R_025', authenticationRequired: true },
+      { ip: '192.168.20.56', robotId: 'R_006', identityConflict: true }
+    ], { silent: true });
+    expect(App.robotSlots).toHaveLength(0); expect(App.connectSlot).not.toHaveBeenCalled();
+  });
+  test('automatic scan sends per-IP saved credentials in POST body, never URL, and renders ROS2 metadata', async () => {
+    const { App, context, elements } = loadApp(); setup(App);
+    ['btn-rm-scan','btn-robot-scan','rm-scan-subnet','rm-scan-mode','rm-scan-port','rm-scan-status','rm-scan-results','rm-scan-list'].forEach(id => { elements[id] = createElement(); });
+    elements['rm-scan-subnet'].value = '192.168.20'; elements['rm-scan-mode'].value = 'auto'; elements['rm-scan-port'].value = '9090';
+    App.robotSlots = [{ ip: '192.168.20.75', robotId: 'R_025', sshPort: 2222, sshPassword: 'private-per-host', sshUser: 'operator' }];
+    context.fetch.mockResolvedValue({ ok: true, json: async () => ({ subnet: '192.168.20', hosts: [{
+      ip: '192.168.20.75', robotId: 'R_025', sshPort: 2222, rosMajor: 2, rosMode: 'ros2', model: 'stl1000_ros2', distro: 'jazzy', discoveryMode: 'auto', discoverySource: 'ssh' }] }) });
+    await App.runNetworkScan();
+    const [url, options] = context.fetch.mock.calls[0];
+    expect(url).not.toContain('private-per-host'); expect(options.method).toBe('POST');
+    expect(JSON.parse(options.body).robots).toEqual([{ ip: '192.168.20.75', robotId: 'R_025', sshPort: 2222, sshUser: 'operator', sshPassword: 'private-per-host' }]);
+    expect(elements['rm-scan-status'].textContent).toContain('RID 1대 확인');
+    expect(App.discoveredRobots[0]).toMatchObject({ rosMode: 'ros2', model: 'stl1000_ros2' });
+  });
+  test('legacy default Bridge scan preference migrates to automatic ROS1/ROS2 detection', () => {
+    const { App, elements, storage } = loadApp();
+    ['btn-rm-scan','rm-scan-subnet','rm-scan-mode','rm-scan-port'].forEach(id => { elements[id] = createElement(); });
+    storage.set('easyloopScanMode', 'rosbridge'); App.setupNetworkScan();
+    expect(elements['rm-scan-mode'].value).toBe('auto');
+    storage.set('easyloopDiscoveryVersion', '2'); App.setupNetworkScan();
+    expect(elements['rm-scan-mode'].value).toBe('rosbridge');
   });
 });

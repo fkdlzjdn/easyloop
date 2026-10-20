@@ -1977,9 +1977,12 @@ free -h"></textarea>
             <div class="scheduler-header">
               <h4 data-i18n="scheduler.title">Mission Scheduler</h4>
               <span class="scheduler-mode-badge" id="scheduler-mode-badge">MANUAL</span>
+              <button id="btn-scheduler-arm" class="btn btn-small btn-primary" type="button">예약 시작</button>
               <button id="btn-scheduler-add" class="btn btn-small btn-primary" data-i18n="scheduler.addMission">+ Add Mission</button>
               <button id="btn-scheduler-clear" class="btn btn-small btn-danger" data-i18n="scheduler.clearAll">Clear All</button>
             </div>
+            <p class="scheduler-session-note">브라우저 실행 중 · 엔지니어 AUTO + 예약 시작에서만 자동 전송합니다. 새로고침/로그아웃 후 예약은 중지됩니다. 예약 중지는 실행 중인 로봇 Task를 취소하지 않습니다.</p>
+            <button id="btn-scheduler-reservations" class="btn btn-small" type="button">서버 실행 추적 새로고침</button><div id="scheduler-reservations"></div>
             <div id="scheduler-list" class="scheduler-list">
               <span class="scheduler-empty" data-i18n="scheduler.noMissions">No missions registered.</span>
             </div>
@@ -2000,6 +2003,9 @@ free -h"></textarea>
             <div class="scheduler-add-form">
               <label>미션 이름
                 <input id="scheduler-mission-name" type="text" placeholder="예: 배터리 부족 자동 충전" autocomplete="off">
+              </label>
+              <label>대상 로봇 (실행 중 선택을 바꿔도 고정)
+                <select id="scheduler-target"><option value="">대상 로봇 선택</option></select>
               </label>
               <label>실행할 저장 Task
                 <select id="scheduler-queue-name">
@@ -2035,6 +2041,7 @@ free -h"></textarea>
                 </select>
                 <small>선택한 주기로 저장 Task를 반복 실행합니다.</small>
               </label>
+              <label>결과 확인 제한 (초)<input id="scheduler-timeout-sec" type="number" min="10" max="86400" value="1800"><small>초과 시 상태 미확인으로 남기고 다음 자동 전송을 차단합니다.</small></label>
               <label id="scheduler-cron-row" hidden>매일 실행 시각
                 <input id="scheduler-cron-time" type="time" value="09:00">
                 <small>매일 이 시각에 저장 Task를 한 번 실행합니다.</small>
@@ -2154,8 +2161,9 @@ free -h"></textarea>
             <option value="192.168.3"></option>
           </datalist>
           <label class="rm-subnet-label" for="rm-scan-mode">검색 방식</label>
-          <select id="rm-scan-mode" class="rm-scan-mode" title="포트의 용도">
-            <option value="rosbridge">ROS Bridge</option>
+          <select id="rm-scan-mode" class="rm-scan-mode" title="ROS1/ROS2 자동 검색 또는 포트별 검색">
+            <option value="auto" selected>자동 · ROS1 + ROS2</option>
+            <option value="rosbridge">ROS Bridge만</option>
             <option value="ssh">SSH 포트포워딩</option>
           </select>
           <label class="rm-subnet-label" for="rm-scan-port">포트</label>
@@ -2164,7 +2172,7 @@ free -h"></textarea>
           <button id="btn-rm-scan" class="btn btn-small btn-primary">로봇 스캔</button>
           <span id="rm-scan-status" class="rm-scan-status"></span>
         </div>
-        <div class="rm-scan-help">ROS Bridge는 RID까지 확인합니다. SSH 포트포워딩은 <code>192.168.20.63:2222</code>처럼 열린 외부 포트를 찾고, 저장된 수동 로봇 정보와 자동으로 연결합니다. <code>192.168.3.5</code>는 항상 검색합니다.</div>
+        <div class="rm-scan-help">자동 검색은 ROS Bridge와 SSH 22·2222·저장된 포트를 확인해 ROS1/ROS2, RID, 모델을 읽습니다. ROS2는 rosbridge가 없어도 검색하며 bringup을 시작하지 않습니다. 자동 검색의 포트 입력은 ROS Bridge용입니다. 인증 실패·RID 미확인은 별도로 표시합니다. SSH 포트포워딩은 <code>192.168.20.63:2222</code>처럼 열린 외부 포트를 찾고, 저장된 수동 로봇 정보와 자동으로 연결합니다. <code>192.168.3.5</code>는 항상 검색합니다.</div>
         <div id="rm-scan-results" class="rm-scan-results" style="display:none;">
           <div class="rm-scan-list" id="rm-scan-list"></div>
         </div>
@@ -2458,6 +2466,14 @@ free -h"></textarea>
           <input type="text" id="jog-topic" value="runtime 자동 감지" class="jog-topic-input" disabled>
         </div>
       </div>
+      <section id="jog-native-settings" class="jog-safety-gate" hidden>
+        <strong>ROS2 제한 Jog</strong>
+        <p>한 번 누르면 지정한 범위 안에서 이동합니다. 손을 떼거나 STOP을 누르면 취소하고 정지 결과를 확인합니다.</p>
+        <label>이동거리 (m) <input id="jog-native-distance" type="number" min="0" step="0.01" placeholder="직접 입력"></label>
+        <label>회전각도 (°) <input id="jog-native-angle" type="number" min="0" step="1" placeholder="직접 입력"></label>
+        <small id="jog-native-limits">로봇에 설정된 허용 범위를 확인하는 중입니다.</small>
+        <small id="jog-native-status" role="status">대기</small>
+      </section>
       <section id="jog-safety-gate" class="jog-safety-gate" aria-live="polite">
         <div class="jog-safety-header">
           <span>Jog 안전 게이트</span>
@@ -2530,6 +2546,7 @@ free -h"></textarea>
         <span>Az: <strong id="jog-cur-az">0.00</strong></span>
         <span>Pub: <strong id="jog-pub-status">Off</strong></span>
       </div>
+      <p id="jog-release-hint" class="jog-hint">입력 해제: 명령 속도를 0.5초 동안 감속합니다. 감속 중에는 조금 더 이동할 수 있습니다. STOP / S / Space: 즉시 정지 요청</p>
       <div class="jog-velocity-compare">
         <div><span>명령</span><code id="jog-command-velocity">Lx 0.00 · Ly 0.00 · Az 0.00</code></div>
         <div><span>실제</span><code id="jog-actual-velocity">수신 대기</code></div>
@@ -3064,8 +3081,8 @@ free -h"></textarea>
   <script src="js/i18n.js"></script>
   <script src="js/app.js?v=20261001-rid-connection-fix&health=3"></script>
   <script src="js/dashboard.js"></script>
-  <script src="js/robot-compatibility.js?v=20261001-task-telemetry"></script>
-  <script src="js/ros-manager.js?v=20261001-health-subscriptions"></script>
+  <script src="js/robot-compatibility.js?v=20261020-jog-mode-verification"></script>
+  <script src="js/ros-manager.js?v=20261020-static-tf-alignment&mode=20261020"></script>
   <script src="js/test-mode.js?v=20260815-action-contract"></script>
   <script src="js/ros-info.js"></script>
   <script src="js/map-context-menu.js"></script>
@@ -3361,7 +3378,9 @@ free -h"></textarea>
   <script src="js/commands.js"></script>
   <script src="js/ros2-route.js"></script>
   <script src="js/action-sender.js?v=20261001-task-telemetry"></script>
-  <script src="js/jog-control.js?v=20260815-four-generation"></script>
+  <script src="js/mission-scheduler.js?v=20261020"></script>
+  <script src="js/ros2-manual-jog.js?v=20261020-bounded-jog"></script>
+  <script src="js/jog-control.js?v=20261020-worker-deceleration&mode=20261020&gate=2"></script>
   <script src="js/vel-monitor.js"></script>
   <script src="js/docking-test.js"></script>
   <script src="js/init-setup.js"></script>

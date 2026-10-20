@@ -254,9 +254,9 @@ class Bridge:
             self.parameter(request, operation)
             return
         if operation == 'topics':
-            values = {'topics': [item[0] for item in topics], 'types': [graph_type(topics, item[0]) for item in topics]}
+            values = {'topics': [item[0] for item in topics], 'types': [types[0] if len(types) == 1 else '' for _, types in topics]}
         elif operation == 'services':
-            values = {'services': [item[0] for item in services]}
+            values = {'services': [item[0] for item in services], 'types': [types[0] if len(types) == 1 else '' for _, types in services]}
         elif operation == 'nodes':
             values = {'nodes': [namespace.rstrip('/') + '/' + name
                                 for name, namespace in self.node.get_node_names_and_namespaces()]}

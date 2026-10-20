@@ -8,6 +8,11 @@ const PROBE = "bash -ic 'echo EASYLOOP_ROS_VERSION=${ROS_VERSION:-}; echo EASYLO
 const SESSION_TTL_MS = 10 * 60 * 1000;
 const shellQuote = value => `'${String(value).replace(/'/g, "'\\''")}'`;
 const ENV_KEYS = ['ROS_DOMAIN_ID', 'RMW_IMPLEMENTATION', 'CYCLONEDDS_URI', 'ROS_AUTOMATIC_DISCOVERY_RANGE', 'ROS_LOCALHOST_ONLY', 'ROS_HOSTNAME'];
+const RUNTIME_ENV_KEYS = new Set([...ENV_KEYS, 'PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ',
+  'PYTHONPATH', 'PYTHONHOME', 'PYTHONNOUSERSITE', 'LD_LIBRARY_PATH', 'AMENT_PREFIX_PATH', 'CMAKE_PREFIX_PATH',
+  'COLCON_PREFIX_PATH', 'ROS_VERSION', 'ROS_DISTRO', 'ROS_STATIC_PEERS', 'ROS_DISCOVERY_SERVER',
+  'FASTDDS_DEFAULT_PROFILES_FILE', 'FASTRTPS_DEFAULT_PROFILES_FILE', 'RMW_FASTRTPS_USE_QOS_FROM_XML',
+  'ROS_SECURITY_ENABLE', 'ROS_SECURITY_KEYSTORE', 'ROS_SECURITY_STRATEGY']);
 const liveProbe = `import os,pathlib
 keys=${JSON.stringify(ENV_KEYS)}
 env=dict(os.environ)
@@ -94,6 +99,24 @@ function parseProbe(output) {
   };
 }
 
+function parseFastProbe(output) {
+  try {
+    const line = String(output).split(/\r?\n/).find(item => item.startsWith('EASYLOOP_FAST_RUNTIME='));
+    const result = JSON.parse(line?.slice('EASYLOOP_FAST_RUNTIME='.length) || 'null');
+    if (!result || !/^\d+$/.test(result.pid) || !/^R_\d{3,}$/.test(result.robotId)
+        || !/^[a-z0-9_-]+$/.test(result.distro) || !/^\/[\w/.-]+$/.test(result.python)
+        || !result.runtimeEnvironment || result.runtimeEnvironment.ROS_VERSION !== '2'
+        || result.runtimeEnvironment.ROS_DISTRO !== result.distro) return null;
+    const runtimeEnvironment = Object.fromEntries(Object.entries(result.runtimeEnvironment)
+      .filter(([key, value]) => RUNTIME_ENV_KEYS.has(key) && typeof value === 'string' && !value.includes('\0')));
+    if (typeof runtimeEnvironment.PATH !== 'string' || typeof runtimeEnvironment.PYTHONPATH !== 'string') return null;
+    return { rosMajor: 2, hasRos2: true, hasRos1: false, distro: result.distro, ros2Distro: result.distro,
+      environment: Object.fromEntries(ENV_KEYS.filter(key => runtimeEnvironment[key] !== undefined).map(key => [key, runtimeEnvironment[key]])),
+      environmentSource: 'bringup', localRobotId: result.robotId, localPid: result.pid, controlEnabled: true,
+      runtimeEnvironment, runtimePython: result.python, startupMethod: 'bringup-environment' };
+  } catch (_error) { return null; }
+}
+
 function createRos2Runtime({ createSSHConnection, WebSocket, getAuthToken }) {
   const router = express.Router();
   const sessions = new Map();
@@ -101,6 +124,7 @@ function createRos2Runtime({ createSSHConnection, WebSocket, getAuthToken }) {
   const script = fs.readFileSync(path.join(__dirname, 'ros2-ssh-bridge.py'), 'utf8');
   const encodedScript = Buffer.from(script).toString('base64');
   const runner = `import base64;exec(compile(base64.b64decode("${encodedScript}"),"easyloop_ros2_bridge","exec"))`;
+  const fastProbe = fs.readFileSync(path.join(__dirname, 'ros2-runtime-probe.py'), 'utf8');
   const environmentCommand = session => {
     const setup = session.ros2Distro
       ? `source /opt/ros/${session.ros2Distro}/setup.bash; ` : '';
@@ -110,7 +134,13 @@ function createRos2Runtime({ createSSHConnection, WebSocket, getAuthToken }) {
     const exports = Object.entries(environment).map(([key, value]) => `export ${key}=${shellQuote(value)}; `).join('');
     return `${setup}${workspace}${exports}`;
   };
-  const startCommand = session => `bash -ic ${shellQuote(`${environmentCommand(session)}exec python3 -u -c ${shellQuote(runner)}`)}`;
+  const runtimeCommand = (session, command) => {
+    if (!session.runtimeEnvironment) return `bash -ic ${shellQuote(environmentCommand(session) + command)}`;
+    const env = { ...session.runtimeEnvironment, ...session.environment, EASYLOOP_ROBOT_ID: session.robotId || '',
+      EASYLOOP_CONTROL_ENABLED: session.controlEnabled ? '1' : '0', EASYLOOP_LOCAL_PID: session.localPid || '' };
+    return `env -i ${Object.entries(env).map(([key, value]) => shellQuote(`${key}=${value}`)).join(' ')} /bin/bash --noprofile --norc -c ${shellQuote(command)}`;
+  };
+  const startCommand = session => runtimeCommand(session, `exec ${shellQuote(session.runtimePython || 'python3')} -u -c ${shellQuote(runner)}`);
 
   function closeSession(id) {
     const session = sessions.get(id);
@@ -145,7 +175,9 @@ function createRos2Runtime({ createSSHConnection, WebSocket, getAuthToken }) {
         );
       });
       const probeCommand = `${PROBE}; bash -ic ${shellQuote(`python3 -c ${shellQuote(liveProbe)}`)}`;
-      const info = parseProbe(await execSsh(conn, probeCommand));
+      let info = null;
+      try { info = parseFastProbe(await execSsh(conn, `python3 -B -c ${shellQuote(fastProbe)}`)); } catch (_error) { /* legacy shell fallback */ }
+      if (!info) info = parseProbe(await execSsh(conn, probeCommand));
       if (mode === 'ros2' && info.hasRos2) info.rosMajor = 2;
       if (!info.rosMajor) throw new Error('ROS1/ROS2 runtime을 확정할 수 없습니다. 수동 모드를 선택하세요.');
       const selectedRobotId = robotId || info.localRobotId;
@@ -159,7 +191,7 @@ function createRos2Runtime({ createSSHConnection, WebSocket, getAuthToken }) {
         }
         info.environment.ROS_DOMAIN_ID = String(domainId);
       }
-      if (info.rosMajor === 2) {
+      if (info.rosMajor === 2 && !info.runtimeEnvironment) {
         const preflight = `import rclpy; from rclpy.action import ActionClient; from rosidl_runtime_py.utilities import get_message; print('EASYLOOP_BRIDGE_READY=1')`;
         const ready = await execSsh(conn, `bash -ic ${shellQuote(`${environmentCommand({ ...info, robotId: selectedRobotId })}python3 -c ${shellQuote(preflight)}`)}`);
         if (!ready.includes('EASYLOOP_BRIDGE_READY=1')) throw new Error('ROS2 Python runtime을 불러올 수 없습니다. ROS2 workspace 환경을 확인하세요.');
@@ -170,7 +202,10 @@ function createRos2Runtime({ createSSHConnection, WebSocket, getAuthToken }) {
         conn, owner: getAuthToken(req), ...info, robotId: selectedRobotId, createdAt: Date.now(), channels: new Set()
       });
       conn.on?.('close', () => closeSession(sessionId));
-      return res.json({ success: true, sessionId, ...info });
+      // Runtime paths stay server-side; only the established DDS context is public.
+      const publicInfo = Object.fromEntries(Object.entries(info)
+        .filter(([key]) => !['runtimeEnvironment', 'runtimePython'].includes(key)));
+      return res.json({ success: true, sessionId, ...publicInfo });
     } catch (error) {
       try { conn?.end(); } catch (closeError) { /* ignore */ }
       return res.json({ success: false, message: error.message, needPassword: Boolean(error.needPassword) });
@@ -193,7 +228,7 @@ function createRos2Runtime({ createSSHConnection, WebSocket, getAuthToken }) {
     if (error) return badRequest(res, error);
     try {
       const output = await execSsh(session.conn,
-        `bash -ic ${shellQuote(environmentCommand(session) + req.body.command)}`, 30000, false);
+        runtimeCommand(session, req.body.command), 30000, false);
       return res.json({ success: true, stdout: output, stderr: '', exitCode: 0 });
     } catch (failure) {
       return res.json({ success: false, message: failure.message });
@@ -286,4 +321,4 @@ function createRos2Runtime({ createSSHConnection, WebSocket, getAuthToken }) {
   return { router, handleUpgrade, closeSession, parseProbe, sessions };
 }
 
-module.exports = { createRos2Runtime, parseProbe, execSsh };
+module.exports = { createRos2Runtime, parseProbe, parseFastProbe, execSsh };

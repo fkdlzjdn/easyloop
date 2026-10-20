@@ -298,8 +298,8 @@ const Ros2RouteEditor = {
         <label><input id="route-docking-enabled" type="checkbox"> 이 경로에 도킹 입력 포함</label>
         <label>충전 도킹 <select id="route-is-charge"><option value="0">일반 도킹</option><option value="1">충전 도킹</option></select></label>
         <label>도킹 방향 <select id="route-dock-direction"><option value="1">전방</option><option value="-1">후방</option><option value="2">좌측</option><option value="3">우측</option></select></label>
-        <label>인식 방식 <select id="route-scan-type"><option value="4">Target / Rack</option><option value="5">ArUco</option><option value="7">Direct</option><option value="1">L</option><option value="2">LV</option><option value="3">Cradle</option><option value="6">ML-LV</option></select></label>
-        <p>프로파일·도킹 전환·오프셋은 상세 JSON의 docking_target_selection / docking_parameters / docking_transition에서 지정합니다. 기존 target_cfg 이름을 자동으로 재사용하지 않습니다.</p>
+        <label>인식 방식 <select id="route-scan-type"><option value="1">LiDAR · cfg / Rack</option><option value="2">ArUco</option><option value="3">Direct pose</option></select></label>
+        <p>cfg는 상세 JSON의 docking_parameters 안에 "rack.cfg": "cfg/파일명.cfg"로 지정합니다. 충전소 위치·접근 경로는 별도로 입력합니다. ROS1의 scan_type 숫자는 그대로 재사용하지 않습니다.</p>
       </details>
       <label>경로점 / 제어점 · 각 줄에 x, y, yaw(rad)
         <textarea id="route-points" rows="6" placeholder="목적지 계획: 목표점 한 개 이상&#10;지정 경로: 시작점과 종료점 두 개 이상"></textarea></label>
@@ -329,6 +329,15 @@ const Ros2RouteEditor = {
     if (context.maximumSpeed) { get('route-maximum-speed').max = String(context.maximumSpeed); get('route-maximum-speed').placeholder = `로봇 설정 사용 · 상한 ${context.maximumSpeed} m/s`; }
     get('route-docking-enabled').checked = extras.dockingArgs?.length === 3;
     if (extras.dockingArgs?.length === 3) {
+      // Retain imported values for explicit review, rather than silently
+      // converting a legacy scan type into a different ROS2 sensor.
+      const scanType = Number(extras.dockingArgs[2]);
+      if (![1, 2, 3].includes(scanType)) {
+        const option = document.createElement('option');
+        option.value = String(extras.dockingArgs[2]);
+        option.textContent = `이전 값 ${extras.dockingArgs[2]} · ROS2 인식 방식 재선택 필요`;
+        get('route-scan-type').appendChild(option);
+      }
       ['route-is-charge', 'route-dock-direction', 'route-scan-type'].forEach((id, i) => { get(id).value = extras.dockingArgs[i]; });
     }
     get('route-points').value = originalPoints.map(p => `${p.x}, ${p.y}, ${p.yaw || 0}`).join('\n');

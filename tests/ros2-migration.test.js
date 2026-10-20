@@ -24,6 +24,50 @@ function build(extra = {}) {
 }
 
 describe('ROS1 and ROS2 migration contracts', () => {
+  test('native ManualJog is discovered as a separate contract and disabled state is read without a write', async () => {
+    const topics = { ...fixture.topics, '/R_006/manual_jog/available': 'std_msgs/msg/Bool', '/R_006/manual_jog/status': 'std_msgs/msg/String' };
+    const profile = RobotCompatibility._buildProfile({ robotId: 'R_006', rosMode: 'ros2' }, Object.keys(fixture.services), Object.keys(topics), fixture.services, topics);
+    expect(profile.chassis.jog).toMatchObject({ protocol: 'ros2_manual_jog', integrated: true, enabled: null, actionVerified: false });
+    const spy = jest.spyOn(RobotCompatibility, '_rosapi').mockResolvedValue({ value: 'false' });
+    try {
+      await RobotCompatibility._discoverRos2Jog({ robotId: 'R_006', ros: {} }, profile, 1000);
+      expect(profile.chassis.jog).toMatchObject({ enabled: false, integrated: true, actionVerified: false });
+      expect(profile.chassis.jog.reason).toContain('manual_jog.enabled=false');
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.calls[0].slice(1, 4)).toEqual(['/rosapi/get_param', 'rosapi/srv/GetParam', { name: '/R_006/cmd_safety_gate::manual_jog.enabled', default: '' }]);
+    } finally { spy.mockRestore(); }
+  });
+
+  test('a ROS2 enabled flag alone never makes the native Jog transport implemented', async () => {
+    const profile = { chassis: { jog: { protocol: 'ros2_manual_jog', integrated: false, enabled: null, reason: '전용 Action 연동 필요' } } };
+    const spy = jest.spyOn(RobotCompatibility, '_rosapi').mockResolvedValue({ value: 'true' });
+    try {
+      await RobotCompatibility._discoverRos2Jog({ robotId: 'R_006', ros: {} }, profile, 1000);
+      expect(profile.chassis.jog).toMatchObject({ integrated: false, enabled: true, limitsVerified: false, actionVerified: false });
+    } finally { spy.mockRestore(); }
+  });
+  test('enabled native Jog still requires all positive limits and the exact action type', async () => {
+    const keys=['max_translation_m','max_rotation_rad','max_linear_speed_mps','max_angular_speed_radps','max_linear_accel_mps2','max_angular_accel_radps2','max_duration_sec','max_stop_wait_sec','position_tolerance','linear_stop_tolerance_mps','angular_stop_tolerance_radps'];
+    const numbers=[0.1,0.3,0.1,0.2,0.2,0.4,2,1,0.001,0.01,0.01];
+    const profile={chassis:{jog:{protocol:'ros2_manual_jog',integrated:true,actionName:'/R_006/manual_jog/execute'}}};
+    let actionType='spx_task_msgs/action/ManualJog';
+    const spy=jest.spyOn(RobotCompatibility,'_rosapi').mockImplementation(async(_ros,name,_type,args)=>{
+      if(name==='/rosapi/get_param')return{value:'true'};
+      if(name==='/rosapi/actions')return{actions:['/R_006/manual_jog/execute'],types:[actionType]};
+      expect(args.names).toEqual(keys.map(key=>'manual_jog.'+key));
+      return{values:numbers.map(double_value=>({type:3,double_value}))};
+    });
+    try{
+      await RobotCompatibility._discoverRos2Jog({robotId:'R_006',ros:{}},profile,1000);
+      expect(profile.chassis.jog).toMatchObject({enabled:true,limitsVerified:true,actionVerified:true,reason:''});
+      actionType='other_msgs/action/Move';
+      await RobotCompatibility._discoverRos2Jog({robotId:'R_006',ros:{}},profile,1000);
+      expect(profile.chassis.jog.actionVerified).toBe(false);
+      numbers[0]=0;
+      await RobotCompatibility._discoverRos2Jog({robotId:'R_006',ros:{}},profile,1000);
+      expect(profile.chassis.jog.limitsVerified).toBe(false);
+    }finally{spy.mockRestore();}
+  });
   test('uses the actual R006 snapshot for map saving, charging and node-local telemetry', () => {
     const profile = build();
     expect(profile.map.saveType).toBe('spx_mapping_msgs/srv/SaveMap');
@@ -137,5 +181,16 @@ describe('ROS1 and ROS2 migration contracts', () => {
     const action = value.createRos2Action('/R_006/follow_path', 'nav2_msgs/action/FollowPath', {});
     await expect(action.result).rejects.toThrow('server rejected');
     expect(slot.ros2Actions.size).toBe(0);
+  });
+
+  test('native Jog cancellation preserves the robot stop proof and ROS status', async () => {
+    const ros = new EventEmitter();
+    const { value, context } = manager({ ros, robotId:'R_006', ros2SessionId:'ros2' });
+    const topics=[];
+    context.ROSLIB.Topic=class {constructor(options){this.name=options.name;topics.push(this);}subscribe(callback){this.callback=callback;}unsubscribe(){}};
+    value._callRosServicePromise=jest.fn(async()=>({accepted:true}));
+    const action=value.createRos2Action('/R_006/manual_jog/execute','spx_task_msgs/action/ManualJog',{},0,null,{terminalResult:true,timeoutMs:1000});
+    topics.find(t=>t.name.endsWith('/result')).callback({status:5,result:{success:false,stop_confirmed:true,error_code:'JOG_CANCELLED'}});
+    await expect(action.result).resolves.toEqual({status:5,result:{success:false,stop_confirmed:true,error_code:'JOG_CANCELLED'}});
   });
 });

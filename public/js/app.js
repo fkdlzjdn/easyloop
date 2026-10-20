@@ -160,7 +160,25 @@ const App = {
 
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
-    toast.textContent = message;
+    const text = String(message);
+    const content = document.createElement('span');
+    content.className = 'toast-message';
+    content.textContent = text;
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'toast-copy';
+    const copyIcons = {
+      copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V4a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v11a1 1 0 0 0 1 1h4"/>',
+      done: '<path d="m5 12 4 4L19 6"/>',
+      error: '<path d="m12 3 10 18H2L12 3Z"/><path d="M12 9v4m0 3v.01"/>'
+    };
+    const setCopyIcon = state => {
+      copy.innerHTML = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${copyIcons[state]}</svg>`;
+    };
+    setCopyIcon('copy');
+    copy.title = '알림 전체 문구 복사';
+    copy.setAttribute('aria-label', '알림 전체 문구 복사');
+    toast.append(content, copy);
     this.toastContainer.appendChild(toast);
 
     requestAnimationFrame(() => {
@@ -174,7 +192,57 @@ const App = {
       }, 200);
     };
 
-    setTimeout(remove, duration);
+    let dismissTimer;
+    const pause = () => clearTimeout(dismissTimer);
+    const resume = () => {
+      pause();
+      if (!copy.disabled && !toast.matches(':hover') && !toast.contains(document.activeElement)) dismissTimer = setTimeout(remove, duration);
+    };
+    toast.addEventListener('pointerenter', pause);
+    toast.addEventListener('pointerleave', resume);
+    toast.addEventListener('focusin', pause);
+    toast.addEventListener('focusout', resume);
+    copy.addEventListener('click', async () => {
+      pause();
+      copy.disabled = true;
+      try {
+        await this._copyToastText(text);
+        setCopyIcon('done');
+        copy.title = '알림 전체 문구를 복사했습니다';
+        copy.setAttribute('aria-label', '알림 복사 완료');
+      } catch (_error) {
+        setCopyIcon('error');
+        copy.title = '문구를 직접 선택해 복사해 주세요';
+        copy.setAttribute('aria-label', '알림 복사 실패');
+      } finally {
+        copy.disabled = false;
+        resume();
+      }
+    });
+    resume();
+  },
+
+  async _copyToastText(text) {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+    } catch (_error) { /* IP-based HTTP or clipboard permission: use the selection fallback. */ }
+    const previousFocus = document.activeElement;
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.readOnly = true;
+    textarea.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0;';
+    document.body.appendChild(textarea);
+    try {
+      textarea.focus({ preventScroll: true });
+      textarea.select();
+      if (!document.execCommand('copy')) throw new Error('Clipboard copy failed');
+    } finally {
+      textarea.remove();
+      if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+    }
   },
 
   // Compatibility entry point retained for older feature modules.
@@ -445,6 +513,9 @@ const App = {
     };
 
     const showOverlay = () => {
+      this._userRole = 'user';
+      if (typeof MissionScheduler !== 'undefined') MissionScheduler.disarm('로그아웃/인증 종료');
+      if (typeof OpMode !== 'undefined') OpMode.forceManual('로그아웃/인증 종료');
       mainContent.style.display = 'none';
       overlay.style.display = 'flex';
       input.value = '';
@@ -681,6 +752,7 @@ const App = {
       if (targetId === 'tab-monitoring') {
         this.renderMonitoringCards();
       }
+      if (targetId === 'tab-ros' && typeof RosInfo !== 'undefined' && RosManager.ros) RosInfo.refreshAll();
 
       document.getElementById('main-layout')?.classList.toggle('fleet-control-mode', fleetControlActive);
       if (typeof FleetControl !== 'undefined') {
@@ -1109,8 +1181,8 @@ const App = {
     const savedSubnet = localStorage.getItem('easyloopScanSubnet');
     if (savedSubnet) subnetInput.value = savedSubnet;
     const savedMode = localStorage.getItem('easyloopScanMode');
-    if (modeInput && ['rosbridge', 'ssh'].includes(savedMode)) modeInput.value = savedMode;
-    const initialMode = modeInput?.value === 'ssh' ? 'ssh' : 'rosbridge';
+    if (modeInput) modeInput.value = savedMode === 'ssh' ? 'ssh' : localStorage.getItem('easyloopDiscoveryVersion') === '2' && savedMode === 'rosbridge' ? 'rosbridge' : 'auto';
+    const initialMode = modeInput?.value || 'auto';
     let savedPort = Number(localStorage.getItem(
       initialMode === 'ssh' ? 'easyloopSshScanPort' : 'easyloopRosbridgeScanPort'
     ));
@@ -1121,7 +1193,7 @@ const App = {
     if (portInput && savedPort >= 1 && savedPort <= 65535) portInput.value = String(savedPort);
     modeInput?.addEventListener('change', () => {
       if (!portInput) return;
-      const mode = modeInput.value === 'ssh' ? 'ssh' : 'rosbridge';
+      const mode = modeInput.value || 'auto';
       const modePort = Number(localStorage.getItem(
         mode === 'ssh' ? 'easyloopSshScanPort' : 'easyloopRosbridgeScanPort'
       ));
@@ -1147,14 +1219,46 @@ const App = {
   startLoginRobotDiscovery() {
     if (this._loginAutoScanStarted) return;
     this._loginAutoScanStarted = true;
+    const connectingPrevious = this._connectRememberedRobot();
     this.runNetworkScan({
       autoConnect: true,
       background: true,
-      replaceCurrent: true,
-      discoveryMode: 'rosbridge',
+      replaceCurrent: !connectingPrevious,
+      discoveryMode: 'auto',
       scanPort: Number(localStorage.getItem('easyloopRosbridgeScanPort')) || 9090,
       persistPreferences: false
     });
+  },
+
+  _connectRememberedRobot() {
+    if (typeof TestMode !== 'undefined' && (TestMode.enabled || TestMode._starting)) return false;
+    const previous = this._getRememberedActiveRobot();
+    if (!previous?.robotId || !this.formatRobotId(previous.robotId)
+        || !/^(?:\d{1,3}\.){3}\d{1,3}$/.test(previous.ip)
+        || previous.ip.split('.').some(part => Number(part) > 255)) return false;
+    let index = this.robotSlots.findIndex(slot => slot.robotId === previous.robotId && slot.ip === previous.ip && !slot.virtualTestRobot);
+    if (index < 0) {
+      this.addRobotSlot(previous.ip, previous.robotId, previous.sshPort || 22,
+        previous.tunnelMode === true, '', this._robotNumberFromIdentity(previous), null,
+        { activateFirst: false, silent: true, deferRender: true, skipSave: true,
+          source: 'remembered', rosMode: previous.rosMode || 'auto', wsPort: previous.wsPort || 9090 });
+      index = this.robotSlots.length - 1;
+      this.robotSlots[index].sshUser = previous.sshUser || 'syscon';
+    }
+    this.activeSlotIndex = index;
+    const slot = this.robotSlots[index];
+    this._rememberActiveRobot(slot);
+    this.updateActiveRobotStatus();
+    this.updateActionTargetLabel();
+    this.renderActiveRobotSelector();
+    this.renderRobotManagerList();
+    this.renderMonitoringCards();
+    // Remembered identity is only a connection hint. The normal fresh
+    // namespace/domain/graph validation still decides every control capability.
+    if (!slot.connected && !slot.ros) Promise.resolve(this.connectSlot(index)).catch(error => {
+      console.warn('[Startup] previous robot connection failed:', error.message || error);
+    });
+    return true;
   },
 
   async runNetworkScan({
@@ -1178,9 +1282,9 @@ const App = {
     const enteredSubnet = subnetInput.value.trim() || '192.168.20';
     // 마지막 점은 사용자가 IP를 이어 입력하던 습관에서 자주 남으므로 자동 보정한다.
     const subnet = enteredSubnet.replace(/\.$/, '');
-    const discoveryMode = requestedMode === 'ssh' || requestedMode === 'rosbridge'
+    const discoveryMode = ['auto', 'ssh', 'rosbridge'].includes(requestedMode)
       ? requestedMode
-      : (modeInput?.value === 'ssh' ? 'ssh' : 'rosbridge');
+      : (['auto', 'ssh', 'rosbridge'].includes(modeInput?.value) ? modeInput.value : 'auto');
     const scanPort = Number(requestedPort ?? portInput?.value)
       || (discoveryMode === 'ssh' ? 22 : 9090);
     if (!Number.isInteger(scanPort) || scanPort < 1 || scanPort > 65535) {
@@ -1198,16 +1302,21 @@ const App = {
     }
     statusEl.textContent = discoveryMode === 'ssh'
       ? `${subnet}.0/24:${scanPort} 포트포워딩 검색 중...`
-      : `${subnet}.0/24:${scanPort} ROS Bridge 검색 중...`;
+      : discoveryMode === 'auto' ? `${subnet}.0/24 ROS1·ROS2 검색 중 · SSH 22/2222 및 저장 포트 확인...`
+        : `${subnet}.0/24:${scanPort} ROS Bridge 검색 중...`;
     statusEl.className = 'rm-scan-status scanning';
     resultsEl.style.display = 'block';
-    listEl.innerHTML = '<span class="rm-scan-empty">ROS Bridge와 RID를 확인하고 있습니다...</span>';
+    listEl.innerHTML = '<span class="rm-scan-empty">연결 가능한 장비의 RID와 ROS 설정을 확인하고 있습니다...</span>';
 
     try {
+      this._discoveryHints = discoveryMode === 'auto' ? this._discoveryRobotHints(subnet) : [];
       const response = await fetchWithTimeout(
         `/api/robots/scan-subnet?base=${encodeURIComponent(subnet)}&port=${scanPort}&mode=${discoveryMode}`,
-        {},
-        30000
+        discoveryMode === 'auto' ? {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ base: subnet, port: scanPort, mode: 'auto', robots: this._discoveryHints })
+        } : {},
+        discoveryMode === 'auto' ? 300000 : 30000
       );
       const data = await response.json();
       if (!response.ok) throw new Error(data.message || 'Scan failed');
@@ -1215,6 +1324,7 @@ const App = {
       localStorage.setItem('easyloopScanSubnet', data.subnet || subnet);
       if (persistPreferences) {
         localStorage.setItem('easyloopScanMode', discoveryMode);
+        localStorage.setItem('easyloopDiscoveryVersion', '2');
         localStorage.setItem('easyloopScanPort', String(scanPort));
         localStorage.setItem(
           discoveryMode === 'ssh' ? 'easyloopSshScanPort' : 'easyloopRosbridgeScanPort',
@@ -1239,10 +1349,10 @@ const App = {
 
       let stageSummary = { addedCount: 0, connectCount: 0 };
       const identifiedCount = this.discoveredRobots.filter(host => host.robotId).length;
-      const shouldReplace = replaceCurrent && discoveryMode === 'rosbridge';
+      const shouldReplace = replaceCurrent && discoveryMode !== 'ssh';
       // SSH 포트가 열렸다는 사실만으로 터널까지 자동 연결하지 않는다.
       // 포트포워딩 검색 결과는 사용자가 항목을 선택했을 때 연결한다.
-      const shouldAutoConnect = autoConnect && discoveryMode === 'rosbridge';
+      const shouldAutoConnect = autoConnect && discoveryMode !== 'ssh';
       if (shouldAutoConnect && (shouldReplace || identifiedCount > 0)) {
         stageSummary = this.stageDiscoveredRobots(this.discoveredRobots, {
           silent: background,
@@ -1253,7 +1363,7 @@ const App = {
       listEl.innerHTML = '';
 
       if (this.discoveredRobots.length === 0) {
-        listEl.innerHTML = '<span class="rm-scan-empty">발견된 로봇이 없습니다. 대역과 ROS Bridge 상태를 확인하세요.</span>';
+        listEl.innerHTML = '<span class="rm-scan-empty">발견된 로봇이 없습니다. 대역과 ROS Bridge / SSH 접속 설정을 확인하세요.</span>';
         statusEl.textContent = `0대 발견 · ${data.fixedTarget} 확인 완료`;
       } else {
         this.discoveredRobots.forEach(host => {
@@ -1276,6 +1386,20 @@ const App = {
           ip.textContent = host.portForwarded ? `${host.ip}:${host.sshPort || host.port}` : host.ip;
           item.appendChild(ip);
 
+          if (host.discoveryMode === 'auto') {
+            const metadata = document.createElement('span');
+            metadata.className = 'scan-ros-mode';
+            metadata.textContent = [host.rosMajor ? `ROS${host.rosMajor}` : host.installedDistros?.length ? 'ROS 설치 확인' : 'ROS 미확인', host.distro, host.model].filter(Boolean).join(' · ');
+            item.appendChild(metadata);
+            if (host.identityConflict || host.authenticationRequired || !host.robotId) {
+              const warning = document.createElement('span'); warning.className = 'scan-discovery-warning';
+              warning.textContent = host.identityConflict ? 'RID 충돌' : host.authenticationRequired ? 'SSH 인증 / 조회 필요' : 'RID 미확인';
+              item.appendChild(warning);
+            } else if (host.observationOnly) {
+              const observing = document.createElement('span'); observing.className = 'scan-discovery-note';
+              observing.textContent = '설정 확인 · bringup 미확인'; item.appendChild(observing);
+            }
+          }
           if (host.portForwarded) {
             const forwarded = document.createElement('span');
             forwarded.className = 'scan-forwarded';
@@ -1296,14 +1420,14 @@ const App = {
             ? (existingSlot?.connected ? '터널 연결됨' : '터널 연결')
             : host.robotId
               ? (existingIndex === this.activeSlotIndex ? '수신 중' : '활성화')
-            : (host.portForwarded ? '수동 정보 입력' : 'RID 필요');
+            : (host.portForwarded || host.discoveryMode === 'auto' ? '수동 정보 입력' : 'RID 필요');
           item.appendChild(action);
 
-          item.disabled = !host.robotId && !host.portForwarded;
+          item.disabled = Boolean(host.identityConflict) || (!host.robotId && !host.portForwarded && host.discoveryMode !== 'auto');
           item.addEventListener('click', async () => {
             listEl.querySelectorAll('.rm-scan-item').forEach(row => row.classList.remove('selected'));
             item.classList.add('selected');
-            if (!host.robotId && host.portForwarded) {
+            if (!host.robotId && (host.portForwarded || host.discoveryMode === 'auto')) {
               this.prefillForwardedRobot(host);
               return;
             }
@@ -1312,9 +1436,11 @@ const App = {
           listEl.appendChild(item);
         });
 
-        const identified = this.discoveredRobots.filter(host => host.robotId).length;
+        const identified = this.discoveredRobots.filter(host => host.robotId && !host.authenticationRequired).length;
+        const ros2Count = this.discoveredRobots.filter(host => host.rosMajor === 2).length;
+        const pendingCount = this.discoveredRobots.filter(host => !host.robotId || host.authenticationRequired).length;
         statusEl.textContent = shouldAutoConnect
-          ? `${this.discoveredRobots.length}대 발견 · ${identified}대 식별 · ${stageSummary.activeRobotId || '활성 로봇'} 데이터 수신`
+          ? `${this.discoveredRobots.length}개 장비 발견 · ${identified}대 식별 · ROS2 ${ros2Count}대${pendingCount ? ` · 확인 필요 ${pendingCount}개` : ''}${stageSummary.activeRobotId ? ` · ${stageSummary.activeRobotId} 연결 시도` : ''}`
           : `${this.discoveredRobots.length}대 발견 · RID ${identified}대 확인`;
       }
       statusEl.className = 'rm-scan-status complete';
@@ -1324,7 +1450,7 @@ const App = {
           this.toast('검색된 로봇이 없습니다', 'warning');
         } else {
           this.toast(
-            `${this.discoveredRobots.length}대 검색 · ${stageSummary.activeRobotId || '로봇'} 데이터 수신 시작 · 나머지 대기`,
+            `${this.discoveredRobots.length}개 장비 검색 · ROS2 ${this.discoveredRobots.filter(host => host.rosMajor === 2).length}대 · ${stageSummary.activeRobotId ? stageSummary.activeRobotId + ' 연결 시도' : '식별 / 인증 결과를 확인하세요'}`,
             'success'
           );
         }
@@ -1345,6 +1471,41 @@ const App = {
     }
   },
 
+  _discoveryRobotHints(subnet) {
+    const hints = new Map();
+    const username = document.getElementById('ssh-user')?.value?.trim() || 'syscon';
+    for (const config of this._readManualRobotConfigs()) {
+      const sshPort = Number(config.sshPort) || 22;
+      if (config.ip.startsWith(subnet + '.') || config.ip === '192.168.3.5') hints.set(`${config.ip}:${sshPort}`, {
+        ip: config.ip, robotId: config.robotId, sshPort, sshUser: config.sshUser || username,
+        sshPassword: _deobfuscatePassword(config.sshPassword || '')
+      });
+    }
+    for (const slot of this.robotSlots.filter(slot => !slot.virtualTestRobot)) {
+      if (!slot.ip || (!slot.ip.startsWith(subnet + '.') && slot.ip !== '192.168.3.5')) continue;
+      const sshPort = Number(slot.sshPort) || 22, key = `${slot.ip}:${sshPort}`;
+      hints.set(key, { ...hints.get(key), ip: slot.ip, robotId: slot.robotId, sshPort,
+        sshUser: slot.sshUser || hints.get(key)?.sshUser || username,
+        sshPassword: slot.sshPassword || hints.get(key)?.sshPassword || '' });
+    }
+    return [...hints.values()].slice(0, 256);
+  },
+
+  _applyDiscoveredMetadata(slot, host) {
+    if (!slot || host.discoveryMode !== 'auto') return;
+    if (host.rosMajor && !slot.connected && !slot.ros) slot.rosMode = `ros${host.rosMajor}`;
+    slot.discoveryModel = host.model || null;
+    slot.discoveryDistro = host.distro || '';
+    slot.discoveryObservationOnly = Boolean(host.observationOnly);
+    if (!slot.connected && !slot.ros && host.discoverySource === 'ssh') {
+      slot.sshPort = Number(host.sshPort) || slot.sshPort || 22;
+      const hint = (this._discoveryHints || this._discoveryRobotHints(host.ip.split('.').slice(0, 3).join('.')))
+        .find(item => item.ip === host.ip && item.sshPort === slot.sshPort);
+      slot.sshUser = hint?.sshUser || slot.sshUser || 'syscon';
+      slot.sshPassword ||= hint?.sshPassword || '';
+    }
+  },
+
   prefillForwardedRobot(host) {
     const ipInput = document.getElementById('rm-new-ip');
     const idInput = document.getElementById('rm-new-id');
@@ -1352,15 +1513,18 @@ const App = {
     const tunnelModeInput = document.getElementById('rm-new-tunnel-mode');
     if (ipInput) ipInput.value = host?.ip || '';
     if (sshPortInput) sshPortInput.value = String(host?.sshPort || host?.port || 22);
-    if (tunnelModeInput) tunnelModeInput.checked = true;
+    if (tunnelModeInput) tunnelModeInput.checked = Boolean(host?.portForwarded);
+    const rosModeInput = document.getElementById('rm-new-ros-mode');
+    if (rosModeInput) rosModeInput.value = host?.rosMode || 'auto';
     idInput?.focus();
-    this.toast('포트포워딩 장비를 찾았습니다. 로봇 번호(RID)를 입력한 뒤 수동 추가하세요.', 'info');
+    this.toast(host?.portForwarded ? '포트포워딩 장비를 찾았습니다. 로봇 번호(RID)를 입력한 뒤 수동 추가하세요.' : 'SSH 장비를 찾았습니다. 실제 RID와 접속 정보를 확인한 뒤 수동 추가하세요.', 'info');
   },
 
   _findDiscoveredSlotIndex(host) {
     if (!host?.ip) return -1;
     if (!host.portForwarded) {
-      return this.robotSlots.findIndex(slot => slot.ip === host.ip);
+      return this.robotSlots.findIndex(slot => slot.ip === host.ip
+        && (host.discoverySource !== 'ssh' || Number(slot.sshPort || 22) === Number(host.sshPort || 22)));
     }
 
     const forwardedPort = Number(host.sshPort || host.port || 22);
@@ -1397,7 +1561,7 @@ const App = {
     }
 
     const identifiedHosts = hosts
-      .filter(host => host && host.ip && host.robotId)
+      .filter(host => host && host.ip && host.robotId && !host.identityConflict && !host.authenticationRequired)
       .slice()
       .sort((a, b) => {
         const aNumber = this._robotNumberFromIdentity(a);
@@ -1422,12 +1586,14 @@ const App = {
           activateFirst: false,
           deferRender: true,
           silent: true,
-          wsPort: Number(host.wsPort) || 9090
+          wsPort: Number(host.wsPort) || 9090,
+          rosMode: host.rosMode || 'auto'
           }
         );
         slotIndex = this._findDiscoveredSlotIndex(host);
         addedCount += 1;
       }
+      this._applyDiscoveredMetadata(this.robotSlots[slotIndex], host);
     });
 
     const startupIndex = this._chooseStartupActiveSlot();
@@ -1447,7 +1613,7 @@ const App = {
     }
     connectionOrder.forEach(slotIndex => {
       const slot = this.robotSlots[slotIndex];
-      if (slot && !slot.connected && !slot.ros) {
+      if (slot && !slot.connected && !slot.ros && !slot.connectingPromise) {
         this.connectSlot(slotIndex);
         connectCount += 1;
       }
@@ -1485,7 +1651,12 @@ const App = {
     try {
       const saved = JSON.parse(localStorage.getItem(this.LAST_ACTIVE_ROBOT_KEY) || 'null');
       if (!saved || (!saved.robotId && !saved.ip)) return null;
-      return { robotId: saved.robotId || '', ip: saved.ip || '' };
+      const port = (value, fallback) => Number.isInteger(Number(value)) && Number(value) >= 1 && Number(value) <= 65535 ? Number(value) : fallback;
+      return { robotId: saved.robotId || '', ip: saved.ip || '',
+        sshPort: port(saved.sshPort, 22), wsPort: port(saved.wsPort, 9090),
+        rosMode: ['auto', 'ros1', 'ros2'].includes(saved.rosMode) ? saved.rosMode : 'auto',
+        tunnelMode: saved.tunnelMode === true,
+        sshUser: typeof saved.sshUser === 'string' ? saved.sshUser.slice(0, 64) : 'syscon' };
     } catch (e) {
       return null;
     }
@@ -1495,7 +1666,12 @@ const App = {
     if (!slot?.robotId || !slot?.ip) return;
     _safeSetItem(this.LAST_ACTIVE_ROBOT_KEY, JSON.stringify({
       robotId: slot.robotId,
-      ip: slot.ip
+      ip: slot.ip,
+      sshPort: Number(slot.sshPort) || 22,
+      wsPort: Number(slot.wsPort) || 9090,
+      rosMode: slot.rosMode || 'auto',
+      tunnelMode: Boolean(slot.tunnelMode),
+      sshUser: slot.sshUser || 'syscon'
     }));
   },
 
@@ -1568,7 +1744,7 @@ const App = {
         '',
         robotNumber,
         null,
-        { wsPort: Number(host.wsPort) || 9090 }
+        { wsPort: Number(host.wsPort) || 9090, rosMode: host.rosMode || 'auto' }
       );
       slotIndex = this._findDiscoveredSlotIndex(host);
     }
@@ -1578,6 +1754,7 @@ const App = {
       return;
     }
 
+    this._applyDiscoveredMetadata(this.robotSlots[slotIndex], host);
     if (slotIndex !== this.activeSlotIndex) {
       this.switchActiveRobot(slotIndex);
     } else {
@@ -1818,7 +1995,22 @@ const App = {
     this.toast(`Robot removed: ${removed.robotId}`, 'info');
   },
 
-  async connectSlot(index) {
+  connectSlot(index) {
+    const slot = this.robotSlots[index];
+    if (!slot) return Promise.resolve();
+    const signature = JSON.stringify([slot.ip, slot.robotId, slot.sshPort, slot.wsPort, slot.rosMode, slot.tunnelMode, slot.rosDomainId]);
+    if (slot.connectingPromise && slot.connectingGeneration === slot.connectionGeneration
+        && slot.connectingSignature === signature) return slot.connectingPromise;
+    const pending = this._connectSlot(index).finally(() => {
+      if (slot.connectingPromise === pending) slot.connectingPromise = null;
+    });
+    slot.connectingPromise = pending;
+    slot.connectingGeneration = slot.connectionGeneration;
+    slot.connectingSignature = signature;
+    return pending;
+  },
+
+  async _connectSlot(index) {
     if (index < 0 || index >= this.robotSlots.length) return;
     const slot = this.robotSlots[index];
     const connectionGeneration = slot.connectionGeneration = (slot.connectionGeneration || 0) + 1;
@@ -2039,7 +2231,8 @@ const App = {
     RosManager.switchActiveSlot(index, previousIndex);
 
     // Refresh ROS Info for the new active robot
-    if (this.robotSlots[index].connected && typeof RosInfo !== 'undefined') {
+    if (this.robotSlots[index].connected && typeof RosInfo !== 'undefined'
+        && document.getElementById('tab-ros')?.classList.contains('active')) {
       RosInfo.refreshAll();
     }
 
@@ -2100,18 +2293,20 @@ const App = {
   refreshActiveBmsDisplay() {
     if (this.activeSlotIndex < 0) return;
     const slot = this.robotSlots[this.activeSlotIndex];
-    const bms = slot.bms;
+    const bms = slot?.bms || {};
+    const socValid = bms.socValid === true && typeof bms.soc === 'number'
+      && Number.isFinite(bms.soc) && bms.soc >= 0 && bms.soc <= 100;
     const gaugeFill = document.getElementById('bms-gauge-fill');
     const gaugeText = document.getElementById('bms-gauge-text');
     const gauge = gaugeFill ? gaugeFill.parentElement : null;
 
     if (gaugeFill && gaugeText) {
-      const percentage = Math.min(100, Math.max(0, bms.soc));
+      const percentage = socValid ? bms.soc : 0;
       gaugeFill.style.width = `${percentage}%`;
-      gaugeText.textContent = `${percentage.toFixed(0)}%`;
+      gaugeText.textContent = socValid ? `${percentage.toFixed(0)}%` : '--%';
       gaugeFill.classList.remove('low', 'medium');
-      if (percentage <= 20) gaugeFill.classList.add('low');
-      else if (percentage <= 50) gaugeFill.classList.add('medium');
+      if (socValid && percentage <= 20) gaugeFill.classList.add('low');
+      else if (socValid && percentage <= 50) gaugeFill.classList.add('medium');
     }
     if (gauge) {
       if (bms.charging) gauge.classList.add('charging');
@@ -3818,7 +4013,7 @@ const OpMode = {
       btn.textContent = this._mode.toUpperCase();
       btn.className = 'btn btn-small btn-op-mode ' + this._mode;
       const description = this._mode === 'auto'
-        ? 'AUTO: Scheduler의 예약 Task를 자동 실행합니다. 클릭하면 MANUAL로 전환합니다.'
+        ? 'AUTO: Scheduler의 예약 Task를 자동 실행합니다. 예약 시작 버튼을 별도로 눌러야 합니다. 클릭하면 MANUAL로 전환합니다.'
         : 'MANUAL: Task를 직접 실행합니다. 클릭하면 비밀번호 확인 후 AUTO로 전환합니다.';
       btn.title = description;
       btn.setAttribute('aria-label', `운영 모드 ${this._mode.toUpperCase()}: ${description}`);
@@ -3828,549 +4023,5 @@ const OpMode = {
       badge.textContent = this._mode.toUpperCase();
       badge.className = 'scheduler-mode-badge ' + this._mode;
     }
-  }
-};
-
-// ============ D1: Mission Scheduler ============
-const MissionScheduler = {
-  STORAGE_KEY: 'missionScheduler',
-  LOG_KEY: 'missionSchedulerLog',
-  BATTERY_LATCH_VERSION: 2,
-  _timers: {},
-  _batteryCheckTimer: null,
-  _editingMissionId: null,
-
-  init() {
-    this.render();
-    this.renderLog();
-    this._restoreTimers();
-    this._startBatteryWatch();
-
-    const addBtn = document.getElementById('btn-scheduler-add');
-    const clearBtn = document.getElementById('btn-scheduler-clear');
-    const clearLogBtn = document.getElementById('btn-scheduler-clear-log');
-
-    if (addBtn) addBtn.addEventListener('click', () => this.openAddMissionModal());
-    if (clearBtn) clearBtn.addEventListener('click', () => { this.clearAll(); });
-    if (clearLogBtn) clearLogBtn.addEventListener('click', () => { this.clearLog(); });
-
-    document.getElementById('btn-scheduler-cancel')?.addEventListener('click', () => this.closeAddMissionModal());
-    document.getElementById('btn-scheduler-save')?.addEventListener('click', () => this.saveMissionFromModal());
-    document.getElementById('scheduler-execution-mode')?.addEventListener('change', () => this.updateAddMissionForm());
-    document.getElementById('scheduler-queue-name')?.addEventListener('change', () => this.updateSelectedTaskHelp());
-    document.getElementById('scheduler-battery-condition')?.addEventListener('change', () => this.updateAddMissionForm());
-    document.getElementById('scheduler-add-modal')?.addEventListener('click', event => {
-      if (event.target.id === 'scheduler-add-modal') this.closeAddMissionModal();
-    });
-    document.addEventListener('keydown', event => {
-      const modal = document.getElementById('scheduler-add-modal');
-      if (event.key === 'Escape' && modal?.classList.contains('show')) {
-        event.preventDefault();
-        this.closeAddMissionModal();
-      }
-    });
-
-    // Re-render when mode changes
-    OpMode.onChange(() => {
-      this.render();
-      if (OpMode.isAuto) {
-        this._restoreTimers();
-      } else {
-        this._stopAllTimers();
-      }
-    });
-  },
-
-  getAll() {
-    try { return JSON.parse(localStorage.getItem(this.STORAGE_KEY)) || []; }
-    catch (e) { return []; }
-  },
-
-  saveAll(list) {
-    _safeSetItem(this.STORAGE_KEY, JSON.stringify(list));
-  },
-
-  getLogs() {
-    try { return JSON.parse(localStorage.getItem(this.LOG_KEY)) || []; }
-    catch (e) { return []; }
-  },
-
-  saveLogs(logs) {
-    _safeSetItem(this.LOG_KEY, JSON.stringify(logs));
-  },
-
-  addLog(msg) {
-    const logs = this.getLogs();
-    logs.unshift({ msg, at: Date.now() });
-    if (logs.length > 100) logs.length = 100;
-    this.saveLogs(logs);
-    this.renderLog();
-  },
-
-  openAddMissionModal(missionId = null) {
-    const modal = document.getElementById('scheduler-add-modal');
-    const queueSelect = document.getElementById('scheduler-queue-name');
-    const empty = document.getElementById('scheduler-queue-empty');
-    if (!modal || !queueSelect) return;
-    const editing = missionId === null
-      ? null
-      : this.getAll().find(mission => mission.id === missionId);
-    this._editingMissionId = editing?.id ?? null;
-
-    const saved = typeof ActionSender !== 'undefined' && ActionSender.getSavedQueues
-      ? ActionSender.getSavedQueues()
-      : {};
-    const names = Object.keys(saved)
-      .filter(name => saved[name]?.queue?.length)
-      .sort((a, b) => a.localeCompare(b));
-    queueSelect.innerHTML = '<option value="">저장된 Task를 선택하세요</option>';
-    names.forEach(name => {
-      const option = document.createElement('option');
-      option.value = name;
-      option.textContent = `${name} (${saved[name].queue.length} Actions)`;
-      option.title = saved[name].queue
-        .map(action => action.name || action.actionType || 'Action')
-        .join(' → ');
-      queueSelect.appendChild(option);
-    });
-    if (empty) empty.hidden = names.length > 0;
-    this.updateSelectedTaskHelp();
-
-    const nameInput = document.getElementById('scheduler-mission-name');
-    if (nameInput) nameInput.value = editing?.name || `Mission_${this.getAll().length + 1}`;
-    const mode = document.getElementById('scheduler-execution-mode');
-    if (mode) mode.value = editing?.mode || 'battery';
-    const condition = document.getElementById('scheduler-battery-condition');
-    if (condition) condition.value = editing?.batteryCondition === 'above' ? 'above' : 'below';
-    const threshold = document.getElementById('scheduler-battery-threshold');
-    if (threshold) threshold.value = String(editing?.batteryThreshold ?? 20);
-    const interval = document.getElementById('scheduler-interval-sec');
-    if (interval) interval.value = String(editing?.intervalSec || 300);
-    const cron = document.getElementById('scheduler-cron-time');
-    if (cron) cron.value = editing?.cronTime || '09:00';
-    if (editing) {
-      const option = Array.from(queueSelect.options).find(item => item.value === editing.queueName);
-      if (option) queueSelect.value = editing.queueName;
-    }
-    const title = document.getElementById('scheduler-add-title');
-    if (title) title.textContent = editing ? 'Scheduler 미션 수정' : 'Scheduler 미션 추가';
-    const saveButton = document.getElementById('btn-scheduler-save');
-    if (saveButton) saveButton.textContent = editing ? '변경 저장' : '미션 저장';
-    this.updateAddMissionForm();
-    modal.classList.add('show');
-    nameInput?.focus();
-  },
-
-  closeAddMissionModal() {
-    document.getElementById('scheduler-add-modal')?.classList.remove('show');
-    this._editingMissionId = null;
-  },
-
-  updateSelectedTaskHelp() {
-    const select = document.getElementById('scheduler-queue-name');
-    const help = document.getElementById('scheduler-task-help');
-    if (!select || !help) return;
-    const saved = typeof ActionSender !== 'undefined' && ActionSender.getSavedQueues
-      ? ActionSender.getSavedQueues()
-      : {};
-    const entry = saved[select.value];
-    if (!entry?.queue?.length) {
-      help.textContent = '선택한 Task에 저장된 Action 순서대로 실행됩니다.';
-      return;
-    }
-    const names = entry.queue.map(action => action.name || action.actionType || 'Action');
-    help.textContent = `실행 순서: ${names.join(' → ')}${entry.loopFlag !== undefined ? ` · 반복 ${entry.loopFlag === 0 ? '무한' : `${entry.loopFlag}회`}` : ''}`;
-  },
-
-  updateAddMissionForm() {
-    const mode = document.getElementById('scheduler-execution-mode')?.value;
-    const batteryRow = document.getElementById('scheduler-battery-row');
-    const intervalRow = document.getElementById('scheduler-interval-row');
-    const cronRow = document.getElementById('scheduler-cron-row');
-    if (batteryRow) batteryRow.hidden = mode === 'once' || mode === 'cron' || mode === 'interval';
-    if (intervalRow) intervalRow.hidden = mode !== 'interval';
-    if (cronRow) cronRow.hidden = mode !== 'cron';
-    const help = document.getElementById('scheduler-condition-help');
-    if (help) {
-      const condition = document.getElementById('scheduler-battery-condition')?.value === 'above' ? '이상' : '이하';
-      help.textContent = mode === 'battery'
-        ? `배터리가 임계값 ${condition}가 되면 저장 Task를 실행합니다.`
-        : mode === 'interval'
-          ? '설정한 간격마다 저장 Task를 반복 실행합니다.'
-          : mode === 'cron'
-            ? '매일 선택한 시각에 저장 Task를 한 번 실행합니다.'
-            : '저장 후 미션의 실행 버튼으로 한 번 실행할 수 있습니다.';
-    }
-  },
-
-  saveMissionFromModal() {
-    const name = document.getElementById('scheduler-mission-name')?.value.trim();
-    const queueName = document.getElementById('scheduler-queue-name')?.value;
-    const mode = document.getElementById('scheduler-execution-mode')?.value;
-    const intervalSec = Math.max(1, parseInt(document.getElementById('scheduler-interval-sec')?.value, 10) || 300);
-    const cronTime = document.getElementById('scheduler-cron-time')?.value || '09:00';
-    const batteryRaw = parseInt(document.getElementById('scheduler-battery-threshold')?.value, 10);
-    const batteryThreshold = Number.isFinite(batteryRaw) ? batteryRaw : 0;
-    const batteryCondition = document.getElementById('scheduler-battery-condition')?.value === 'above'
-      ? 'above'
-      : 'below';
-
-    if (!name) {
-      App.toast('미션 이름을 입력하세요.', 'error');
-      return false;
-    }
-    if (!queueName) {
-      App.toast('실행할 저장 Task를 선택하세요.', 'error');
-      return false;
-    }
-    if (mode === 'battery' && (batteryThreshold < 0 || batteryThreshold > 100)) {
-      App.toast('배터리 임계값을 0~100%로 입력하세요.', 'error');
-      return false;
-    }
-
-    const missions = this.getAll();
-    const editingIndex = this._editingMissionId === null
-      ? -1
-      : missions.findIndex(mission => mission.id === this._editingMissionId);
-    const previous = editingIndex >= 0 ? missions[editingIndex] : null;
-    const mission = {
-      ...(previous || {}),
-      id: previous?.id || Date.now(),
-      name,
-      queueName,
-      mode,
-      intervalSec: mode === 'interval' ? intervalSec : 0,
-      cronTime: mode === 'cron' ? cronTime : '',
-      batteryThreshold: mode === 'battery' ? batteryThreshold : 0,
-      batteryCondition,
-      batteryArmed: true,
-      batteryLatchVersion: this.BATTERY_LATCH_VERSION,
-      batteryWaitLogged: false,
-      enabled: previous?.enabled ?? true,
-      lastRun: previous?.lastRun ?? null
-    };
-    if (editingIndex >= 0) missions[editingIndex] = mission;
-    else missions.push(mission);
-    this.saveAll(missions);
-    if (previous) this._stopTimer(previous.id);
-    this.closeAddMissionModal();
-    this.render();
-    if (OpMode.isAuto) this._restoreTimers();
-    App.toast(previous ? `Mission "${name}"을 수정했습니다.` : `Mission added: ${name}`, 'success');
-    return true;
-  },
-
-  removeMission(id) {
-    this._stopTimer(id);
-    const missions = this.getAll().filter(m => m.id !== id);
-    this.saveAll(missions);
-    this.render();
-  },
-
-  editMission(id) {
-    this.openAddMissionModal(id);
-  },
-
-  toggleMission(id) {
-    const missions = this.getAll();
-    const m = missions.find(x => x.id === id);
-    if (!m) return;
-    m.enabled = !m.enabled;
-    this.saveAll(missions);
-    if (m.enabled) {
-      this._startTimer(m);
-    } else {
-      this._stopTimer(id);
-    }
-    this.render();
-  },
-
-  _getCurrentBatterySoc() {
-    const slot = App.robotSlots && App.robotSlots[App.activeSlotIndex];
-    if (slot && slot.bms && Number.isFinite(Number(slot.bms.soc)) && Number(slot.bms.soc) >= 0) {
-      return Number(slot.bms.soc);
-    }
-    return -1;
-  },
-
-  _checkBatteryCondition(m) {
-    if (m.mode !== 'battery' && (!m.batteryThreshold || m.batteryThreshold <= 0)) return true;
-    const soc = this._getCurrentBatterySoc();
-    if (soc < 0) return true; // no data, skip check
-    if (m.batteryCondition === 'above' || m.batteryCondition === 'gte') return soc >= m.batteryThreshold;
-    if (m.batteryCondition === 'below' || m.batteryCondition === 'lte' || !m.batteryCondition) {
-      return soc <= m.batteryThreshold;
-    }
-    return true;
-  },
-
-  _batteryConditionMatches(m, soc) {
-    if (m.batteryCondition === 'above' || m.batteryCondition === 'gte') {
-      return soc >= Number(m.batteryThreshold);
-    }
-    return soc <= Number(m.batteryThreshold);
-  },
-
-  _isActiveRobotCharging() {
-    const slot = App.robotSlots && App.robotSlots[App.activeSlotIndex];
-    return slot?.bms?.charging === true;
-  },
-
-  _isDockingOutEntry(entry) {
-    const first = entry?.queue?.[0];
-    if (!first) return false;
-    const rawType = first.actionType ?? first.action_type;
-    const typeText = String(rawType ?? '').toLowerCase();
-    return typeText === '0x10'
-      || Number(rawType) === 16
-      || /docking\s*out|도킹\s*아웃/i.test(String(first.name || first.action_id || ''));
-  },
-
-  _isDockingOutMission(mission) {
-    if (typeof ActionSender === 'undefined' || !ActionSender.getSavedQueues) return false;
-    const saved = ActionSender.getSavedQueues();
-    return this._isDockingOutEntry(saved[mission?.queueName]);
-  },
-
-  executeMission(id, isManualRun) {
-    const missions = this.getAll();
-    const m = missions.find(x => x.id === id);
-    if (!m) return;
-
-    // Auto mode check - block auto-scheduled execution in Manual mode
-    if (!isManualRun && !OpMode.isAuto) {
-      this.addLog(`[${m.name}] Blocked - Auto execution disabled in MANUAL mode`);
-      return;
-    }
-
-    // Battery condition check
-    if (!this._checkBatteryCondition(m)) {
-      const soc = this._getCurrentBatterySoc();
-      const operator = m.batteryCondition === 'above' || m.batteryCondition === 'gte' ? '>=' : '<=';
-      this.addLog(`[${m.name}] Skipped - Battery ${soc.toFixed(0)}% (condition: ${operator} ${m.batteryThreshold}%)`);
-      return;
-    }
-
-    // Load saved queue
-    let saved = {};
-    try {
-      saved = JSON.parse(localStorage.getItem(ActionSender.QUEUE_STORAGE_KEY)) || {};
-    } catch (e) { saved = {}; }
-
-    const entry = saved[m.queueName];
-    if (!entry || !entry.queue || entry.queue.length === 0) {
-      this.addLog(`[${m.name}] Queue "${m.queueName}" not found or empty`);
-      App.toast(`Mission failed: Queue "${m.queueName}" not found`, 'error');
-      return;
-    }
-
-    // DockingOut is the one safe exception: it releases the robot from the
-    // charger. Other movement/work Tasks remain blocked while charging.
-    const allowDockingOut = this._isDockingOutEntry(entry);
-    if (this._isActiveRobotCharging() && !allowDockingOut) {
-      this.addLog(`[${m.name}] Blocked - 로봇이 충전 중이라 Task를 전송하지 않았습니다.`);
-      App.toast('충전 중에는 Scheduler Task를 실행하지 않습니다.', 'warning');
-      return;
-    }
-
-    // Use the saved-task sender so target slot, loop count and mission IDs are
-    // preserved. The previous generic sendAction path could report success in
-    // the scheduler before the actual saved queue request failed.
-    const slotIndex = App.activeSlotIndex;
-    Promise.resolve(ActionSender.sendSavedQueueToSlot(
-      m.queueName,
-      slotIndex,
-      entry.loopFlag ?? 1,
-      m.queueName
-    )).then(sent => {
-      m.lastRun = Date.now();
-      this.saveAll(missions);
-      this.addLog(`[${m.name}] Executed with queue "${m.queueName}" (${sent.actionCount || entry.queue.length} actions)`);
-      this.render();
-    }).catch(error => {
-      const reason = error?.message || String(error);
-      this.addLog(`[${m.name}] Failed - ${reason}`);
-      App.toast(`Scheduler 실행 실패: ${reason}`, 'error');
-      this.render();
-    });
-  },
-
-  _startTimer(m) {
-    this._stopTimer(m.id);
-    if (m.mode === 'interval' && m.intervalSec > 0) {
-      this._timers[m.id] = setInterval(() => {
-        this.executeMission(m.id, false);
-      }, m.intervalSec * 1000);
-    } else if (m.mode === 'cron' && m.cronTime) {
-      this._timers[m.id] = setInterval(() => {
-        const now = new Date();
-        const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-        if (hhmm === m.cronTime && (!m.lastRun || Date.now() - m.lastRun > 60000)) {
-          this.executeMission(m.id, false);
-        }
-      }, 30000);
-    }
-    // battery mode has no own timer - uses _batteryCheckTimer
-  },
-
-  _stopTimer(id) {
-    if (this._timers[id]) {
-      clearInterval(this._timers[id]);
-      delete this._timers[id];
-    }
-  },
-
-  _stopAllTimers() {
-    Object.keys(this._timers).forEach(id => this._stopTimer(id));
-  },
-
-  _restoreTimers() {
-    if (!OpMode.isAuto) return;
-    const missions = this.getAll();
-    missions.forEach(m => {
-      if (m.enabled && (m.mode === 'interval' || m.mode === 'cron')) {
-        this._startTimer(m);
-      }
-    });
-  },
-
-  // Battery watch: check every 10s for battery-triggered missions
-  _startBatteryWatch() {
-    if (this._batteryCheckTimer) clearInterval(this._batteryCheckTimer);
-    this._batteryCheckTimer = setInterval(() => {
-      if (!OpMode.isAuto) return;
-      const soc = this._getCurrentBatterySoc();
-      if (soc < 0) return;
-
-      const missions = this.getAll();
-      missions.forEach(m => {
-        if (!m.enabled) return;
-        if (m.mode !== 'battery') return;
-        if (m.batteryThreshold === undefined || m.batteryThreshold === null
-            || m.batteryThreshold < 0 || m.batteryThreshold > 100) return;
-        if (m.batteryLatchVersion !== this.BATTERY_LATCH_VERSION) {
-          m.batteryArmed = true;
-          m.batteryLatchVersion = this.BATTERY_LATCH_VERSION;
-          this.saveAll(missions);
-        }
-        const matches = this._batteryConditionMatches(m, soc);
-        // A battery mission is edge-triggered: it is re-armed only after the
-        // SOC leaves the configured condition. Missing legacy state defaults
-        // to armed so existing missions still work on first evaluation.
-        if (!matches) {
-          if (m.batteryArmed === false) {
-            m.batteryArmed = true;
-            this.saveAll(missions);
-          }
-          if (m.batteryWaitLogged) {
-            m.batteryWaitLogged = false;
-            this.saveAll(missions);
-            this.render();
-          }
-          return;
-        }
-        if (m.batteryArmed === false) return;
-        // Never send a movement/docking task while the robot reports active
-        // charging. Keep it armed so it can be evaluated after charge ends.
-        const dockingOutAllowed = this._isDockingOutMission(m);
-        if (this._isActiveRobotCharging() && !dockingOutAllowed) {
-          if (!m.batteryWaitLogged) {
-            m.batteryWaitLogged = true;
-            this.saveAll(missions);
-            this.addLog(`[${m.name}] Waiting - 충전 중이라 조건 충족 Task 전송을 대기합니다.`);
-            this.render();
-          }
-          return;
-        }
-        if (m.batteryWaitLogged) {
-          m.batteryWaitLogged = false;
-          this.saveAll(missions);
-        }
-        m.batteryArmed = false;
-        this.saveAll(missions);
-        // The edge-trigger latch already prevents repeats while the condition
-        // remains true. Do not add a time cooldown here: after the opposite
-        // threshold mission runs, a new crossing must be handled immediately.
-        this.executeMission(m.id, false);
-      });
-    }, 10000);
-  },
-
-  clearAll() {
-    Object.keys(this._timers).forEach(id => this._stopTimer(id));
-    this.saveAll([]);
-    this.render();
-  },
-
-  clearLog() {
-    this.saveLogs([]);
-    this.renderLog();
-  },
-
-  render() {
-    const listEl = document.getElementById('scheduler-list');
-    if (!listEl) return;
-    const missions = this.getAll();
-
-    // Update mode badge
-    const badge = document.getElementById('scheduler-mode-badge');
-    if (badge) {
-      badge.textContent = OpMode.mode.toUpperCase();
-      badge.className = 'scheduler-mode-badge ' + OpMode.mode;
-    }
-
-    if (missions.length === 0) {
-      listEl.innerHTML = '<span class="scheduler-empty">No missions registered.</span>';
-      return;
-    }
-
-    listEl.innerHTML = missions.map(m => {
-      const lastStr = m.lastRun ? new Date(m.lastRun).toLocaleTimeString() : '--';
-      const modeStr = m.mode === 'interval' ? `${m.intervalSec}s repeat` :
-                      m.mode === 'cron' ? `Daily ${m.cronTime}` :
-                      m.mode === 'battery'
-                        ? `Battery ${(m.batteryCondition === 'above' || m.batteryCondition === 'gte') ? '≥' : '≤'}${m.batteryThreshold}%`
-                        : 'Once';
-      const statusCls = m.enabled ? 'sched-enabled' : 'sched-disabled';
-      const blockedCls = (!OpMode.isAuto && m.mode !== 'once') ? ' sched-blocked' : '';
-
-      // Battery trigger info
-      let triggerHtml = '';
-      if (m.batteryThreshold && m.batteryThreshold > 0) {
-        const operator = m.batteryCondition === 'above' || m.batteryCondition === 'gte' ? '&ge;' : '&le;';
-        const waitText = m.batteryWaitLogged ? ' · 충전 중 대기' : '';
-        triggerHtml = `<div class="sched-trigger"><span class="trigger-tag">BAT ${operator} ${m.batteryThreshold}%${waitText}</span></div>`;
-      }
-
-      return `<div class="scheduler-item ${statusCls}${blockedCls}">
-        <div class="sched-info">
-          <span class="sched-name">${m.name}</span>
-          <span class="sched-detail">Queue: ${m.queueName} | ${modeStr} | Last: ${lastStr}</span>
-          ${triggerHtml}
-        </div>
-        <div class="sched-actions">
-          <button class="btn btn-small" onclick="MissionScheduler.executeMission(${m.id}, true)" title="Manual run">Run</button>
-          <button class="btn btn-small" onclick="MissionScheduler.editMission(${m.id})" title="미션 수정">수정</button>
-          <button class="btn btn-small" onclick="MissionScheduler.toggleMission(${m.id})">${m.enabled ? 'Disable' : 'Enable'}</button>
-          <button class="btn btn-small btn-danger" onclick="MissionScheduler.removeMission(${m.id})">Del</button>
-        </div>
-      </div>`;
-    }).join('');
-  },
-
-  renderLog() {
-    const logEl = document.getElementById('scheduler-log');
-    if (!logEl) return;
-    const logs = this.getLogs();
-
-    if (logs.length === 0) {
-      logEl.innerHTML = '<span class="scheduler-log-empty">No logs</span>';
-      return;
-    }
-
-    logEl.innerHTML = logs.slice(0, 20).map(l => {
-      const time = new Date(l.at).toLocaleTimeString();
-      return `<div class="scheduler-log-item"><span class="sched-log-time">${time}</span> ${l.msg}</div>`;
-    }).join('');
   }
 };

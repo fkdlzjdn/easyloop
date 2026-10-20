@@ -163,6 +163,15 @@ class BridgeTest(unittest.TestCase):
         self.node.create_publisher.return_value.publish.assert_called_once()
         self.assertFalse(self.events)
 
+    def test_topic_and_service_lists_include_aligned_types_without_repeated_graph_queries(self):
+        self.node.get_topic_names_and_types.return_value = [('/R_006/odom', ['nav_msgs/msg/Odometry']),
+                                                            ('/ambiguous', ['pkg/msg/A', 'pkg/msg/B'])]
+        self.node.get_service_names_and_types.return_value = [('/R_006/actions/info', ['spx_task_msgs/srv/GetActionsInfo'])]
+        self.bridge.handle(self.request('/rosapi/topics'))
+        self.assertEqual(self.events[-1]['values']['types'], ['nav_msgs/msg/Odometry', ''])
+        self.bridge.handle(self.request('/rosapi/services'))
+        self.assertEqual(self.events[-1]['values']['types'], ['spx_task_msgs/srv/GetActionsInfo'])
+
     def test_ros2_parameter_get_is_explicit_and_typed(self):
         request = self.request('/rosapi/get_param', {'name': '/R_006/amcl::max_particles'})
         def call(name, args, success, _fail):

@@ -34,6 +34,7 @@ describe('robot configuration routes without network access', () => {
   let config;
   let saveRobotsConfig;
   let syncWindowsNetwork;
+  let scanSubnetFn;
 
   beforeEach(done => {
     config = {
@@ -41,13 +42,15 @@ describe('robot configuration routes without network access', () => {
     };
     saveRobotsConfig = jest.fn(nextConfig => { config = nextConfig; });
     syncWindowsNetwork = jest.fn();
+    scanSubnetFn = jest.fn(async options => ({ discoveryMode: options.discoveryMode, hosts: [{ robotId: 'R_006', rosMode: 'ros2' }] }));
 
     const app = express();
     app.use(express.json());
     app.use('/api/robots', createRobotsRouter({
       loadRobotsConfig: () => config,
       saveRobotsConfig,
-      syncWindowsNetwork
+      syncWindowsNetwork,
+      scanSubnetFn
     }));
     server = app.listen(0, '127.0.0.1', () => {
       port = server.address().port;
@@ -123,4 +126,31 @@ describe('robot configuration routes without network access', () => {
     expect(response.body).toHaveProperty('templates');
     expect(saveRobotsConfig).not.toHaveBeenCalled();
   });
+  test('GET and POST default to automatic ROS1/ROS2 scanning and preserve per-IP SSH settings', async () => {
+    const get = await requestJson(port, 'GET', '/api/robots/scan-subnet?start=51&end=56');
+    expect(get.status).toBe(200); expect(get.body.discoveryMode).toBe('auto');
+    const post = await requestJson(port, 'POST', '/api/robots/scan-subnet', {
+      base: '192.168.20', start: 51, end: 75, robots: [{ ip: '192.168.20.75', robotId: 'R_025', sshPort: 2222, sshUser: 'operator', sshPassword: 'private-per-host' }]
+    });
+    expect(post.status).toBe(200); expect(scanSubnetFn.mock.calls[1][0].knownRobots).toContainEqual(expect.objectContaining({ ip: '192.168.20.75', sshPort: 2222, sshPassword: 'private-per-host' }));
+    expect(JSON.stringify(post.body)).not.toContain('private-per-host');
+    expect(saveRobotsConfig).not.toHaveBeenCalled();
+  });
+  test('rejects malformed ranges, modes and unrelated credentials before scanning', async () => {
+    for (const body of [
+      { mode: 'unsupported' }, { port: 0 }, { start: 0 }, { end: 255 }, { start: 1.5 },
+      { robots: [{ ip: '10.1.1.2', sshPassword: 'must-not-use' }] },
+      { robots: [{ ip: '192.168.20.56', sshPort: 0 }] }
+    ]) expect((await requestJson(port, 'POST', '/api/robots/scan-subnet', body)).status).toBe(400);
+    expect(scanSubnetFn).not.toHaveBeenCalled(); expect(syncWindowsNetwork).not.toHaveBeenCalled();
+  });
+  test('does not run duplicate concurrent subnet scans', async () => {
+    let release;
+    scanSubnetFn.mockImplementation(() => new Promise(resolve => { release = resolve; }));
+    const first = requestJson(port, 'POST', '/api/robots/scan-subnet', {});
+    while (!release) await new Promise(resolve => setImmediate(resolve));
+    expect((await requestJson(port, 'POST', '/api/robots/scan-subnet', {})).status).toBe(409);
+    release({ hosts: [] }); expect((await first).status).toBe(200); expect(scanSubnetFn).toHaveBeenCalledTimes(1);
+  });
+
 });

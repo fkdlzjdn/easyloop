@@ -33,7 +33,7 @@ describe('user-requested feature regression gate', () => {
     expect(app).toContain("document.body.classList.toggle('role-engineer', isEngineer)");
     expect(html).toContain('MANUAL: Task를 직접 실행합니다.');
     expect(app).toContain("['operation-mode', () => OpMode.init()]");
-    expect(app).toContain("if (!isManualRun && !OpMode.isAuto)");
+    expect(read('public/js/mission-scheduler.js')).toContain("if (!isManualRun && !OpMode.isAuto)");
     expect(app).toContain("Scheduler의 예약 Task를 자동 실행합니다.");
   });
 

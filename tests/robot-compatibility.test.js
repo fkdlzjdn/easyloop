@@ -2,6 +2,39 @@ const fs = require('fs');
 const path = require('path');
 const RobotCompatibility = require('../public/js/robot-compatibility');
 
+describe('startup read-only telemetry and graph type reuse', () => {
+  test('typed topics start monitoring while services are pending, without granting control', async () => {
+    const slot = { robotId:'R_006', rosMode:'ros2', ros:{}, ros2SessionId:'qa-session' };
+    let finishServices;
+    const services = new Promise(resolve => { finishServices = resolve; });
+    const spy = jest.spyOn(RobotCompatibility, '_rosapi').mockImplementation(async (_ros,name) => {
+      if (name === '/rosapi/services') return services;
+      if (name === '/rosapi/topics') return { topics:['/R_006/battery_state','/R_006/robot_state'], types:['sensor_msgs/msg/BatteryState','spx_robot_msgs/msg/RobotState'] };
+      throw new Error('metadata absent in read-only fixture');
+    });
+    try {
+      const pending = RobotCompatibility.discover(slot);
+      await new Promise(resolve => setImmediate(resolve));
+      expect(RobotCompatibility.monitoring(slot).topics.bms.name).toBe('/R_006/battery_state');
+      expect(RobotCompatibility.get(slot).controlReady).toBe(false);
+      expect(slot.compatibilityProfile).toBeUndefined();
+      finishServices({services:[]}); await pending;
+      expect(spy.mock.calls.some(call => call[1] === '/rosapi/topic_type')).toBe(false);
+    } finally { spy.mockRestore(); }
+  });
+
+  test('early monitoring rejects old connections and malformed type arrays', () => {
+    const ros = {}, slot = {robotId:'R_006',rosMode:'ros2',ros,compatibilityDiscoveryToken:1};
+    const graph = {topics:['/R_006/battery_state'],types:['sensor_msgs/msg/BatteryState']};
+    RobotCompatibility._publishMonitoring(slot,graph,{},1); expect(slot.monitoringProfile).toBeUndefined();
+    RobotCompatibility._publishMonitoring(slot,graph,ros,0); expect(slot.monitoringProfile).toBeUndefined();
+    RobotCompatibility._publishMonitoring(slot,{...graph,types:[]},ros,1); expect(slot.monitoringProfile).toBeUndefined();
+    RobotCompatibility._publishMonitoring(slot,graph,ros,1); expect(RobotCompatibility.monitoring(slot).verified).toBe(true);
+    slot.ros = {}; expect(RobotCompatibility.monitoring(slot).verified).toBe(false);
+    RobotCompatibility.clear(slot); expect(slot.monitoringProfile).toBeUndefined();
+  });
+});
+
 function endpointMaps(entries) {
   return Object.fromEntries(entries);
 }

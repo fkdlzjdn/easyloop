@@ -38,6 +38,7 @@ describe('robot discovery helpers', () => {
 
     const result = await scanSubnet({
       baseIp: '192.168.20',
+      discoveryMode: 'rosbridge',
       start: 50,
       end: 52,
       checkHostFn,
@@ -107,6 +108,7 @@ describe('robot discovery helpers', () => {
     const checkHostFn = jest.fn(async () => false);
     const result = await scanSubnet({
       baseIp: '192.168.3',
+      discoveryMode: 'rosbridge',
       start: 4,
       end: 6,
       checkHostFn,

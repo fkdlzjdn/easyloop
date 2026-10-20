@@ -7,8 +7,14 @@ let reconnectTimer = null;
 let active = false;
 let lastHeartbeatAt = 0;
 let advertised = false;
+let transportReady = false;
 let connectionGeneration = 0;
 let velocity = { lx: 0, ly: 0, az: 0 };
+let deceleration = null;
+
+function clockNow() {
+  return typeof performance !== 'undefined' ? performance.now() : Date.now();
+}
 
 function postStatus(state, detail = '') {
   self.postMessage({ type: 'status', state, detail });
@@ -42,12 +48,13 @@ function advertise() {
 }
 
 function publish(value = velocity) {
-  if (!config) return false;
+  if (!config || !transportReady) return false;
   advertise();
   return send({
     op: 'publish',
     id: config.publishId,
     topic: config.topic,
+    type: config.messageType,
     msg: {
       linear: { x: value.lx, y: value.ly, z: 0 },
       angular: { x: 0, y: 0, z: value.az }
@@ -58,6 +65,7 @@ function publish(value = velocity) {
 function stopMotion(reason = '') {
   const wasActive = active;
   active = false;
+  deceleration = null;
   velocity = zeroVelocity();
   publish(velocity);
   if (wasActive && reason) postStatus('lease-expired', reason);
@@ -68,6 +76,18 @@ function tick() {
   if (Date.now() - lastHeartbeatAt > config.leaseMs) {
     stopMotion(`heartbeat > ${config.leaseMs}ms`);
     return;
+  }
+  if (deceleration) {
+    const t = Math.min(1, Math.max(0, (clockNow() - deceleration.startedAt) / deceleration.durationMs));
+    const scale = 1 - t * t * (3 - 2 * t);
+    velocity = { lx: deceleration.velocity.lx * scale, ly: deceleration.velocity.ly * scale,
+      az: deceleration.velocity.az * scale };
+    if (t >= 1) {
+      const id = deceleration.id;
+      stopMotion();
+      self.postMessage({ type: 'deceleration-complete', id });
+      return;
+    }
   }
   publish(velocity);
 }
@@ -85,6 +105,7 @@ function closeSocket() {
     send({ op: 'unadvertise', id: config?.advertiseId, topic: config?.topic });
   }
   advertised = false;
+  transportReady = false;
   try { socket.close(); } catch (error) { /* stale socket */ }
   socket = null;
 }
@@ -104,13 +125,41 @@ function connect() {
   socket.onopen = () => {
     if (generation !== connectionGeneration) return;
     advertised = false;
-    advertise();
-    postStatus('ready');
+    // An SSH WebSocket opens before rclpy/DDS discovery has finished. Do not
+    // queue movement behind startup and replay it after the key was released.
+    transportReady = !config.waitForRos2Ready;
+    if (transportReady) { advertise(); postStatus('ready'); }
+    else postStatus('bridge-starting');
+  };
+  socket.onmessage = event => {
+    if (generation !== connectionGeneration || !config) return;
+    let message;
+    try { message = JSON.parse(event.data); } catch (_error) { return; }
+    if (message.op !== 'status') return;
+    if (message.level === 'error') {
+      active = false;
+      deceleration = null;
+      velocity = zeroVelocity();
+      transportReady = false;
+      postStatus('error', String(message.msg || 'ROS bridge rejected Jog'));
+    } else if (config.waitForRos2Ready && message.msg === 'ROS2 bridge ready') {
+      active = false;
+      deceleration = null;
+      velocity = zeroVelocity();
+      lastHeartbeatAt = 0;
+      transportReady = true;
+      advertise();
+      postStatus('ready');
+    }
   };
   socket.onclose = () => {
     if (generation !== connectionGeneration || !config) return;
     socket = null;
     advertised = false;
+    transportReady = false;
+    active = false;
+    deceleration = null;
+    velocity = zeroVelocity();
     postStatus('disconnected');
     reconnectTimer = setTimeout(connect, config.reconnectMs);
   };
@@ -125,6 +174,7 @@ self.onmessage = event => {
       url: String(message.url || ''),
       topic: String(message.topic || ''),
       messageType: String(message.messageType || 'geometry_msgs/Twist'),
+      waitForRos2Ready: Boolean(message.waitForRos2Ready),
       intervalMs: Math.max(20, Number(message.intervalMs) || 50),
       leaseMs: Math.max(200, Number(message.leaseMs) || 350),
       reconnectMs: Math.max(250, Number(message.reconnectMs) || 750),
@@ -136,12 +186,14 @@ self.onmessage = event => {
     return;
   }
   if (message.type === 'command') {
+    if (!transportReady) return;
     const nextVelocity = normalizeVelocity(message.velocity);
     const nextActive = Boolean(message.active);
     const changed = nextVelocity.lx !== velocity.lx
       || nextVelocity.ly !== velocity.ly
       || nextVelocity.az !== velocity.az;
     const wasActive = active;
+    deceleration = null;
     velocity = nextVelocity;
     active = nextActive;
     lastHeartbeatAt = Date.now();
@@ -149,6 +201,19 @@ self.onmessage = event => {
     // the 20Hz cadence; publish immediately only on start/direction/stop change.
     if (!active) publish(zeroVelocity());
     else if (!wasActive || changed) publish(velocity);
+    return;
+  }
+  if (message.type === 'decelerate') {
+    if (!transportReady || deceleration) return;
+    const durationMs = Math.min(500, Math.max(0, Number(message.durationMs) || 0));
+    if (!durationMs) {
+      stopMotion();
+      self.postMessage({ type: 'deceleration-complete', id: message.id });
+      return;
+    }
+    deceleration = { id: message.id, startedAt: clockNow(), durationMs, velocity: normalizeVelocity(message.velocity) };
+    active = true;
+    lastHeartbeatAt = Date.now();
     return;
   }
   if (message.type === 'heartbeat') {

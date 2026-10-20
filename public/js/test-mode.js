@@ -2000,7 +2000,7 @@ const TestMode = {
           voltage,
           current,
           soc: robot.soc,
-          charging: robot.charging
+          charging: robot.charging, receivedAt: Date.now(), socValid: true
         };
       }
     });
@@ -3027,6 +3027,9 @@ const TestMode = {
         ?? (state === 'complete' ? Math.max(0, running.queue.length - 1) : running.actionIndex);
       running.loopCount = robot.completedLoops;
       ActionSender._syncActiveRunningTask?.();
+    }
+    if (['complete', 'cancel', 'error'].includes(state) && typeof CustomEvent === 'function' && typeof document.dispatchEvent === 'function') {
+      document.dispatchEvent(new CustomEvent('easyloop:task-result', { detail: { robotId: robot.robotId, task_id: taskId || robot.task?.taskId || running?.taskId || '', success: state === 'complete', message: state === 'cancel' ? 'cancelled' : message } }));
     }
     if (robot.slotIndex !== App.activeSlotIndex) return;
     const detail = taskId || (robot.task

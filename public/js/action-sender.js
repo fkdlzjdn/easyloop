@@ -516,9 +516,9 @@ const ActionSender = {
     return added;
   },
 
-  _taskQueueCompatibility(entry) {
-    if (!this._isRos2TaskForm()) return { editable: true, runnable: !(entry.queue || []).some(item => Number(item.actionType ?? item.action_type) === 48), reason: (entry.queue || []).some(item => Number(item.actionType ?? item.action_type) === 48) ? 'ROS2 Task · ROS2 로봇 선택 필요' : '' };
-    const { catalog } = this._taskActionCatalog();
+  _taskQueueCompatibility(entry, slot = App.robotSlots?.[this.getTargetSlot()]) {
+    if (!this._isRos2TaskForm(slot)) return { editable: true, runnable: !(entry.queue || []).some(item => Number(item.actionType ?? item.action_type) === 48), reason: (entry.queue || []).some(item => Number(item.actionType ?? item.action_type) === 48) ? 'ROS2 Task · ROS2 로봇 선택 필요' : '' };
+    const { catalog } = this._taskActionCatalog(slot);
     if (!catalog?.verified) return { editable: true, runnable: false, reason: 'ROS2 등록 Action 확인 중' };
     if (catalog.executionAvailable === false) return { editable: true, runnable: false, reason: 'Task 실행 backend 미사용' };
     if (Number(entry.loopFlag ?? 1) !== 1 || this._queueToMissionGroups(entry.queue || []).length !== 1) return { editable: true, runnable: false, reason: 'ROS2는 Mission 1개 · loop_flag=1 필요' };
@@ -531,7 +531,7 @@ const ActionSender = {
       if (type === 48) {
         try {
           const action = { action_id: item.name || item.action_id || 'route', action_params: JSON.parse(JSON.stringify(item.params || item.action_params || [])) };
-          const { profile } = this._taskActionCatalog();
+          const { profile } = this._taskActionCatalog(slot);
           if (profile?.task?.routeContext?.verified === false) throw new Error('runtime 경로 설정 미검증');
           const speed = action.action_params.find(param => param.param_name === 'maximum_speed_mps');
           if (speed && (!Number.isFinite(Number(speed.value)) || Number(speed.value) <= 0 || (profile?.task?.routeContext?.maximumSpeed && Number(speed.value) > profile.task.routeContext.maximumSpeed))) throw new Error('maximum_speed_mps가 runtime 속도 범위 밖입니다.');
@@ -5635,16 +5635,16 @@ const ActionSender = {
     }
   },
 
-  async sendSavedQueueToSlot(queueName, slotIndex, loopCount = 1, taskId = queueName) {
+  async sendSavedQueueToSlot(queueName, slotIndex, loopCount = 1, taskId = queueName, options = {}) {
     const saved = this.getSavedQueues();
     const entry = saved[queueName];
     if (!entry || !Array.isArray(entry.queue) || entry.queue.length === 0) {
       throw new Error(`저장된 Task "${queueName}"을 찾을 수 없습니다`);
     }
-    return this._sendQueueEntryToSlot(entry, queueName, slotIndex, loopCount, taskId);
+    return this._sendQueueEntryToSlot(entry, queueName, slotIndex, loopCount, taskId, options);
   },
 
-  async _sendQueueEntryToSlot(entry, sourceQueue, slotIndex, loopCount = 1, taskId = sourceQueue) {
+  async _sendQueueEntryToSlot(entry, sourceQueue, slotIndex, loopCount = 1, taskId = sourceQueue, options = {}) {
     if (!entry || !Array.isArray(entry.queue) || entry.queue.length === 0) {
       throw new Error(`실행할 Task "${taskId || sourceQueue}" 정보를 찾을 수 없습니다`);
     }
@@ -5684,6 +5684,7 @@ const ActionSender = {
       missions
     };
     if (typeof TestMode !== 'undefined' && TestMode.enabled && slot.virtualTestRobot) {
+      options.beforeSend?.(slot);
       const result = await TestMode.runTask(slotIndex, request);
       this._registerRunningTask(
         slotIndex,
@@ -5716,9 +5717,11 @@ const ActionSender = {
       };
     }
     const taskInterface = await this._resolveTaskInterface(slot);
-    const result = await this._callTaskService(slot.ros, taskInterface.goalName, taskInterface.goalType, request);
+    options.beforeSend?.(slot);
+    const result = await this._callTaskService(slot.ros, taskInterface.goalName, taskInterface.goalType, request, options.timeoutMs || 0);
     if (result && result.success === false) {
-      throw new Error(result.message || `error_code=${result.error_code}`);
+      const error = new Error(result.message || `error_code=${result.error_code}`);
+      error.code = 'TASK_REJECTED'; throw error;
     }
     this._registerRunningTask(
       slotIndex,
@@ -5942,9 +5945,10 @@ const ActionSender = {
     if (type === 7 && profile?.task?.protocol === 'ros2_spx') exactCounts.delete(7);
     if (type === 0x22) exactCounts.set(type, profile?.actions?.turntable?.argCount || 2);
     if (type === 48) {
-      if (args.length && (args.length !== 3 || ![0, 1].includes(args[0]) || ![1, -1, 2, 3].includes(args[1]) || !Number.isInteger(args[2]) || args[2] < 1 || args[2] > 7)) throw new Error('ROS2 도킹 입력은 [is_charge, direction, scan_type] 3개입니다.');
+      if (args.length && (args.length !== 3 || ![0, 1].includes(args[0]) || ![1, -1, 2, 3].includes(args[1]) || ![1, 2, 3].includes(args[2]))) throw new Error('ROS2 도킹 입력은 [is_charge, direction, scan_type]이며 scan_type은 1=LiDAR cfg, 2=ArUco, 3=Direct pose입니다. 이전 인식 방식은 재선택하세요.');
       const route = Ros2Route.parse(this._actionParamValue(action, 'route_contract_json'));
       if (['docking_transition', 'docking_target_selection', 'docking_parameters', 'docking_approach'].some(key => route[key] !== undefined) && args.length !== 3) throw new Error('도킹 계약에는 [is_charge, direction, scan_type]이 필요합니다.');
+      if (route.docking_parameters?.['rack.cfg'] !== undefined && args[2] !== 1) throw new Error('rack.cfg 도킹은 scan_type=1(LiDAR cfg)을 선택해야 합니다.');
     }
     if (type === 7 && profile?.task?.protocol === 'ros2_spx' && (args.length > 1 || args.some(x => x < 0 || !Number.isInteger(x)))) {
       throw new Error('ROS2 StandBy는 음수가 아닌 정수 대기 시간을 사용합니다.');
@@ -6670,6 +6674,9 @@ const ActionSender = {
   },
 
   _handleTaskResult(robotId, message = {}, variant = 'spx') {
+    if (typeof CustomEvent === 'function' && typeof document.dispatchEvent === 'function') {
+      document.dispatchEvent(new CustomEvent('easyloop:task-result', { detail: { robotId, ...message } }));
+    }
     const success = Boolean(message.success);
     const cancelRequestedAt = this._taskCancelRequests.get(robotId) || 0;
     const cancelRequested = Date.now() - cancelRequestedAt < 60000;
@@ -6678,6 +6685,7 @@ const ActionSender = {
       this._taskCancelRequests.delete(robotId);
       const cancelled = this._ensureRunningTask(robotId, message.task_id || 'Task');
       cancelled.state = 'cancel';
+      cancelled.finishedAt = Date.now();
       this._syncActiveRunningTask();
       this._setTaskExecutionFeedback(
         'idle',
@@ -6688,6 +6696,7 @@ const ActionSender = {
     this._taskCancelRequests.delete(robotId);
     const running = this._ensureRunningTask(robotId, message.task_id || 'Task');
     running.state = success ? 'complete' : 'abort';
+    running.finishedAt = Date.now();
     if (success && running.queue.length > 0) running.actionIndex = running.queue.length - 1;
     this._syncActiveRunningTask();
     const elapsed = Number(

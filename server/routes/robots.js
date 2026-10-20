@@ -1,6 +1,7 @@
 const express = require('express');
 const net = require('net');
 const WebSocket = require('ws');
+const { probeRobotOverSsh } = require('../robot-discovery-ssh');
 const {
   VALIDATION_LIMITS,
   badRequest,
@@ -168,13 +169,15 @@ async function scanSubnet(options = {}) {
   const {
     baseIp = DEFAULT_SCAN_SUBNET,
     port = DEFAULT_ROSBRIDGE_PORT,
-    discoveryMode = 'rosbridge',
+    discoveryMode = 'auto',
     timeout = 650,
     start = 1,
     end = 254,
     checkHostFn = checkHost,
     discoverRobotIdFn = discoverRobotId
   } = options;
+
+  if (discoveryMode === 'auto') return scanAutomatic(options);
 
   const subnet = normalizeSubnetBase(baseIp);
   if (!subnet) throw new Error('Invalid /24 subnet');
@@ -219,6 +222,71 @@ async function scanSubnet(options = {}) {
   };
 }
 
+async function scanAutomatic(options = {}) {
+  const { baseIp = DEFAULT_SCAN_SUBNET, port = DEFAULT_ROSBRIDGE_PORT, timeout = 650,
+    start = 1, end = 254, checkHostFn = checkHost, discoverRobotIdFn = discoverRobotId,
+    probeSshFn = probeRobotOverSsh, knownRobots = [] } = options;
+  const subnet = normalizeSubnetBase(baseIp);
+  if (!subnet) throw new Error('Invalid /24 subnet');
+  const ips = Array.from({ length: end - start + 1 }, (_, i) => `${subnet}.${start + i}`);
+  if (!ips.includes(FIXED_DISCOVERY_IP)) ips.push(FIXED_DISCOVERY_IP);
+  const targets = ips.map(ip => {
+    const known = knownRobots.filter(robot => robot.ip === ip);
+    const ports = [...new Set([...known.map(robot => Number(robot.sshPort) || 22), 22, 2222])];
+    return { ip, known, ports, openPorts: new Set() };
+  });
+  const checks = targets.flatMap(target => [...new Set([port, ...target.ports])].map(candidate => ({ target, candidate })));
+  await mapWithConcurrency(checks, SCAN_CONCURRENCY, async ({ target, candidate }) => {
+    if (await checkHostFn(target.ip, candidate, timeout)) target.openPorts.add(candidate);
+  });
+  const reachable = targets.filter(target => target.openPorts.size);
+  const records = await mapWithConcurrency(reachable, 8, async target => {
+    const wsPromise = target.openPorts.has(port) ? discoverRobotIdFn(target.ip, port) : Promise.resolve(null);
+    const sshPromise = (async () => {
+      let last = null;
+      for (const sshPort of target.ports.filter(candidate => target.openPorts.has(candidate))) {
+        const registered = target.known.find(robot => Number(robot.sshPort || 22) === sshPort);
+        const result = await probeSshFn(target.ip, sshPort, {
+          username: registered?.sshUser || registered?.username || 'syscon',
+          password: registered?.sshPassword || registered?.password || ''
+        });
+        if (result.ok && result.robotEvidence) return result;
+        if (!last || result.needPassword) last = result;
+      }
+      return last;
+    })();
+    const [bridgeId, ssh] = await Promise.all([wsPromise, sshPromise]);
+    const wsOpen = target.openPorts.has(port);
+    const registered = target.known.find(robot => Number(robot.sshPort || 22) === ssh?.sshPort);
+    const registeredId = normalizeConfiguredRobotId(registered?.robotId || registered?.id);
+    if (!wsOpen && ssh?.ok && !ssh.robotEvidence) return null;
+    const conflict = Boolean(ssh?.identityConflict || (bridgeId && ssh?.robotId && bridgeId !== ssh.robotId));
+    const observedId = ssh?.robotId || bridgeId;
+    const robotId = conflict ? null : observedId || registeredId;
+    const major = ssh?.ok ? ssh.rosMajor : null;
+    const sshPort = ssh?.sshPort || target.ports.find(candidate => target.openPorts.has(candidate)) || 22;
+    const authenticated = Boolean(ssh?.ok);
+    return {
+      ip: target.ip, port: wsOpen ? port : sshPort, wsPort: port, sshPort,
+      robotId, rosMajor: major, rosMode: major ? `ros${major}` : 'auto',
+      distro: ssh?.distro || '', model: ssh?.model || null,
+      installedDistros: ssh?.installedDistros || [],
+      bringupRunning: Boolean(ssh?.bringupRunning),
+      fixed: target.ip === FIXED_DISCOVERY_IP, discoveryMode: 'auto',
+      discoverySource: authenticated ? 'ssh' : wsOpen ? 'rosbridge' : 'ssh-candidate',
+      identitySource: conflict ? 'conflict' : observedId ? (ssh?.robotId ? 'ssh' : 'rosbridge') : registeredId ? 'registered' : 'unknown',
+      identityConflict: conflict, rosConflict: Boolean(ssh?.rosConflict),
+      sshStatus: authenticated ? 'authenticated' : ssh?.error || 'unavailable',
+      authenticationRequired: !wsOpen && !authenticated,
+      observationOnly: major === 2 && !ssh?.bringupRunning,
+      evidence: ssh?.evidence || (bridgeId ? 'rosbridge' : 'port'),
+      portForwarded: false
+    };
+  });
+  return { subnet, port, discoveryMode: 'auto', fixedTarget: FIXED_DISCOVERY_IP,
+    scanned: targets.length, hosts: records.filter(Boolean), readOnly: true };
+}
+
 function checkHost(ip, port, timeout) {
   return new Promise((resolve) => {
     const sock = new net.Socket();
@@ -233,9 +301,12 @@ function checkHost(ip, port, timeout) {
 function createRobotsRouter({
   loadRobotsConfig,
   saveRobotsConfig,
-  syncWindowsNetwork
+  syncWindowsNetwork,
+  scanSubnetFn = scanSubnet,
+  checkHostFn = checkHost
 }) {
   const router = express.Router();
+  let scanInProgress = false;
 
   router.get('/', (req, res) => {
     const config = loadRobotsConfig();
@@ -251,7 +322,8 @@ function createRobotsRouter({
     const timeout = 1500;
     const results = await Promise.all(
       config.robots.map(async (robot) => {
-        const reachable = await checkHost(robot.ip, robot.rosBridgePort || 9090, timeout);
+        const ports = [...new Set([robot.rosBridgePort || robot.wsPort || 9090, Number(robot.sshPort) || 22, 22, 2222])];
+        const reachable = (await Promise.all(ports.map(port => checkHostFn(robot.ip, port, timeout)))).some(Boolean);
         return {
           id: normalizeConfiguredRobotId(robot.id) || robot.id,
           name: robot.name,
@@ -316,40 +388,44 @@ function createRobotsRouter({
     res.json({ success: true });
   });
 
-  // Scan subnet for potential robots
-  router.get('/scan-subnet', async (req, res) => {
-    const baseIp = req.query.base || DEFAULT_SCAN_SUBNET;
-    const portToCheck = Number.parseInt(req.query.port, 10) || DEFAULT_ROSBRIDGE_PORT;
-    const discoveryMode = req.query.mode === 'ssh' ? 'ssh' : 'rosbridge';
-    const startRange = Math.max(Number.parseInt(req.query.start, 10) || 1, 1);
-    const endRange = Math.min(Number.parseInt(req.query.end, 10) || 254, 254);
-
-    if (!normalizeSubnetBase(baseIp)) {
-      return badRequest(res, 'base must be an IPv4 /24 subnet (e.g. 192.168.20)');
+  // Auto detection reads metadata over SSH; never starts a ROS runtime or bridge.
+  const handleScan = async (req, res) => {
+    const input = req.method === 'POST' ? req.body : req.query;
+    if (!isPlainObject(input)) return badRequest(res, 'Scan settings required');
+    const baseIp = input.base || DEFAULT_SCAN_SUBNET;
+    const portToCheck = input.port === undefined ? DEFAULT_ROSBRIDGE_PORT : Number(input.port);
+    const discoveryMode = input.mode || 'auto';
+    const startRange = input.start === undefined ? 1 : Number(input.start);
+    const endRange = input.end === undefined ? 254 : Number(input.end);
+    if (!normalizeSubnetBase(baseIp)) return badRequest(res, 'base must be an IPv4 /24 subnet (e.g. 192.168.20)');
+    if (!Number.isInteger(portToCheck) || portToCheck < 1 || portToCheck > 65535) return badRequest(res, 'port out of range');
+    if (!['auto', 'ssh', 'rosbridge'].includes(discoveryMode)) return badRequest(res, 'Invalid discovery mode');
+    if (!Number.isInteger(startRange) || !Number.isInteger(endRange) || startRange < 1 || endRange > 254 || startRange > endRange) return badRequest(res, 'start/end must be ordered integers from 1 to 254');
+    const hints = input.robots || [];
+    if (!Array.isArray(hints) || hints.length > 256) return badRequest(res, 'Invalid robot settings');
+    const subnet = normalizeSubnetBase(baseIp);
+    for (const hint of hints) {
+      if (!isPlainObject(hint) || net.isIP(hint.ip) !== 4
+        || (!hint.ip.startsWith(subnet + '.') && hint.ip !== FIXED_DISCOVERY_IP)
+        || (hint.sshPort !== undefined && (!Number.isInteger(hint.sshPort) || hint.sshPort < 1 || hint.sshPort > 65535))
+        || (hint.sshUser !== undefined && (typeof hint.sshUser !== 'string' || hint.sshUser.length > 64))
+        || (hint.sshPassword !== undefined && (typeof hint.sshPassword !== 'string' || hint.sshPassword.length > 4096))) return badRequest(res, 'Invalid robot SSH settings');
     }
-    if (portToCheck < 1 || portToCheck > 65535) {
-      return badRequest(res, 'port out of range');
-    }
-    if (startRange > endRange) {
-      return badRequest(res, 'start must be less than or equal to end');
-    }
-
+    if (scanInProgress) return res.status(409).json({ success: false, message: '로봇 검색이 진행 중입니다. 완료 후 다시 검색하세요.' });
+    scanInProgress = true;
     try {
-      if (typeof syncWindowsNetwork === 'function') {
-        await syncWindowsNetwork();
-      }
-      const result = await scanSubnet({
-        baseIp,
-        port: portToCheck,
-        discoveryMode,
-        start: startRange,
-        end: endRange
-      });
+      if (typeof syncWindowsNetwork === 'function') await syncWindowsNetwork();
+      // Only server-owned configuration and the caller's explicitly supplied per-IP credentials.
+      const stored = (loadRobotsConfig().robots || []).filter(robot => robot.ip?.startsWith(subnet + '.') || robot.ip === FIXED_DISCOVERY_IP);
+      const knownRobots = [...hints, ...stored.filter(robot => !hints.some(hint => hint.ip === robot.ip && (hint.sshPort || 22) === (robot.sshPort || 22)))];
+      const result = await scanSubnetFn({ baseIp, port: portToCheck, discoveryMode, start: startRange, end: endRange, knownRobots });
       res.json(result);
-    } catch (e) {
-      res.status(500).json({ success: false, message: e.message });
-    }
-  });
+    } catch (error) {
+      res.status(500).json({ success: false, message: error.message });
+    } finally { scanInProgress = false; }
+  };
+  router.get('/scan-subnet', handleScan);
+  router.post('/scan-subnet', handleScan);
 
   // Get robot templates
   router.get('/templates', (req, res) => {
@@ -375,5 +451,6 @@ module.exports = {
   normalizeConfiguredRobotId,
   extractRobotIdFromValues,
   scanSubnet,
+  scanAutomatic,
   createRobotsRouter
 };

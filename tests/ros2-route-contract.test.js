@@ -20,6 +20,27 @@ const profile = () => ({ discovered: true, task: { protocol: 'ros2_spx', verifie
   chassis: { driveModel: { verified: true, actionModelType: 0 } } });
 
 describe('native ROS2 RouteNavigation contracts', () => {
+  test.each([1, 2, 3])('accepts current ROS2 sensor type %p', scanType => {
+    const { value } = sender(profile());
+    const action = Route.action(Route.build(options));
+    expect(() => value._validateActionWireShape({ action_type: 48, action_args: [1, 1, scanType], action_params: action.params }, profile())).not.toThrow();
+  });
+  test.each([0, 4, 5, 6, 7])('rejects old/unsupported ROS2 sensor type %p before sending', scanType => {
+    const { value } = sender(profile());
+    const action = Route.action(Route.build(options));
+    expect(() => value._validateActionWireShape({ action_type: 48, action_args: [1, 1, scanType], action_params: action.params }, profile())).toThrow('scan_type');
+  });
+  test('cfg selection survives native Task conversion and mismatched sensor modes are rejected', async () => {
+    const { value, context } = sender(profile());
+    const route = Route.build(options);
+    route.docking_parameters = { 'rack.cfg': 'cfg/docking_vri_charger.cfg' };
+    const action = Route.action(route);
+    const wire = { action_id: 'charge-review', action_type: 48, action_args: [1, 1, 1], action_params: action.params };
+    const [prepared] = await value._prepareActionsForSlot([wire], context.App.robotSlots[0], { taskId: 'offline-charge-review' });
+    expect(JSON.parse(prepared.action_params[0].value).docking_parameters).toEqual(route.docking_parameters);
+    expect(prepared.action_args).toEqual([1, 1, 1]);
+    expect(() => value._validateActionWireShape({ ...wire, action_args: [1, 1, 2] }, profile())).toThrow('rack.cfg');
+  });
   test('robot-planned goals use CURRENT_ROBOT_POSE and no supplied geometry', () => {
     const route = Route.build({ ...options, pathSource: 'ROBOT_FREESPACE' });
     expect(route.nodes[0].pose).toBeUndefined();

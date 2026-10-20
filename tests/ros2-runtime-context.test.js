@@ -1,5 +1,5 @@
 const { EventEmitter } = require('events');
-const { createRos2Runtime } = require('../server/ros2-runtime');
+const { createRos2Runtime, parseFastProbe } = require('../server/ros2-runtime');
 
 class Socket extends EventEmitter {
   constructor() { super(); this.readyState = 1; }
@@ -20,7 +20,8 @@ function harness(probe = '') {
       stream.write = jest.fn();
       callback(null, stream);
       if (!command.includes('easyloop_ros2_bridge')) process.nextTick(() => {
-        if (command.includes('EASYLOOP_ROS_VERSION')) stream.emit('data', Buffer.from(probe));
+        if (command.includes('EASYLOOP_FAST_RUNTIME=') && probe.startsWith('EASYLOOP_FAST_RUNTIME=')) stream.emit('data', Buffer.from(probe));
+        else if (command.includes('EASYLOOP_ROS_VERSION')) stream.emit('data', Buffer.from(probe));
         else if (command.includes('EASYLOOP_BRIDGE_READY')) stream.emit('data', Buffer.from('EASYLOOP_BRIDGE_READY=1\n'));
         else stream.emit('data', Buffer.from('query result\n'));
         stream.emit('close', 0);
@@ -48,8 +49,37 @@ const snapshot = [
   'EASYLOOP_LOCAL_ROBOT=R_006', 'EASYLOOP_LOCAL_PID=1234'
 ].join('\n');
 const config = { host: '192.168.20.56', robotId: 'R_006', mode: 'ros2' };
+const fastSnapshot = () => 'EASYLOOP_FAST_RUNTIME=' + JSON.stringify({ pid: '1234', robotId: 'R_006', distro: 'jazzy',
+  python: '/usr/bin/python3.12', runtimeEnvironment: { ROS_VERSION: '2', ROS_DISTRO: 'jazzy', ROS_DOMAIN_ID: '6',
+    PATH: '/usr/bin', PYTHONPATH: '/opt/ros/jazzy/lib/python3.12/site-packages',
+    LD_LIBRARY_PATH: '/opt/ros/jazzy/lib', UNRELATED_SECRET: 'must-not-copy',
+    CYCLONEDDS_URI: "file:///tmp/robot config 'quoted'.xml" } });
 
 describe('ROS2 local runtime identity and DDS context', () => {
+  test('the verified process environment avoids repeated setup and never exposes runtime paths or unrelated variables', async () => {
+    const { runtime, invoke, commands } = harness(fastSnapshot());
+    const prepared = await invoke('/prepare', config);
+    expect(prepared).toMatchObject({ success: true, startupMethod: 'bringup-environment', controlEnabled: true });
+    expect(prepared.runtimeEnvironment).toBeUndefined(); expect(prepared.runtimePython).toBeUndefined();
+    expect(commands).toHaveLength(1);
+    expect(runtime.sessions.get(prepared.sessionId).runtimeEnvironment.UNRELATED_SECRET).toBeUndefined();
+    await invoke('/exec', { sessionId: prepared.sessionId, command: 'ros2 node list' });
+    expect(commands.at(-1)).toContain('/bin/bash --noprofile --norc');
+    expect(commands.at(-1)).not.toContain('source '); expect(commands.at(-1)).not.toContain('must-not-copy');
+    expect(commands.at(-1)).toContain("'\\''quoted'\\''");
+    await invoke('/close', { sessionId: prepared.sessionId });
+  });
+  test('fast startup keeps RID and Domain mismatches blocked', async () => {
+    const h = harness(fastSnapshot());
+    expect((await h.invoke('/prepare', { ...config, robotId: 'R_025' })).success).toBe(false);
+    expect((await h.invoke('/prepare', { ...config, domainId: 25 })).success).toBe(false);
+    expect(h.runtime.sessions.size).toBe(0);
+  });
+  test('an incomplete, ambiguous or malformed fast probe falls back to established shell discovery', () => {
+    expect(parseFastProbe('EASYLOOP_FAST_RUNTIME=null')).toBeNull();
+    expect(parseFastProbe(fastSnapshot().replace('python3.12', 'python3;bad'))).toBeNull();
+    expect(parseFastProbe(fastSnapshot().replace('"ROS_VERSION":"2"', '"ROS_VERSION":"1"'))).toBeNull();
+  });
   test('binds channels and exec commands to the live namespace/domain rather than shell defaults', async () => {
     const { runtime, invoke, conn, commands } = harness(snapshot);
     const prepared = await invoke('/prepare', config);

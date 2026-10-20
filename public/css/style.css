@@ -3109,8 +3109,12 @@ body.light-mode .ros-introspect-result pre {
 }
 
 .toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  pointer-events: auto;
   min-width: 220px;
-  max-width: 360px;
+  max-width: min(420px, calc(100vw - 32px));
   padding: 12px 14px;
   border-radius: 6px;
   background: var(--bg-surface);
@@ -3121,6 +3125,41 @@ body.light-mode .ros-introspect-result pre {
   opacity: 0;
   transform: translateY(6px);
   transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.toast-message {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.toast-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  padding: 5px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: rgba(127, 127, 127, 0.12);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.toast-copy:hover,
+.toast-copy:focus-visible {
+  background: rgba(127, 127, 127, 0.25);
+}
+
+.toast-copy:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
 }
 
 .toast.show {
@@ -12567,6 +12606,7 @@ body.light-mode .cmd-result-pre {
   transition: background-color 0.1s, border-color 0.1s, transform 0.05s;
   user-select: none;
   -webkit-user-select: none;
+  touch-action: none;
 }
 
 .jog-btn:hover {
@@ -12709,6 +12749,11 @@ body.light-mode .cmd-result-pre {
   font-size: 10px;
   line-height: 1.35;
 }
+
+#jog-native-settings[hidden] { display: none; }
+#jog-native-settings > p { margin: 6px 0; font-size: 11px; line-height: 1.4; }
+#jog-native-settings > label { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 7px; font-size: 11px; }
+#jog-native-settings input { width: 104px; min-width: 0; }
 
 .jog-velocity-compare > div + div { margin-top: 5px; }
 
@@ -18646,3 +18691,12 @@ body.light-mode .builtin-task-setting-row select {
 .task-runtime-warning { display: block; margin: 8px 12px; color: #b56b16; }
 .ros2-speed-param { display: grid; gap: 6px; margin-bottom: 12px; }
 .ros2-speed-param small { opacity: .75; }
+
+/* ROS generation and read-only discovery metadata */
+.scan-ros-mode{font-size:11px;color:var(--text-secondary,#94a3b8);margin-left:6px;overflow-wrap:anywhere}.scan-discovery-warning{font-size:10px;color:#c98f28}.scan-discovery-note{font-size:10px;color:var(--text-secondary,#94a3b8)}.rm-scan-item{flex-wrap:wrap}
+
+.robot-manager-modal-content .rm-scan-mode{width:172px;min-width:172px;max-width:100%}.rm-scan-item .scan-ros-mode{flex-basis:100%;margin-left:0;text-align:left}
+
+.scheduler-session-note{font-size:12px;line-height:1.8;color:var(--text-secondary);padding:10px;border:1px solid var(--border-default);border-radius:8px}.sched-status{font-size:12px;line-height:1.7;margin-top:6px;overflow-wrap:anywhere}.scheduler-reservation{padding:10px;font-size:11px;overflow-wrap:anywhere;border:1px solid var(--border-default);margin:8px 0}.sched-actions{display:flex;flex-wrap:wrap;gap:6px}.scheduler-item{align-items:flex-start}.scheduler-log-item{overflow-wrap:anywhere}@media(max-width:760px){.scheduler-item{flex-direction:column}.scheduler-add-modal-content{max-height:90vh;overflow:auto}}
+
+.scheduler-item.sched-unknown{opacity:1;border-color:#ad813b}.sched-unknown .sched-status{color:#d5a454}
